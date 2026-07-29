@@ -2,11 +2,17 @@
 
 Plugin for XivLauncher/Dalamud to help with your day-to-day market operations.
 
+> **台服（TC）分支說明**
+>
+> 這是 [PunishXIV/Marketbuddy](https://github.com/PunishXIV/Marketbuddy) 針對**台服官方繁中版**
+> （Dalamud API 13）維護的 fork，由 [ffxiv-tc-port](https://github.com/ffxiv-tc-port) 發佈。
+> 請**不要**改用上游的發佈清單安裝 —— 上游版本已進入 API 15，在台服客戶端載不起來。
+
 ## How to get
 
-1. Dalamud settings -> Experimental
-2. Add `https://raw.githubusercontent.com/Chalkos/Marketbuddy/main/repo.json` and enable it
-3. Install from the plugin list
+1. Dalamud 設定 -> 實驗性功能（Experimental）
+2. 在「自訂插件庫」加入 `https://raw.githubusercontent.com/ffxiv-tc-port/DalamudPluginsTC/main/repo.json` 並啟用
+3. 從插件列表安裝
 
 ## Commands
 
