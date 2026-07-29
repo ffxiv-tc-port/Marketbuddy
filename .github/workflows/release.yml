@@ -1,3 +1,4 @@
+# 台服 (TC) 發版。由 release_plugin.py 以 workflow_dispatch 觸發，Dalamud 釘在 API13 (13.0.0.6)。
 name: Release
 
 on:

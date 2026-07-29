@@ -1,3 +1,5 @@
+# 台服 (TC) 建置檢查。Dalamud 釘在 API13 (13.0.0.6)，外掛必須是 net9.0-windows7.0。
+# gate 會比對 VersionPrefix 與 7.15.0 基準，不同才會真的編譯。
 name: Build Check
 
 on:
