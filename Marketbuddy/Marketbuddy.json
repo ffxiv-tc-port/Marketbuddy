@@ -1,6 +1,11 @@
 {
-    "Author": "Chalkos",
-    "Name": "Marketbuddy",
-    "Punchline": "Less clicks, more gil!",
-    "Description": "Helper for your day-to-day market operations.",
+  "Author": "Chalkos",
+  "Name": "Marketbuddy",
+  "Punchline": "少點幾下，多賺點金幣！",
+  "Description": "市場公告板上架與調價的操作輔助。點選「調整價格」時會一次開啟改價視窗、目前市場標價列表與成交紀錄；點一下列表中的商品，你的售價就會自動設為該價格減 1 金幣並跳回商品列表，同時把價格複製到剪貼簿。若要把同一個價格套用到多個商品，按住 Ctrl 再點「調整價格」即可直接沿用剪貼簿裡的數值。按住 Shift 可暫時略過部分自動化。各項功能都能在設定視窗（/mbuddy）中個別開關。",
+  "InternalName": "Marketbuddy",
+  "ApplicableVersion": "any",
+  "RepoUrl": "https://github.com/ffxiv-tc-port/Marketbuddy",
+  "IconUrl": "https://raw.githubusercontent.com/ffxiv-tc-port/DalamudPluginsTC/main/icons/Marketbuddy.png",
+  "DalamudApiLevel": 13
 }
