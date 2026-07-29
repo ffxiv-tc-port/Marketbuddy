@@ -35,14 +35,18 @@ namespace Marketbuddy
             try
             {
                 DalamudInitialize(pluginInterface);
-                
+
+                // Must run before the UI is constructed or the command registered, as those
+                // resolve their .Loc() text once at construction time.
+                Localization.Init(pluginInterface.AssemblyLocation.DirectoryName);
+
                 MarketGuiEventHandler = new MarketGuiEventHandler();
 
                 PluginUi = new PluginUI(this);
 
                 Common.Dalamud.CommandManager.AddHandler(commandName, new CommandInfo(OnCommand)
                 {
-                    HelpMessage = "Show plugin configuration window."
+                    HelpMessage = "Show plugin configuration window.".Loc()
                 });
 
                 PluginInterface.UiBuilder.Draw += DrawUi;

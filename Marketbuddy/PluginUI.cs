@@ -58,12 +58,12 @@ namespace Marketbuddy
                     ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoScrollWithMouse |
                     ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoBackground))
             {
-                if (ImGui.Checkbox("Limit stack size to ", ref conf.UseMaxStackSize))
+                if (ImGui.Checkbox("Limit stack size to".Loc() + " ", ref conf.UseMaxStackSize))
                     conf.Save();
 
                 ImGui.SameLine();
                 ImGui.SetNextItemWidth(30);
-                if (ImGui.InputInt("items", ref conf.MaximumStackSize, 0))
+                if (ImGui.InputInt("items".Loc(), ref conf.MaximumStackSize, 0))
                     MaximumStackSizeChanged();
 
                 ImGui.SameLine();
@@ -85,7 +85,7 @@ namespace Marketbuddy
                 ImGui.SetNextItemWidth(40);
                 DrawUndercutTypeSelector();
                 ImGui.SameLine();
-                ImGui.Text("undercut");
+                ImGui.Text("undercut".Loc());
             }
 
             ImGui.PopStyleVar(5);
@@ -96,7 +96,7 @@ namespace Marketbuddy
         {
             if (!SettingsVisible) return;
 
-            if (!ImGui.Begin("Marketbuddy config", ref _settingsVisible,
+            if (!ImGui.Begin("Marketbuddy config".Loc() + "###MarketbuddyConfig", ref _settingsVisible,
                     ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoScrollbar |
                     ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.AlwaysAutoResize))
             {
@@ -107,37 +107,42 @@ namespace Marketbuddy
             if(IPCManager.Locks.Count > 0)
             {
                 ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudRed);
-                ImGui.TextWrapped($"Lock commands has been received from these plugins and Marketbuddy operation is fully halted:");
+                ImGui.TextWrapped(
+                    "Lock commands has been received from these plugins and Marketbuddy operation is fully halted:"
+                        .Loc());
                 ImGui.TextUnformatted($"{string.Join("\n", IPCManager.Locks)}");
-                if(ImGui.Button("Release locks"))
+                if(ImGui.Button("Release locks".Loc()))
                 {
                     IPCManager.Locks.Clear();
                 }
                 ImGui.PopStyleColor();
             }
 
-            if (ImGui.Checkbox("Open current prices list when adjusting a price", ref conf.AutoOpenComparePrices))
+            if (ImGui.Checkbox("Open current prices list when adjusting a price".Loc(), ref conf.AutoOpenComparePrices))
                 conf.Save();
 
             DrawNestIndicator(1);
             if (ImGui.Checkbox(
-                    $"Holding SHIFT {(conf.AutoOpenComparePrices ? "prevents the above" : "does the above")}",
+                    "Holding SHIFT ??".Loc(conf.AutoOpenComparePrices
+                        ? "prevents the above".Loc()
+                        : "does the above".Loc()),
                     ref conf.HoldShiftToStop))
                 conf.Save();
 
 
             ImGui.Spacing();
-            if (ImGui.Checkbox("Holding CTRL pastes a price from the clipboard and confirms it",
+            if (ImGui.Checkbox("Holding CTRL pastes a price from the clipboard and confirms it".Loc(),
                     ref conf.HoldCtrlToPaste))
                 conf.Save();
 
             ImGui.Spacing();
-            if (ImGui.Checkbox("Open price history together with current prices list", ref conf.AutoOpenHistory))
+            if (ImGui.Checkbox("Open price history together with current prices list".Loc(), ref conf.AutoOpenHistory))
                 conf.Save();
 
 
             DrawNestIndicator(1);
-            if (ImGui.Checkbox($"Holding ALT {(conf.AutoOpenHistory ? "prevents the above" : "does the above")}",
+            if (ImGui.Checkbox(
+                    "Holding ALT ??".Loc(conf.AutoOpenHistory ? "prevents the above".Loc() : "does the above".Loc()),
                     ref conf.HoldAltHistoryHandling))
                 conf.Save();
 
@@ -157,17 +162,17 @@ namespace Marketbuddy
             ImGui.SetNextItemWidth(55);
             DrawUndercutTypeSelector();
             ImGui.SameLine();
-            ImGui.TextUnformatted("undercut over the selected price");
+            ImGui.TextUnformatted("undercut over the selected price".Loc());
 
             DrawNestIndicator(1);
             if (ImGui.Checkbox(
-                    $"Clicking a price copies that price with a {GetUndercutText()} undercut to the clipboard",
+                    "Clicking a price copies that price with a ?? undercut to the clipboard".Loc(GetUndercutText()),
                     ref conf.SaveToClipboard))
                 conf.Save();
 
             DrawNestIndicator(1);
             if (ImGui.Checkbox(
-                    $"Clicking a price sets your price as that price with a {GetUndercutText()} undercut",
+                    "Clicking a price sets your price as that price with a ?? undercut".Loc(GetUndercutText()),
                     ref conf.AutoInputNewPrice))
             {
                 if (!conf.AutoInputNewPrice)
@@ -178,7 +183,7 @@ namespace Marketbuddy
             DrawNestIndicator(2);
             if (!conf.AutoInputNewPrice) PushStyleDisabled();
             if (ImGui.Checkbox(
-                    "Closes the price list and confirms the new price after selecting it from the list",
+                    "Closes the price list and confirms the new price after selecting it from the list".Loc(),
                     ref conf.AutoConfirmNewPrice))
             {
                 if (!conf.AutoInputNewPrice)
@@ -189,23 +194,23 @@ namespace Marketbuddy
             if (!conf.AutoInputNewPrice) PopStyleDisabled();
 
             ImGui.Spacing();
-            if (ImGui.Checkbox("Limit stack size to", ref conf.UseMaxStackSize))
+            if (ImGui.Checkbox("Limit stack size to".Loc(), ref conf.UseMaxStackSize))
                 conf.Save();
 
             ImGui.SameLine();
             ImGui.SetNextItemWidth(45);
-            if (ImGui.InputInt("items", ref conf.MaximumStackSize, 0))
+            if (ImGui.InputInt("items".Loc(), ref conf.MaximumStackSize, 0))
                 MaximumStackSizeChanged();
 
             DrawNestIndicator(1);
-            if (ImGui.Checkbox("Adjust maximum stack size in retainer sell list UI",
+            if (ImGui.Checkbox("Adjust maximum stack size in retainer sell list UI".Loc(),
                     ref conf.AdjustMaxStackSizeInSellList))
                 conf.Save();
 
             if (conf.AdjustMaxStackSizeInSellList)
             {
                 DrawNestIndicator(2);
-                if (ImGui.DragFloat2("Position (relative to top left)", ref conf.AdjustMaxStackSizeInSellListOffset,
+                if (ImGui.DragFloat2("Position (relative to top left)".Loc(), ref conf.AdjustMaxStackSizeInSellListOffset,
                         1f, 1, float.MaxValue, "%.0f"))
                     conf.Save();
             }
@@ -217,8 +222,8 @@ namespace Marketbuddy
         {
             if (ImGui.BeginCombo("##undercuttype", conf.UndercutUsePercent ? "%" : "gil"))
             {
-                if (ImGui.Selectable("Fixed gil undercut")) conf.UndercutUsePercent = false;
-                if (ImGui.Selectable("Percentage undercut")) conf.UndercutUsePercent = true;
+                if (ImGui.Selectable("Fixed gil undercut".Loc())) conf.UndercutUsePercent = false;
+                if (ImGui.Selectable("Percentage undercut".Loc())) conf.UndercutUsePercent = true;
                 ImGui.EndCombo();
             }
         }

@@ -57,6 +57,9 @@
     </PropertyGroup>
 
     <ItemGroup>
+        <Content Include="LanguageChineseTraditional.ini">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </Content>
         <PackageReference Include="DalamudPackager" Version="13.0.0" />
         <Reference Include="Dalamud">
             <HintPath>$(DalamudLibPath)Dalamud.dll</HintPath>

@@ -91,7 +91,7 @@ namespace Marketbuddy
                     if (int.TryParse(cbValue, out var priceValue) && priceValue > 0)
                         SetPrice(priceValue);
                     else
-                        ChatGui.PrintError("[Marketbuddy] Clipboard does not contain a valid price");
+                        ChatGui.PrintError("[Marketbuddy] Clipboard does not contain a valid price".Loc());
                 }
                 else if (conf.AutoOpenComparePrices && !conf.HoldShiftToStop ||
                          conf.AutoOpenComparePrices && conf.HoldShiftToStop && !Keys[VirtualKey.SHIFT] ||
@@ -138,7 +138,8 @@ namespace Marketbuddy
                         catch (Exception e)
                         {
                             ChatGui.PrintError(
-                                "[Marketbuddy] Error getting price per item or setting the new price. Use /xllog to see the error and submit it in a github issue");
+                                "[Marketbuddy] Error getting price per item or setting the new price. Use /xllog to see the error and submit it in a github issue"
+                                    .Loc());
                             Log.Error(e, "Error getting price per item or setting the new price");
                         }
             }
