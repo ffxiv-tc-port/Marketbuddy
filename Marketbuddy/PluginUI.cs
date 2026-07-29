@@ -210,8 +210,9 @@ namespace Marketbuddy
             if (conf.AdjustMaxStackSizeInSellList)
             {
                 DrawNestIndicator(2);
-                if (ImGui.DragFloat2("Position (relative to top left)".Loc(), ref conf.AdjustMaxStackSizeInSellListOffset,
-                        1f, 1, float.MaxValue, "%.0f"))
+                ImGui.DragFloat2("Position (relative to top left)".Loc(), ref conf.AdjustMaxStackSizeInSellListOffset,
+                        1f, 1, float.MaxValue, "%.0f");
+                if (ImGui.IsItemDeactivatedAfterEdit())
                     conf.Save();
             }
 
