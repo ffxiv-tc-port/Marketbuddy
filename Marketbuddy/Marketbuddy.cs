@@ -28,6 +28,8 @@ namespace Marketbuddy
 
         internal BatchReprice BatchReprice { get; private set; }
 
+        internal MultiRetainerReprice MultiReprice { get; private set; }
+
         // Assembly compatible with dev & published versions 
         public string AssemblyLocation { get; set; } = Assembly.GetExecutingAssembly().Location;
         public string Name => "Marketbuddy";
@@ -45,6 +47,8 @@ namespace Marketbuddy
                 MarketGuiEventHandler = new MarketGuiEventHandler();
 
                 BatchReprice = new BatchReprice(MarketGuiEventHandler);
+
+                MultiReprice = new MultiRetainerReprice(MarketGuiEventHandler, BatchReprice);
 
                 PluginUi = new PluginUI(this);
 
@@ -72,6 +76,7 @@ namespace Marketbuddy
             PluginInterface.UiBuilder.OpenConfigUi -= DrawConfigUi;
             Common.Dalamud.CommandManager.RemoveHandler(commandName);
             PluginUi.Dispose();
+            MultiReprice.Dispose();
             BatchReprice.Dispose();
             MarketGuiEventHandler.Dispose();
             Commons.Dispose();

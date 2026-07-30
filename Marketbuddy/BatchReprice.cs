@@ -93,6 +93,12 @@ namespace Marketbuddy
         // Batch state (for UI / summary).
         private HashSet<ulong> ownRetainerIds = new();
 
+        /// <summary>Fired when a batch runs to completion (all slots processed).</summary>
+        public event System.Action? BatchFinished;
+
+        /// <summary>Fired when a batch is cancelled or aborted, with the reason.</summary>
+        public event System.Action<string>? BatchAborted;
+
         public bool IsRunning => queue.IsRunning;
         public int TotalSlots { get; private set; }
         public int ProcessedSlots { get; private set; }
@@ -653,6 +659,7 @@ namespace Marketbuddy
             ResetRequestState();
             ChatGui.PrintError("[Marketbuddy] Relist cancelled: ?? (?? repriced, ?? skipped, ?? delisted, ?? failed)"
                 .Loc(reason, RepricedCount, SkippedCount, DelistedCount, FailedCount));
+            BatchAborted?.Invoke(reason);
         }
 
         private void OnQueueCompleted()
@@ -660,6 +667,7 @@ namespace Marketbuddy
             ResetRequestState();
             ChatGui.Print("[Marketbuddy] Relist finished: ?? repriced, ?? skipped, ?? delisted, ?? failed"
                 .Loc(RepricedCount, SkippedCount, DelistedCount, FailedCount));
+            BatchFinished?.Invoke();
         }
 
         private void ResetRequestState()

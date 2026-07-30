@@ -38,6 +38,54 @@ namespace Marketbuddy
         {
             DrawSettingsWindow();
             DrawOverlayWindow();
+            DrawRetainerListOverlay();
+        }
+
+        private void DrawRetainerListOverlay()
+        {
+            if (!conf.BatchRepriceEnabled ||
+                !marketbuddy.MarketGuiEventHandler.AddonRetainerList_Position(out Vector2 position)) return;
+
+            var tour = marketbuddy.MultiReprice;
+            var windowVisible = true;
+            ImGui.SetNextWindowPos(position);
+
+            var hSpace = new Vector2(1, 0);
+            ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
+            ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, hSpace);
+            ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, hSpace);
+            ImGui.PushStyleVar(ImGuiStyleVar.ItemInnerSpacing, hSpace);
+            ImGui.PushStyleVar(ImGuiStyleVar.WindowMinSize, Vector2.One);
+            if (ImGui.Begin("Marketbuddy_retainerlist", ref windowVisible,
+                    ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoScrollWithMouse |
+                    ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoBackground))
+            {
+                if (tour.IsRunning)
+                {
+                    ImGui.TextUnformatted("Retainer ??/??: ??".Loc(
+                        tour.CurrentRetainerNumber, tour.TotalRetainers, tour.CurrentRetainerName));
+                    ImGui.SameLine();
+                    if (ImGui.Button("Cancel".Loc() + "##mbtourcancel"))
+                        tour.CancelByButton();
+                }
+                else
+                {
+                    var canStart = tour.CanStart(out var reason);
+                    if (!canStart)
+                        ImGui.BeginDisabled();
+                    if (ImGui.Button("Relist all retainers (lowest -??)".Loc(GetUndercutText()) + "##mbtourstart"))
+                        tour.Start();
+                    if (!canStart)
+                    {
+                        ImGui.EndDisabled();
+                        if (!string.IsNullOrEmpty(reason) && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                            ImGui.SetTooltip(reason);
+                    }
+                }
+            }
+
+            ImGui.PopStyleVar(5);
+            ImGui.End();
         }
 
         private void DrawOverlayWindow()
@@ -113,6 +161,11 @@ namespace Marketbuddy
                     engine.CancelByButton();
                 return;
             }
+
+            // While the all-retainers tour is driving, the tour owns the engine;
+            // don't offer a second start button in the sell list.
+            if (marketbuddy.MultiReprice.IsRunning)
+                return;
 
             var canStart = engine.CanStart(out var reason);
             if (!canStart)

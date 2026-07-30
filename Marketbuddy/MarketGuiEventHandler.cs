@@ -22,8 +22,11 @@ namespace Marketbuddy
         internal Configuration conf => Configuration.GetOrLoad();
 
         private IntPtr AddonRetainerSellList = IntPtr.Zero;
+        private IntPtr AddonRetainerList = IntPtr.Zero;
 
         internal bool IsRetainerSellListOpen => AddonRetainerSellList != IntPtr.Zero;
+
+        internal bool IsRetainerListOpen => AddonRetainerList != IntPtr.Zero;
 
         public MarketGuiEventHandler()
         {
@@ -34,6 +37,31 @@ namespace Marketbuddy
             AddonLifecycle.RegisterListener(AddonEvent.PostSetup, "RetainerSellList", OnRetainerSellListSetup);
             AddonLifecycle.RegisterListener(AddonEvent.PreFinalize, "RetainerSellList", OnRetainerSellListFinalize);
 
+            AddonLifecycle.RegisterListener(AddonEvent.PostSetup, "RetainerList", OnRetainerListSetup);
+            AddonLifecycle.RegisterListener(AddonEvent.PreFinalize, "RetainerList", OnRetainerListFinalize);
+        }
+
+        private void OnRetainerListSetup(AddonEvent type, AddonArgs args)
+        {
+            AddonRetainerList = args.Addon;
+        }
+
+        private void OnRetainerListFinalize(AddonEvent type, AddonArgs args)
+        {
+            AddonRetainerList = IntPtr.Zero;
+        }
+
+        internal unsafe bool AddonRetainerList_Position(out Vector2 position)
+        {
+            position = Vector2.One;
+            if (AddonRetainerList == IntPtr.Zero)
+                return false;
+
+            position = new Vector2(
+                ((AtkUnitBase*)AddonRetainerList)->X + 60,
+                ((AtkUnitBase*)AddonRetainerList)->Y + 6
+            );
+            return true;
         }
 
         private void OnRetainerSellListFinalize(AddonEvent type, AddonArgs args)
@@ -168,6 +196,9 @@ namespace Marketbuddy
             AddonLifecycle.UnregisterListener(AddonEvent.PostSetup, "ItemSearchResult", OnItemSearchResultSetup);
             AddonLifecycle.UnregisterListener(AddonEvent.PostSetup, "RetainerSellList", OnRetainerSellListSetup);
             AddonLifecycle.UnregisterListener(AddonEvent.PreFinalize, "RetainerSellList", OnRetainerSellListFinalize);
+
+            AddonLifecycle.UnregisterListener(AddonEvent.PostSetup, "RetainerList", OnRetainerListSetup);
+            AddonLifecycle.UnregisterListener(AddonEvent.PreFinalize, "RetainerList", OnRetainerListFinalize);
         }
 
         private unsafe void SetPrice(int newPrice)
