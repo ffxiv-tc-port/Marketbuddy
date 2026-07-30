@@ -28,6 +28,9 @@ namespace Marketbuddy
         public bool UndercutUsePercent = false;
         public int UndercutPercent = 1;
 
+        public bool BatchRepriceEnabled = true;
+        public bool BatchCompareHqOnly = true;
+
         public int Version { get; set; } = 0;
 
         // the below exist just to make saving/loading less cumbersome

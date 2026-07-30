@@ -23,6 +23,8 @@ namespace Marketbuddy
 
         private IntPtr AddonRetainerSellList = IntPtr.Zero;
 
+        internal bool IsRetainerSellListOpen => AddonRetainerSellList != IntPtr.Zero;
+
         public MarketGuiEventHandler()
         {
             AddonLifecycle.RegisterListener(AddonEvent.PostReceiveEvent, "ItemSearchResult", OnItemSearchResultReceiveEvent);

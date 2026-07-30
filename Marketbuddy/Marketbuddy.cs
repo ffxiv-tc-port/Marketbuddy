@@ -26,6 +26,8 @@ namespace Marketbuddy
 
         internal MarketGuiEventHandler MarketGuiEventHandler { get; private set; }
 
+        internal BatchReprice BatchReprice { get; private set; }
+
         // Assembly compatible with dev & published versions 
         public string AssemblyLocation { get; set; } = Assembly.GetExecutingAssembly().Location;
         public string Name => "Marketbuddy";
@@ -41,6 +43,8 @@ namespace Marketbuddy
                 Localization.Init(pluginInterface.AssemblyLocation.DirectoryName);
 
                 MarketGuiEventHandler = new MarketGuiEventHandler();
+
+                BatchReprice = new BatchReprice(MarketGuiEventHandler);
 
                 PluginUi = new PluginUI(this);
 
@@ -68,6 +72,7 @@ namespace Marketbuddy
             PluginInterface.UiBuilder.OpenConfigUi -= DrawConfigUi;
             Common.Dalamud.CommandManager.RemoveHandler(commandName);
             PluginUi.Dispose();
+            BatchReprice.Dispose();
             MarketGuiEventHandler.Dispose();
             Commons.Dispose();
         }
