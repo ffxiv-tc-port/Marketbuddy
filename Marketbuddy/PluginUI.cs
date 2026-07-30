@@ -42,7 +42,9 @@ namespace Marketbuddy
 
         private void DrawOverlayWindow()
         {
-            if (!conf.AdjustMaxStackSizeInSellList ||
+            var showStack = conf.AdjustMaxStackSizeInSellList;
+            var showBatch = conf.BatchRepriceEnabled;
+            if ((!showStack && !showBatch) ||
                 !marketbuddy.MarketGuiEventHandler.AddonRetainerSellList_Position(out Vector2 position)) return;
 
             var windowVisible = true;
@@ -58,38 +60,71 @@ namespace Marketbuddy
                     ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoScrollWithMouse |
                     ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoBackground))
             {
-                if (ImGui.Checkbox("Limit stack size to".Loc() + " ", ref conf.UseMaxStackSize))
-                    conf.Save();
-
-                ImGui.SameLine();
-                ImGui.SetNextItemWidth(30);
-                if (ImGui.InputInt("items".Loc(), ref conf.MaximumStackSize, 0))
-                    MaximumStackSizeChanged();
-
-                ImGui.SameLine();
-                ImGui.Dummy(new(20, 1));
-
-                ImGui.SameLine();
-                ImGui.SetNextItemWidth(30);
-                if (conf.UndercutUsePercent)
+                if (showStack)
                 {
-                    if (ImGui.InputInt("##percundercut", ref conf.UndercutPercent, 0))
-                        UndercutPriceChanged();
+                    if (ImGui.Checkbox("Limit stack size to".Loc() + " ", ref conf.UseMaxStackSize))
+                        conf.Save();
+
+                    ImGui.SameLine();
+                    ImGui.SetNextItemWidth(30);
+                    if (ImGui.InputInt("items".Loc(), ref conf.MaximumStackSize, 0))
+                        MaximumStackSizeChanged();
+
+                    ImGui.SameLine();
+                    ImGui.Dummy(new(20, 1));
+
+                    ImGui.SameLine();
+                    ImGui.SetNextItemWidth(30);
+                    if (conf.UndercutUsePercent)
+                    {
+                        if (ImGui.InputInt("##percundercut", ref conf.UndercutPercent, 0))
+                            UndercutPriceChanged();
+                    }
+                    else
+                    {
+                        if (ImGui.InputInt("##gilundercut", ref conf.UndercutPrice, 0))
+                            UndercutPriceChanged();
+                    }
+                    ImGui.SameLine();
+                    ImGui.SetNextItemWidth(40);
+                    DrawUndercutTypeSelector();
+                    ImGui.SameLine();
+                    ImGui.Text("undercut".Loc());
                 }
-                else
-                {
-                    if (ImGui.InputInt("##gilundercut", ref conf.UndercutPrice, 0))
-                        UndercutPriceChanged();
-                }
-                ImGui.SameLine();
-                ImGui.SetNextItemWidth(40);
-                DrawUndercutTypeSelector();
-                ImGui.SameLine();
-                ImGui.Text("undercut".Loc());
+
+                if (showBatch)
+                    DrawBatchRepriceRow();
             }
 
             ImGui.PopStyleVar(5);
             ImGui.End();
+        }
+
+        private void DrawBatchRepriceRow()
+        {
+            var engine = marketbuddy.BatchReprice;
+            if (engine.IsRunning)
+            {
+                var currentIndex = Math.Min(engine.ProcessedSlots + 1, engine.TotalSlots);
+                ImGui.TextUnformatted(
+                    "Repricing ??/??: ??".Loc(currentIndex, engine.TotalSlots, engine.CurrentItemName));
+                ImGui.SameLine();
+                if (ImGui.Button("Cancel".Loc() + "##mbbatchcancel"))
+                    engine.CancelByButton();
+                return;
+            }
+
+            var canStart = engine.CanStart(out var reason);
+            if (!canStart)
+                ImGui.BeginDisabled();
+            if (ImGui.Button("Relist all (lowest -??)".Loc(GetUndercutText()) + "##mbbatchstart"))
+                engine.Start();
+            if (!canStart)
+            {
+                ImGui.EndDisabled();
+                if (!string.IsNullOrEmpty(reason) && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                    ImGui.SetTooltip(reason);
+            }
         }
 
         public void DrawSettingsWindow()
@@ -215,6 +250,15 @@ namespace Marketbuddy
                 if (ImGui.IsItemDeactivatedAfterEdit())
                     conf.Save();
             }
+
+            ImGui.Spacing();
+            if (ImGui.Checkbox("Show a one-click relist button in the retainer sell list".Loc(),
+                    ref conf.BatchRepriceEnabled))
+                conf.Save();
+
+            DrawNestIndicator(1);
+            if (ImGui.Checkbox("HQ items only undercut other HQ listings".Loc(), ref conf.BatchCompareHqOnly))
+                conf.Save();
 
             ImGui.End();
         }
