@@ -260,6 +260,31 @@ namespace Marketbuddy
             if (ImGui.Checkbox("HQ items only undercut other HQ listings".Loc(), ref conf.BatchCompareHqOnly))
                 conf.Save();
 
+            DrawNestIndicator(1);
+            if (ImGui.Checkbox("Delist items whose market net (after tax) is below the NPC vendor price".Loc(),
+                    ref conf.BatchDelistBelowVendor))
+                conf.Save();
+
+            DrawNestIndicator(2);
+            ImGui.SetNextItemWidth(45);
+            if (ImGui.InputInt("% market tax (fallback when live rates are unknown)".Loc(),
+                    ref conf.MarketTaxPercent, 0))
+            {
+                conf.MarketTaxPercent = Math.Clamp(conf.MarketTaxPercent, 0, 25);
+                conf.Save();
+            }
+
+            DrawNestIndicator(1);
+            ImGui.TextUnformatted("Delist items whose target price is below".Loc());
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(90);
+            if (ImGui.InputInt("gil (0 = off)".Loc() + "##mbbatchminprice", ref conf.BatchMinPrice, 0))
+            {
+                if (conf.BatchMinPrice < 0)
+                    conf.BatchMinPrice = 0;
+                conf.Save();
+            }
+
             ImGui.End();
         }
 

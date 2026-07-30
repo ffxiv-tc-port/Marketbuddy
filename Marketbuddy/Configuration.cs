@@ -30,6 +30,9 @@ namespace Marketbuddy
 
         public bool BatchRepriceEnabled = true;
         public bool BatchCompareHqOnly = true;
+        public bool BatchDelistBelowVendor = false;
+        public int BatchMinPrice = 0;
+        public int MarketTaxPercent = 5;
 
         public int Version { get; set; } = 0;
 
@@ -61,6 +64,9 @@ namespace Marketbuddy
                 //    conf.HoldShiftToStop = false;
                 if (conf.UndercutPrice < 0)
                     conf.UndercutPrice = 0;
+                if (conf.BatchMinPrice < 0)
+                    conf.BatchMinPrice = 0;
+                conf.MarketTaxPercent = Math.Clamp(conf.MarketTaxPercent, 0, 25);
             }
 
             _cachedConfig = conf;

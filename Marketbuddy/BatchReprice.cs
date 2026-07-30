@@ -53,6 +53,7 @@ namespace Marketbuddy
             public required uint ItemId;
             public required bool IsHq;
             public required string Name;
+            public required uint VendorUnitPrice;
             public int Attempt;
             public SlotPhase Phase = SlotPhase.Throttle;
             public DateTime NotBefore = DateTime.MinValue;
@@ -72,6 +73,10 @@ namespace Marketbuddy
         private int lastAcceptedRequestId = int.MinValue;
         private DateTime lastRequestAt = DateTime.MinValue;
 
+        // Live market tax rates, cached opportunistically from the
+        // TaxRatesReceived event; conf.MarketTaxPercent is the fallback.
+        private IMarketTaxRates? taxRates;
+
         // Batch state (for UI / summary).
         private HashSet<ulong> ownRetainerIds = new();
 
@@ -80,6 +85,7 @@ namespace Marketbuddy
         public int ProcessedSlots { get; private set; }
         public int RepricedCount { get; private set; }
         public int SkippedCount { get; private set; }
+        public int DelistedCount { get; private set; }
         public int FailedCount { get; private set; }
         public string CurrentItemName { get; private set; } = string.Empty;
 
@@ -92,12 +98,14 @@ namespace Marketbuddy
             queue.Completed += OnQueueCompleted;
             MarketBoard.OfferingsReceived += OnOfferingsReceived;
             MarketBoard.HistoryReceived += OnHistoryReceived;
+            MarketBoard.TaxRatesReceived += OnTaxRatesReceived;
             Framework.Update += OnFrameworkUpdate;
         }
 
         public void Dispose()
         {
             Framework.Update -= OnFrameworkUpdate;
+            MarketBoard.TaxRatesReceived -= OnTaxRatesReceived;
             MarketBoard.HistoryReceived -= OnHistoryReceived;
             MarketBoard.OfferingsReceived -= OnOfferingsReceived;
             // Detach handlers first so an unload-time abort stays silent.
@@ -175,13 +183,27 @@ namespace Marketbuddy
                     continue;
 
                 var name = $"#{slot->ItemId}";
+                var priceLow = 0u;
                 if (itemSheet != null && itemSheet.TryGetRow(slot->ItemId, out var row))
+                {
                     name = row.Name.ExtractText();
+                    priceLow = row.PriceLow;
+                }
+
                 var isHq = (slot->Flags & InventoryItem.ItemFlags.HighQuality) != 0;
                 if (isHq)
                     name += $" {(char)SeIconChar.HighQuality}";
 
-                jobs.Add(new SlotJob { Slot = slot->Slot, ItemId = slot->ItemId, IsHq = isHq, Name = name });
+                // NPC vendors pay PriceLow for NQ and PriceLow+1 for HQ (verified
+                // against CriticalCommonLib's production SellToVendorPrice; the
+                // old "HQ = +10%" rule is long gone). PriceLow 0 = unsellable.
+                var vendorUnitPrice = priceLow == 0 ? 0u : isHq ? priceLow + 1 : priceLow;
+
+                jobs.Add(new SlotJob
+                {
+                    Slot = slot->Slot, ItemId = slot->ItemId, IsHq = isHq, Name = name,
+                    VendorUnitPrice = vendorUnitPrice
+                });
             }
 
             if (jobs.Count == 0)
@@ -203,6 +225,7 @@ namespace Marketbuddy
             ProcessedSlots = 0;
             RepricedCount = 0;
             SkippedCount = 0;
+            DelistedCount = 0;
             FailedCount = 0;
             CurrentItemName = string.Empty;
             lastAcceptedRequestId = int.MinValue;
@@ -399,6 +422,28 @@ namespace Marketbuddy
                 return;
             }
 
+            // Delist guards: if the price we are about to set is not worth
+            // keeping on the market, take the item off the board instead.
+            // Both features are opt-in and default to off.
+            if (conf.BatchDelistBelowVendor && job.VendorUnitPrice > 0)
+            {
+                var taxPercent = CurrentTaxPercent();
+                var netUnit = newPrice * (100L - taxPercent) / 100L;
+                if (netUnit < job.VendorUnitPrice)
+                {
+                    DelistSlot(job, inventoryManager, slot,
+                        "[Marketbuddy] ??: market net ?? < NPC ?? gil, delisted".Loc(job.Name, netUnit, job.VendorUnitPrice));
+                    return;
+                }
+            }
+
+            if (conf.BatchMinPrice > 0 && newPrice < (uint)conf.BatchMinPrice)
+            {
+                DelistSlot(job, inventoryManager, slot,
+                    "[Marketbuddy] ??: target price ?? below your minimum ??, delisted".Loc(job.Name, newPrice, conf.BatchMinPrice));
+                return;
+            }
+
             var current = inventoryManager->GetRetainerMarketPrice(job.Slot);
             if (current == newPrice)
             {
@@ -456,18 +501,104 @@ namespace Marketbuddy
             historySeenAt = DateTime.UtcNow;
         }
 
+        private void OnTaxRatesReceived(IMarketTaxRates rates)
+        {
+            // The packet is a generic "result dialog"; sanity-check the values
+            // before trusting it (rates are single-digit percentages).
+            if (rates.ValidUntil <= DateTime.UtcNow)
+                return;
+            if (rates.LimsaLominsaTax > 25 || rates.GridaniaTax > 25 || rates.UldahTax > 25)
+                return;
+            taxRates = rates;
+            Log.Debug($"BatchReprice: cached market tax rates (valid until {rates.ValidUntil:u})");
+        }
+
+        /// <summary>Market tax percent for the active retainer's city; falls back to the configured constant.</summary>
+        private uint CurrentTaxPercent()
+        {
+            var fallback = (uint)Math.Clamp(conf.MarketTaxPercent, 0, 25);
+            if (taxRates == null || taxRates.ValidUntil <= DateTime.UtcNow)
+                return fallback;
+
+            var retainerManager = RetainerManager.Instance();
+            var active = retainerManager == null ? null : retainerManager->GetActiveRetainer();
+            if (active == null)
+                return fallback;
+
+            uint? rate = active->Town switch
+            {
+                RetainerManager.RetainerTown.LimsaLominsa => taxRates.LimsaLominsaTax,
+                RetainerManager.RetainerTown.Gridania => taxRates.GridaniaTax,
+                RetainerManager.RetainerTown.Uldah => taxRates.UldahTax,
+                RetainerManager.RetainerTown.Ishgard => taxRates.IshgardTax,
+                RetainerManager.RetainerTown.Kugane => taxRates.KuganeTax,
+                RetainerManager.RetainerTown.Crystarium => taxRates.CrystariumTax,
+                RetainerManager.RetainerTown.OldSharlayan => taxRates.SharlayanTax,
+                _ => null,
+            };
+            return rate is null or > 25 ? fallback : rate.Value;
+        }
+
+        private void DelistSlot(SlotJob job, InventoryManager* inventoryManager, InventoryItem* slot, string chatMessage)
+        {
+            var quantity = (uint)Math.Max(1, slot->Quantity);
+
+            // Moving the item needs a free destination slot; check before
+            // firing so a full inventory becomes a reported failure, not a
+            // silent no-op. Retainer inventory first, then the player's bags.
+            int result;
+            if (HasFreeRetainerInventorySlot(inventoryManager))
+            {
+                result = inventoryManager->MoveFromRetainerMarketToRetainerInventory(
+                    InventoryType.RetainerMarket, (ushort)job.Slot, quantity);
+            }
+            else if (inventoryManager->GetEmptySlotsInBag() > 0)
+            {
+                result = inventoryManager->MoveFromRetainerMarketToPlayerInventory(
+                    InventoryType.RetainerMarket, (ushort)job.Slot, quantity);
+            }
+            else
+            {
+                Fail(job, "no free inventory space to delist".Loc());
+                return;
+            }
+
+            Log.Debug($"BatchReprice: delist slot {job.Slot} ({job.Name}) qty {quantity}, move returned {result}");
+            ProcessedSlots++;
+            DelistedCount++;
+            ChatGui.Print(chatMessage);
+        }
+
+        private static bool HasFreeRetainerInventorySlot(InventoryManager* inventoryManager)
+        {
+            for (var type = InventoryType.RetainerPage1; type <= InventoryType.RetainerPage7; type++)
+            {
+                var container = inventoryManager->GetInventoryContainer(type);
+                if (container == null || !container->IsLoaded)
+                    continue;
+                for (var i = 0; i < container->Size; i++)
+                {
+                    var slot = inventoryManager->GetInventorySlot(type, i);
+                    if (slot != null && slot->ItemId == 0)
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
         private void OnQueueAborted(string reason)
         {
             ResetRequestState();
-            ChatGui.PrintError("[Marketbuddy] Relist cancelled: ?? (?? repriced, ?? skipped, ?? failed)"
-                .Loc(reason, RepricedCount, SkippedCount, FailedCount));
+            ChatGui.PrintError("[Marketbuddy] Relist cancelled: ?? (?? repriced, ?? skipped, ?? delisted, ?? failed)"
+                .Loc(reason, RepricedCount, SkippedCount, DelistedCount, FailedCount));
         }
 
         private void OnQueueCompleted()
         {
             ResetRequestState();
-            ChatGui.Print("[Marketbuddy] Relist finished: ?? repriced, ?? skipped, ?? failed"
-                .Loc(RepricedCount, SkippedCount, FailedCount));
+            ChatGui.Print("[Marketbuddy] Relist finished: ?? repriced, ?? skipped, ?? delisted, ?? failed"
+                .Loc(RepricedCount, SkippedCount, DelistedCount, FailedCount));
         }
 
         private void ResetRequestState()
