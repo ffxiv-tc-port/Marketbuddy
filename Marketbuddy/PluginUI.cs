@@ -365,7 +365,44 @@ namespace Marketbuddy
                              "##mbclearcache"))
                 marketbuddy.BatchReprice.ClearPriceCache();
 
+            ImGui.Spacing();
+            ImGui.TextUnformatted("Quick listing: hold this key and right-click an item to put it up for sale".Loc());
+            DrawNestIndicator(1);
+            ImGui.SetNextItemWidth(100);
+            if (ImGui.BeginCombo("##mbquicklistkey", QuickListKeyLabel(conf.QuickListKeyCode)))
+            {
+                foreach (var code in QuickLister.SelectableKeyCodes)
+                {
+                    if (ImGui.Selectable(QuickListKeyLabel(code), conf.QuickListKeyCode == code))
+                    {
+                        conf.QuickListKeyCode = code;
+                        conf.Save();
+                    }
+                }
+
+                ImGui.EndCombo();
+            }
+
+            DrawNestIndicator(1);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "Pick a key that is not used elsewhere: CTRL already pastes the clipboard price when the sale window opens, and avoid AutoRetainer's own quick-sale key if you have one bound."
+                    .Loc());
+            ImGui.PopStyleColor();
+
             ImGui.End();
+        }
+
+        private static string QuickListKeyLabel(int keyCode)
+        {
+            return keyCode switch
+            {
+                0 => "None".Loc(),
+                0x10 => "SHIFT",
+                0x11 => "CTRL",
+                0x12 => "ALT",
+                _ => $"0x{keyCode:X}",
+            };
         }
 
         private void DrawUndercutTypeSelector()

@@ -39,6 +39,23 @@ namespace Marketbuddy.Common
             retainerList->FireCallback(4, values, true);
         }
 
+        /// <summary>Context menu entry selection: Callback(0, index, 0u, 0, 0), same shape as AutoRetainer's QuickSellItems.</summary>
+        public static void FireContextMenuSelect(AtkUnitBase* contextMenu, int index)
+        {
+            var values = stackalloc AtkValue[5];
+            values[0].Type = ValueType.Int;
+            values[0].Int = 0;
+            values[1].Type = ValueType.Int;
+            values[1].Int = index;
+            values[2].Type = ValueType.UInt;
+            values[2].UInt = 0;
+            values[3].Type = ValueType.Int;
+            values[3].Int = 0;
+            values[4].Type = ValueType.Int;
+            values[4].Int = 0;
+            contextMenu->FireCallback(5, values, true);
+        }
+
         /// <summary>Fires a single-int callback (list selections use the entry index, -1 closes list addons).</summary>
         public static void FireIntCallback(AtkUnitBase* addon, int value)
         {

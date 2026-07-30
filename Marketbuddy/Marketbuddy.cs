@@ -30,6 +30,8 @@ namespace Marketbuddy
 
         internal MultiRetainerReprice MultiReprice { get; private set; }
 
+        internal QuickLister? QuickLister { get; private set; }
+
         // Assembly compatible with dev & published versions 
         public string AssemblyLocation { get; set; } = Assembly.GetExecutingAssembly().Location;
         public string Name => "Marketbuddy";
@@ -50,6 +52,17 @@ namespace Marketbuddy
                 MarketGuiEventHandler.BatchEngine = BatchReprice;
 
                 MultiReprice = new MultiRetainerReprice(MarketGuiEventHandler, BatchReprice);
+
+                try
+                {
+                    QuickLister = new QuickLister(BatchReprice, MultiReprice);
+                }
+                catch (Exception e)
+                {
+                    // Address resolution failure only disables quick listing;
+                    // the rest of the plugin keeps working.
+                    Log.Error(e, "QuickLister could not be initialized, quick listing disabled");
+                }
 
                 PluginUi = new PluginUI(this);
 
@@ -77,6 +90,7 @@ namespace Marketbuddy
             PluginInterface.UiBuilder.OpenConfigUi -= DrawConfigUi;
             Common.Dalamud.CommandManager.RemoveHandler(commandName);
             PluginUi.Dispose();
+            QuickLister?.Dispose();
             MultiReprice.Dispose();
             BatchReprice.Dispose();
             MarketGuiEventHandler.Dispose();
