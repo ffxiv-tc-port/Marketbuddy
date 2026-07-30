@@ -55,7 +55,8 @@ namespace Marketbuddy
 
                 try
                 {
-                    QuickLister = new QuickLister(BatchReprice, MultiReprice);
+                    QuickLister = new QuickLister(MarketGuiEventHandler, BatchReprice, MultiReprice);
+                    MarketGuiEventHandler.QuickLister = QuickLister;
                 }
                 catch (Exception e)
                 {

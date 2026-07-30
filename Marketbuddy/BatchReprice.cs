@@ -57,6 +57,7 @@ namespace Marketbuddy
             public required uint VendorUnitPrice;
             public int Attempt;
             public bool FromCache;
+            public bool QuickListed;
             public SlotPhase Phase = SlotPhase.Throttle;
             public DateTime NotBefore = DateTime.MinValue;
             public DateTime WaitStart;
@@ -200,36 +201,13 @@ namespace Marketbuddy
 
             // Snapshot every listed slot of the active retainer. Pointers are
             // null-checked before any dereference.
-            var itemSheet = DataManager.GetExcelSheet<Item>();
             var jobs = new List<SlotJob>();
             for (var i = 0; i < container->Size; i++)
             {
                 var slot = inventoryManager->GetInventorySlot(InventoryType.RetainerMarket, i);
                 if (slot == null || slot->ItemId == 0)
                     continue;
-
-                var name = $"#{slot->ItemId}";
-                var priceLow = 0u;
-                if (itemSheet != null && itemSheet.TryGetRow(slot->ItemId, out var row))
-                {
-                    name = row.Name.ExtractText();
-                    priceLow = row.PriceLow;
-                }
-
-                var isHq = (slot->Flags & InventoryItem.ItemFlags.HighQuality) != 0;
-                if (isHq)
-                    name += $" {(char)SeIconChar.HighQuality}";
-
-                // NPC vendors pay PriceLow for NQ and PriceLow+1 for HQ (verified
-                // against CriticalCommonLib's production SellToVendorPrice; the
-                // old "HQ = +10%" rule is long gone). PriceLow 0 = unsellable.
-                var vendorUnitPrice = priceLow == 0 ? 0u : isHq ? priceLow + 1 : priceLow;
-
-                jobs.Add(new SlotJob
-                {
-                    Slot = slot->Slot, ItemId = slot->ItemId, IsHq = isHq, Name = name,
-                    VendorUnitPrice = vendorUnitPrice
-                });
+                jobs.Add(CreateSlotJob(slot));
             }
 
             if (jobs.Count == 0)
@@ -238,13 +216,76 @@ namespace Marketbuddy
                 return;
             }
 
+            BeginBatch(jobs);
+
+            var active = retainerManager->GetActiveRetainer();
+            var retainerName = active == null ? string.Empty : active->NameString;
+            ChatGui.Print("[Marketbuddy] Relisting ?? item(s) (retainer: ??)...".Loc(jobs.Count, retainerName));
+        }
+
+        /// <summary>
+        /// Runs the full pipeline (compare via cache/request, undercut,
+        /// thresholds, delist) for one just-quick-listed slot that is parked at
+        /// the price cap. Returns false when the engine cannot start right now.
+        /// </summary>
+        public bool StartQuickReprice(short slotIndex)
+        {
+            if (!CanStart(out _))
+                return false;
+
+            var inventoryManager = InventoryManager.Instance();
+            var slot = inventoryManager == null
+                ? null
+                : inventoryManager->GetInventorySlot(InventoryType.RetainerMarket, slotIndex);
+            if (slot == null || slot->ItemId == 0)
+                return false;
+
+            var job = CreateSlotJob(slot);
+            job.QuickListed = true;
+            BeginBatch([job]);
+            return true;
+        }
+
+        private static SlotJob CreateSlotJob(InventoryItem* slot)
+        {
+            var itemSheet = DataManager.GetExcelSheet<Item>();
+            var name = $"#{slot->ItemId}";
+            var priceLow = 0u;
+            if (itemSheet != null && itemSheet.TryGetRow(slot->ItemId, out var row))
+            {
+                name = row.Name.ExtractText();
+                priceLow = row.PriceLow;
+            }
+
+            var isHq = (slot->Flags & InventoryItem.ItemFlags.HighQuality) != 0;
+            if (isHq)
+                name += $" {(char)SeIconChar.HighQuality}";
+
+            // NPC vendors pay PriceLow for NQ and PriceLow+1 for HQ (verified
+            // against CriticalCommonLib's production SellToVendorPrice; the
+            // old "HQ = +10%" rule is long gone). PriceLow 0 = unsellable.
+            var vendorUnitPrice = priceLow == 0 ? 0u : isHq ? priceLow + 1 : priceLow;
+
+            return new SlotJob
+            {
+                Slot = slot->Slot, ItemId = slot->ItemId, IsHq = isHq, Name = name,
+                VendorUnitPrice = vendorUnitPrice
+            };
+        }
+
+        private void BeginBatch(List<SlotJob> jobs)
+        {
             // All of our own retainers: if the lowest listing is ours (any
             // retainer), never undercut ourselves.
             ownRetainerIds = new HashSet<ulong>();
-            foreach (var retainer in retainerManager->Retainers)
+            var retainerManager = RetainerManager.Instance();
+            if (retainerManager != null)
             {
-                if (retainer.RetainerId != 0)
-                    ownRetainerIds.Add(retainer.RetainerId);
+                foreach (var retainer in retainerManager->Retainers)
+                {
+                    if (retainer.RetainerId != 0)
+                        ownRetainerIds.Add(retainer.RetainerId);
+                }
             }
 
             TotalSlots = jobs.Count;
@@ -261,10 +302,6 @@ namespace Marketbuddy
 
             foreach (var job in jobs)
                 queue.Enqueue(job.Name, TimeSpan.FromSeconds(SlotWatchdogSeconds), () => TickSlot(job));
-
-            var active = retainerManager->GetActiveRetainer();
-            var retainerName = active == null ? string.Empty : active->NameString;
-            ChatGui.Print("[Marketbuddy] Relisting ?? item(s) (retainer: ??)...".Loc(jobs.Count, retainerName));
         }
 
         public void CancelByButton() => Cancel("cancelled by user".Loc());
@@ -442,10 +479,7 @@ namespace Marketbuddy
 
             if (captured.Count == 0)
             {
-                // Nothing on sale is a normal situation, not a failure: quiet
-                // debug log, counted as skipped.
-                Log.Debug($"BatchReprice: slot {job.Slot} ({job.Name}) has no market listings, skipped");
-                Skip(job, "[Marketbuddy] ??: no one is selling this item, skipped".Loc(job.Name) + cacheTag);
+                HandleNoListings(job, cacheTag);
                 return;
             }
 
@@ -456,7 +490,17 @@ namespace Marketbuddy
             var lowest = eligible.MinBy(l => l.Price);
             if (ownRetainerIds.Contains(lowest.RetainerId))
             {
-                Skip(job, "[Marketbuddy] ??: your own listing is already the lowest (?? gil)".Loc(job.Name, lowest.Price) + cacheTag);
+                if (!job.QuickListed)
+                {
+                    Skip(job, "[Marketbuddy] ??: your own listing is already the lowest (?? gil)".Loc(job.Name, lowest.Price) + cacheTag);
+                    return;
+                }
+
+                // The quick-listed slot is parked at the price cap and must
+                // never stay there: match our own lowest listing instead of
+                // undercutting ourselves.
+                FinishPricing(job, lowest.Price, cacheTag,
+                    "[Marketbuddy] ??: matched your own lowest listing at ?? gil".Loc(job.Name, lowest.Price) + cacheTag);
                 return;
             }
 
@@ -466,7 +510,42 @@ namespace Marketbuddy
                 ? (long)(lowest.Price * (1f - conf.UndercutPercent / 100f))
                 : lowest.Price - (long)conf.UndercutPrice;
             var newPrice = (uint)Math.Clamp(target, Configuration.MIN_PRICE, Configuration.MAX_PRICE);
+            FinishPricing(job, newPrice, cacheTag, null);
+        }
 
+        /// <summary>
+        /// No market listings for this item. Normal batch slots just keep their
+        /// price; quick-listed slots are parked at the price cap and must never
+        /// be left there silently - fall back to the user's minimum price when
+        /// one is configured, otherwise warn loudly and count as failed.
+        /// </summary>
+        private void HandleNoListings(SlotJob job, string cacheTag)
+        {
+            if (!job.QuickListed)
+            {
+                // Nothing on sale is a normal situation, not a failure: quiet
+                // debug log, counted as skipped.
+                Log.Debug($"BatchReprice: slot {job.Slot} ({job.Name}) has no market listings, skipped");
+                Skip(job, "[Marketbuddy] ??: no one is selling this item, skipped".Loc(job.Name) + cacheTag);
+                return;
+            }
+
+            if (conf.BatchMinPrice > 0)
+            {
+                ChatGui.Print("[Marketbuddy] ??: no one is selling this item, using your minimum price ?? gil".Loc(job.Name, conf.BatchMinPrice) + cacheTag);
+                FinishPricing(job, (uint)conf.BatchMinPrice, cacheTag, null);
+                return;
+            }
+
+            ProcessedSlots++;
+            FailedCount++;
+            Log.Warning($"BatchReprice: quick-listed slot {job.Slot} ({job.Name}) has no market data; still listed at the price cap");
+            ChatGui.PrintError("[Marketbuddy] ??: no market data - still listed at the price cap (??), set a price manually!".Loc(job.Name, Configuration.MAX_PRICE));
+        }
+
+        /// <summary>Slot re-validation, delist thresholds, then the actual price update.</summary>
+        private void FinishPricing(SlotJob job, uint newPrice, string cacheTag, string? successMessage)
+        {
             var inventoryManager = InventoryManager.Instance();
             var slot = GetMarketSlot(job.Slot);
             if (inventoryManager == null || slot == null || slot->ItemId != job.ItemId)
@@ -507,7 +586,7 @@ namespace Marketbuddy
             inventoryManager->SetRetainerMarketPrice(job.Slot, newPrice);
             ProcessedSlots++;
             RepricedCount++;
-            ChatGui.Print("[Marketbuddy] ??: ?? → ?? gil".Loc(job.Name, current, newPrice) + cacheTag);
+            ChatGui.Print(successMessage ?? "[Marketbuddy] ??: ?? → ?? gil".Loc(job.Name, current, newPrice) + cacheTag);
         }
 
         private void OnOfferingsReceived(IMarketBoardCurrentOfferings offerings)

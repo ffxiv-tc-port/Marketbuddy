@@ -24,6 +24,9 @@ namespace Marketbuddy
         /// <summary>Injected after construction; shares the delist thresholds and tax logic with the batch engine.</summary>
         internal BatchReprice? BatchEngine { get; set; }
 
+        /// <summary>Injected after construction; lets the quick-list flow take over RetainerSell when it opened it.</summary>
+        internal QuickLister? QuickLister { get; set; }
+
         private IntPtr AddonRetainerSellList = IntPtr.Zero;
         private IntPtr AddonRetainerList = IntPtr.Zero;
 
@@ -115,6 +118,12 @@ namespace Marketbuddy
         {
             DebugMessage("AddonRetainerSell.OnSetup");
             IntPtr addon = args.Addon;
+
+            // A pending quick-list opened this window: its own listener fills
+            // the cap price and confirms; skip the normal accelerator flow
+            // (auto compare / CTRL paste) entirely.
+            if (QuickLister?.IsQuickListPending == true)
+                return;
 
             if (!IPCManager.IsLocked)
             {
@@ -314,6 +323,47 @@ namespace Marketbuddy
                 ChatGui.Print("[Marketbuddy] Listing cancelled, the item stays where it was".Loc());
             }
 
+            return true;
+        }
+
+        /// <summary>
+        /// Quick-list path: unconditionally fills the asking price and clicks
+        /// confirm on RetainerSell (independent of the accelerator settings -
+        /// this flow's contract is fully automatic listing). Respects the
+        /// stack-size limit setting. Returns false when the addon does not
+        /// look like the expected RetainerSell layout.
+        /// </summary>
+        internal unsafe bool QuickListFillAndConfirm(IntPtr addonPtr, int price)
+        {
+            var retainerSell = (AtkUnitBase*)addonPtr;
+            if (retainerSell == null)
+                return false;
+
+            if (retainerSell->UldManager.NodeListCount != 23)
+            {
+                Log.Warning("QuickList: unexpected fields in addon RetainerSell");
+                return false;
+            }
+
+            var priceComponentNumericInput =
+                (AtkComponentNumericInput*)retainerSell->UldManager.NodeList[15]->GetComponent();
+            var quantityComponentNumericInput =
+                (AtkComponentNumericInput*)retainerSell->UldManager.NodeList[11]->GetComponent();
+            if (priceComponentNumericInput == null)
+                return false;
+
+            priceComponentNumericInput->SetValue(price);
+
+            if (conf.UseMaxStackSize && quantityComponentNumericInput != null)
+            {
+                var quantityValueString = Commons.Utf8StringToString(
+                    ((AtkComponentNumericInputCustom*)quantityComponentNumericInput)->AtkTextNode->NodeText);
+                if (int.TryParse(quantityValueString, out var quantityValue) && quantityValue > conf.MaximumStackSize)
+                    quantityComponentNumericInput->SetValue(conf.MaximumStackSize);
+            }
+
+            var addonRetainerSell = (AddonRetainerSell*)retainerSell;
+            Commons.SendClick(addonPtr, EventType.CHANGE, 21, addonRetainerSell->Confirm);
             return true;
         }
 
