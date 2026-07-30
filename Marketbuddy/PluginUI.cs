@@ -339,6 +339,28 @@ namespace Marketbuddy
             }
 
             DrawNestIndicator(1);
+            ImGui.TextUnformatted("Delist destination".Loc());
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(160);
+            if (ImGui.BeginCombo("##mbdelistdest",
+                    conf.DelistToRetainerInventory ? "Retainer inventory".Loc() : "Player inventory".Loc()))
+            {
+                if (ImGui.Selectable("Player inventory".Loc(), !conf.DelistToRetainerInventory))
+                {
+                    conf.DelistToRetainerInventory = false;
+                    conf.Save();
+                }
+
+                if (ImGui.Selectable("Retainer inventory".Loc(), conf.DelistToRetainerInventory))
+                {
+                    conf.DelistToRetainerInventory = true;
+                    conf.Save();
+                }
+
+                ImGui.EndCombo();
+            }
+
+            DrawNestIndicator(1);
             if (ImGui.Button("Clear price cache (?? items)".Loc(marketbuddy.BatchReprice.PriceCacheCount) +
                              "##mbclearcache"))
                 marketbuddy.BatchReprice.ClearPriceCache();

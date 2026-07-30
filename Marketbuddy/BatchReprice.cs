@@ -596,30 +596,40 @@ namespace Marketbuddy
         {
             var quantity = (uint)Math.Max(1, slot->Quantity);
 
-            // Moving the item needs a free destination slot; check before
-            // firing so a full inventory becomes a reported failure, not a
-            // silent no-op. Retainer inventory first, then the player's bags.
+            // Destination is a user setting (player inventory by default).
+            // Deliberately NO silent fallback to the other container: a full
+            // destination is a reported failure and the batch moves on.
             int result;
-            if (HasFreeRetainerInventorySlot(inventoryManager))
+            string destinationTag;
+            if (conf.DelistToRetainerInventory)
             {
+                if (!HasFreeRetainerInventorySlot(inventoryManager))
+                {
+                    Fail(job, "retainer inventory is full, cannot delist".Loc());
+                    return;
+                }
+
                 result = inventoryManager->MoveFromRetainerMarketToRetainerInventory(
                     InventoryType.RetainerMarket, (ushort)job.Slot, quantity);
-            }
-            else if (inventoryManager->GetEmptySlotsInBag() > 0)
-            {
-                result = inventoryManager->MoveFromRetainerMarketToPlayerInventory(
-                    InventoryType.RetainerMarket, (ushort)job.Slot, quantity);
+                destinationTag = " " + "(moved to retainer inventory)".Loc();
             }
             else
             {
-                Fail(job, "no free inventory space to delist".Loc());
-                return;
+                if (inventoryManager->GetEmptySlotsInBag() == 0)
+                {
+                    Fail(job, "your inventory is full, cannot delist".Loc());
+                    return;
+                }
+
+                result = inventoryManager->MoveFromRetainerMarketToPlayerInventory(
+                    InventoryType.RetainerMarket, (ushort)job.Slot, quantity);
+                destinationTag = " " + "(moved to your inventory)".Loc();
             }
 
             Log.Debug($"BatchReprice: delist slot {job.Slot} ({job.Name}) qty {quantity}, move returned {result}");
             ProcessedSlots++;
             DelistedCount++;
-            ChatGui.Print(chatMessage);
+            ChatGui.Print(chatMessage + destinationTag);
         }
 
         /// <summary>

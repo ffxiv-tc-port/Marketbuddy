@@ -33,6 +33,7 @@ namespace Marketbuddy
         public bool BatchDelistBelowVendor = false;
         public int BatchMinPrice = 0;
         public int MarketTaxPercent = 5;
+        public bool DelistToRetainerInventory = false;
 
         public int Version { get; set; } = 0;
 
