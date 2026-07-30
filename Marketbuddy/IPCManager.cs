@@ -28,14 +28,24 @@ namespace Marketbuddy
         }
 
         /// <summary>
-        /// True when AutoRetainer is installed and its MultiMode is enabled.
-        /// AutoRetainer exposes no fine-grained "scheduler busy" IPC, so this
-        /// coarse flag is the best mutual-exclusion signal available; batch
-        /// operations refuse to start while it is set to avoid two automations
-        /// fighting over the same summoning bell.
+        /// True when AutoRetainer is actively driving retainer automation.
+        /// Prefers our fork's precise "AutoRetainer.IsBusy" endpoint
+        /// (PluginEnabled || MultiMode.Active || TaskManager.IsBusy); when that
+        /// endpoint does not exist (older AutoRetainer builds) it falls back to
+        /// the coarse MultiMode-enabled flag. AutoRetainer absent or IPC not
+        /// ready: silently treated as not busy.
         /// </summary>
-        internal static bool IsAutoRetainerMultiModeEnabled()
+        internal static bool IsAutoRetainerBusy()
         {
+            try
+            {
+                return Svc.PluginInterface.GetIpcSubscriber<bool>("AutoRetainer.IsBusy").InvokeFunc();
+            }
+            catch
+            {
+                // Endpoint missing (older AutoRetainer): coarse fallback below.
+            }
+
             try
             {
                 return Svc.PluginInterface.GetIpcSubscriber<bool>("AutoRetainer.GetMultiModeEnabled").InvokeFunc();

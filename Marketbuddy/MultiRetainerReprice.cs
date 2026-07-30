@@ -49,6 +49,7 @@ namespace Marketbuddy
 
         private DateTime lastUiAction = DateTime.MinValue;
         private DateTime lastTalkClick = DateTime.MinValue;
+        private DateTime lastAutoRetainerPoll = DateTime.MinValue;
         private bool engineBatchAborted;
         private string engineAbortReason = string.Empty;
         private bool aborting;
@@ -92,9 +93,9 @@ namespace Marketbuddy
                 return false;
             }
 
-            if (IPCManager.IsAutoRetainerMultiModeEnabled())
+            if (IPCManager.IsAutoRetainerBusy())
             {
-                reason = "AutoRetainer MultiMode is enabled, disable it first".Loc();
+                reason = "AutoRetainer is busy (or MultiMode is enabled), stop it first".Loc();
                 return false;
             }
 
@@ -226,6 +227,18 @@ namespace Marketbuddy
                 {
                     Abort("manual price adjustment detected".Loc());
                     return;
+                }
+
+                // AutoRetainer mutual exclusion, polled at 1 Hz during
+                // navigation; while the engine runs its own poll covers it.
+                if ((DateTime.UtcNow - lastAutoRetainerPoll).TotalMilliseconds >= 1000)
+                {
+                    lastAutoRetainerPoll = DateTime.UtcNow;
+                    if (IPCManager.IsAutoRetainerBusy())
+                    {
+                        Abort("AutoRetainer became busy".Loc());
+                        return;
+                    }
                 }
             }
 

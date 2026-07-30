@@ -80,6 +80,7 @@ namespace Marketbuddy
         private uint pendingItemId;
         private int lastAcceptedRequestId = int.MinValue;
         private DateTime lastRequestAt = DateTime.MinValue;
+        private DateTime lastAutoRetainerPoll = DateTime.MinValue;
 
         // Live market tax rates, cached opportunistically from the
         // TaxRatesReceived event; conf.MarketTaxPercent is the fallback.
@@ -145,9 +146,9 @@ namespace Marketbuddy
                 return false;
             }
 
-            if (IPCManager.IsAutoRetainerMultiModeEnabled())
+            if (IPCManager.IsAutoRetainerBusy())
             {
-                reason = "AutoRetainer MultiMode is enabled, disable it first".Loc();
+                reason = "AutoRetainer is busy (or MultiMode is enabled), stop it first".Loc();
                 return false;
             }
 
@@ -298,6 +299,18 @@ namespace Marketbuddy
             {
                 Cancel("manual price adjustment detected".Loc());
                 return;
+            }
+
+            // AutoRetainer mutual exclusion, polled at 1 Hz: if it starts
+            // driving retainers mid-batch, we stand down immediately.
+            if ((DateTime.UtcNow - lastAutoRetainerPoll).TotalMilliseconds >= 1000)
+            {
+                lastAutoRetainerPoll = DateTime.UtcNow;
+                if (IPCManager.IsAutoRetainerBusy())
+                {
+                    Cancel("AutoRetainer became busy".Loc());
+                    return;
+                }
             }
 
             queue.Update();
