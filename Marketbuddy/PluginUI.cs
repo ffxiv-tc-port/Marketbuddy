@@ -285,6 +285,11 @@ namespace Marketbuddy
                 conf.Save();
             }
 
+            DrawNestIndicator(1);
+            if (ImGui.Button("Clear price cache (?? items)".Loc(marketbuddy.BatchReprice.PriceCacheCount) +
+                             "##mbclearcache"))
+                marketbuddy.BatchReprice.ClearPriceCache();
+
             ImGui.End();
         }
 

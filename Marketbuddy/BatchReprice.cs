@@ -38,6 +38,7 @@ namespace Marketbuddy
         private const int MaxAttempts = 2;           // 1 initial attempt + 1 retry per slot
         private const int SlotWatchdogSeconds = 30;  // hard per-slot watchdog (queue-level safety net)
         private const int EmptyResultGraceMs = 1000; // history seen + this long with no offerings => nothing on sale
+        private const int PriceCacheTtlMinutes = 30; // reuse market data for the same item within this window
 
         private enum SlotPhase
         {
@@ -55,9 +56,16 @@ namespace Marketbuddy
             public required string Name;
             public required uint VendorUnitPrice;
             public int Attempt;
+            public bool FromCache;
             public SlotPhase Phase = SlotPhase.Throttle;
             public DateTime NotBefore = DateTime.MinValue;
             public DateTime WaitStart;
+        }
+
+        private sealed class CachedOfferings
+        {
+            public required DateTime At;
+            public required List<(uint Price, bool IsHq, ulong RetainerId)> Listings;
         }
 
         private readonly MarketGuiEventHandler gui;
@@ -76,6 +84,11 @@ namespace Marketbuddy
         // Live market tax rates, cached opportunistically from the
         // TaxRatesReceived event; conf.MarketTaxPercent is the fallback.
         private IMarketTaxRates? taxRates;
+
+        // In-memory market data cache keyed by item id (shared across batches
+        // and retainers, never persisted). Stores the full first-page listings
+        // so NQ/HQ eligibility is still computed per slot.
+        private readonly Dictionary<uint, CachedOfferings> priceCache = new();
 
         // Batch state (for UI / summary).
         private HashSet<ulong> ownRetainerIds = new();
@@ -286,6 +299,17 @@ namespace Marketbuddy
             switch (job.Phase)
             {
                 case SlotPhase.Throttle:
+                    // Fresh cached market data for this item skips the whole
+                    // request/wait pipeline (and the request throttle).
+                    if (TryGetCachedOfferings(job.ItemId, out var cachedListings))
+                    {
+                        captured.Clear();
+                        captured.AddRange(cachedListings);
+                        job.FromCache = true;
+                        job.Phase = SlotPhase.Apply;
+                        return TickTaskResult.Continue;
+                    }
+
                     if (now < job.NotBefore)
                         return TickTaskResult.Continue;
                     if ((now - lastRequestAt).TotalMilliseconds < ThrottleMs)
@@ -341,6 +365,7 @@ namespace Marketbuddy
                 case SlotPhase.WaitOfferings:
                     if (offeringsReceived)
                     {
+                        StoreCachedOfferings(job.ItemId, captured);
                         job.Phase = SlotPhase.Apply;
                         return TickTaskResult.Continue;
                     }
@@ -356,6 +381,7 @@ namespace Marketbuddy
                     {
                         offeringsPending = false;
                         captured.Clear();
+                        StoreCachedOfferings(job.ItemId, captured);
                         job.Phase = SlotPhase.Apply;
                         return TickTaskResult.Continue;
                     }
@@ -387,12 +413,14 @@ namespace Marketbuddy
 
         private void ApplySlot(SlotJob job)
         {
+            var cacheTag = job.FromCache ? " " + "(cached price)".Loc() : string.Empty;
+
             if (captured.Count == 0)
             {
                 // Nothing on sale is a normal situation, not a failure: quiet
                 // debug log, counted as skipped.
                 Log.Debug($"BatchReprice: slot {job.Slot} ({job.Name}) has no market listings, skipped");
-                Skip(job, "[Marketbuddy] ??: no one is selling this item, skipped".Loc(job.Name));
+                Skip(job, "[Marketbuddy] ??: no one is selling this item, skipped".Loc(job.Name) + cacheTag);
                 return;
             }
 
@@ -403,7 +431,7 @@ namespace Marketbuddy
             var lowest = eligible.MinBy(l => l.Price);
             if (ownRetainerIds.Contains(lowest.RetainerId))
             {
-                Skip(job, "[Marketbuddy] ??: your own listing is already the lowest (?? gil)".Loc(job.Name, lowest.Price));
+                Skip(job, "[Marketbuddy] ??: your own listing is already the lowest (?? gil)".Loc(job.Name, lowest.Price) + cacheTag);
                 return;
             }
 
@@ -432,7 +460,7 @@ namespace Marketbuddy
                 if (netUnit < job.VendorUnitPrice)
                 {
                     DelistSlot(job, inventoryManager, slot,
-                        "[Marketbuddy] ??: market net ?? < NPC ?? gil, delisted".Loc(job.Name, netUnit, job.VendorUnitPrice));
+                        "[Marketbuddy] ??: market net ?? < NPC ?? gil, delisted".Loc(job.Name, netUnit, job.VendorUnitPrice) + cacheTag);
                     return;
                 }
             }
@@ -440,21 +468,21 @@ namespace Marketbuddy
             if (conf.BatchMinPrice > 0 && newPrice < (uint)conf.BatchMinPrice)
             {
                 DelistSlot(job, inventoryManager, slot,
-                    "[Marketbuddy] ??: target price ?? below your minimum ??, delisted".Loc(job.Name, newPrice, conf.BatchMinPrice));
+                    "[Marketbuddy] ??: target price ?? below your minimum ??, delisted".Loc(job.Name, newPrice, conf.BatchMinPrice) + cacheTag);
                 return;
             }
 
             var current = inventoryManager->GetRetainerMarketPrice(job.Slot);
             if (current == newPrice)
             {
-                Skip(job, "[Marketbuddy] ??: already at ?? gil".Loc(job.Name, newPrice));
+                Skip(job, "[Marketbuddy] ??: already at ?? gil".Loc(job.Name, newPrice) + cacheTag);
                 return;
             }
 
             inventoryManager->SetRetainerMarketPrice(job.Slot, newPrice);
             ProcessedSlots++;
             RepricedCount++;
-            ChatGui.Print("[Marketbuddy] ??: ?? → ?? gil".Loc(job.Name, current, newPrice));
+            ChatGui.Print("[Marketbuddy] ??: ?? → ?? gil".Loc(job.Name, current, newPrice) + cacheTag);
         }
 
         private void OnOfferingsReceived(IMarketBoardCurrentOfferings offerings)
@@ -567,6 +595,39 @@ namespace Marketbuddy
             ProcessedSlots++;
             DelistedCount++;
             ChatGui.Print(chatMessage);
+        }
+
+        /// <summary>Number of unexpired entries in the market data cache.</summary>
+        public int PriceCacheCount
+        {
+            get
+            {
+                var cutoff = DateTime.UtcNow.AddMinutes(-PriceCacheTtlMinutes);
+                return priceCache.Count(kv => kv.Value.At > cutoff);
+            }
+        }
+
+        /// <summary>Drops all cached market data so the next batch queries fresh prices.</summary>
+        public void ClearPriceCache() => priceCache.Clear();
+
+        private bool TryGetCachedOfferings(uint itemId, out List<(uint Price, bool IsHq, ulong RetainerId)> listings)
+        {
+            listings = [];
+            if (!priceCache.TryGetValue(itemId, out var entry))
+                return false;
+            if (DateTime.UtcNow - entry.At > TimeSpan.FromMinutes(PriceCacheTtlMinutes))
+            {
+                priceCache.Remove(itemId);
+                return false;
+            }
+
+            listings = entry.Listings;
+            return true;
+        }
+
+        private void StoreCachedOfferings(uint itemId, List<(uint Price, bool IsHq, ulong RetainerId)> listings)
+        {
+            priceCache[itemId] = new CachedOfferings { At = DateTime.UtcNow, Listings = new(listings) };
         }
 
         private static bool HasFreeRetainerInventorySlot(InventoryManager* inventoryManager)
