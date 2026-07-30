@@ -81,7 +81,7 @@ namespace Marketbuddy
         private uint pendingItemId;
         private int lastAcceptedRequestId = int.MinValue;
         private DateTime lastRequestAt = DateTime.MinValue;
-        private DateTime lastAutoRetainerPoll = DateTime.MinValue;
+        private bool suppressionHeld;
 
         // Live market tax rates, cached opportunistically from the
         // TaxRatesReceived event; conf.MarketTaxPercent is the fallback.
@@ -134,6 +134,7 @@ namespace Marketbuddy
             queue.Completed -= OnQueueCompleted;
             if (queue.IsRunning)
                 queue.Abort("plugin unloading");
+            ReleaseSuppressionIfHeld();
         }
 
         public bool CanStart(out string reason)
@@ -147,7 +148,7 @@ namespace Marketbuddy
                 return false;
             }
 
-            if (IPCManager.IsAutoRetainerBusy())
+            if (AutoRetainerBridge.IsBusy)
             {
                 reason = "AutoRetainer is busy (or MultiMode is enabled), stop it first".Loc();
                 return false;
@@ -186,6 +187,13 @@ namespace Marketbuddy
         {
             if (!CanStart(out var reason))
             {
+                if (AutoRetainerBridge.IsBusy)
+                {
+                    AutoRetainerBridge.ArmAvailabilityNotice();
+                    ChatGui.PrintError("[Marketbuddy] AutoRetainer is running - this action was skipped. You will be told when it finishes.".Loc());
+                    return;
+                }
+
                 if (reason.Length > 0)
                     ChatGui.PrintError("[Marketbuddy] Cannot start: ??".Loc(reason));
                 return;
@@ -300,8 +308,22 @@ namespace Marketbuddy
             offeringsReceived = false;
             historySeen = false;
 
+            // Hold AutoRetainer off for the duration of this user-triggered
+            // run; every exit path (completion, cancel, abort, dispose) goes
+            // through ResetRequestState/ForceRelease so it is always restored.
+            AutoRetainerBridge.AcquireSuppression("batch reprice");
+            suppressionHeld = true;
+
             foreach (var job in jobs)
                 queue.Enqueue(job.Name, TimeSpan.FromSeconds(SlotWatchdogSeconds), () => TickSlot(job));
+        }
+
+        private void ReleaseSuppressionIfHeld()
+        {
+            if (!suppressionHeld)
+                return;
+            suppressionHeld = false;
+            AutoRetainerBridge.ReleaseSuppression();
         }
 
         public void CancelByButton() => Cancel("cancelled by user".Loc());
@@ -338,16 +360,12 @@ namespace Marketbuddy
                 return;
             }
 
-            // AutoRetainer mutual exclusion, polled at 1 Hz: if it starts
-            // driving retainers mid-batch, we stand down immediately.
-            if ((DateTime.UtcNow - lastAutoRetainerPoll).TotalMilliseconds >= 1000)
+            // AutoRetainer mutual exclusion (cached at 1 Hz by the bridge): if
+            // it starts driving retainers mid-batch, we stand down immediately.
+            if (AutoRetainerBridge.IsBusy)
             {
-                lastAutoRetainerPoll = DateTime.UtcNow;
-                if (IPCManager.IsAutoRetainerBusy())
-                {
-                    Cancel("AutoRetainer became busy".Loc());
-                    return;
-                }
+                Cancel("AutoRetainer became busy".Loc());
+                return;
             }
 
             queue.Update();
@@ -802,6 +820,12 @@ namespace Marketbuddy
             ResetRequestState();
             ChatGui.PrintError("[Marketbuddy] Relist cancelled: ?? (?? repriced, ?? skipped, ?? delisted, ?? failed)"
                 .Loc(reason, RepricedCount, SkippedCount, DelistedCount, FailedCount));
+            if (AutoRetainerBridge.IsBusy)
+            {
+                AutoRetainerBridge.ArmAvailabilityNotice();
+                ChatGui.Print("[Marketbuddy] Wait for AutoRetainer to finish, then press the button again.".Loc());
+            }
+
             BatchAborted?.Invoke(reason);
         }
 
@@ -815,6 +839,7 @@ namespace Marketbuddy
 
         private void ResetRequestState()
         {
+            ReleaseSuppressionIfHeld();
             offeringsPending = false;
             offeringsReceived = false;
             historySeen = false;

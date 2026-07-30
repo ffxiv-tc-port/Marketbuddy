@@ -107,10 +107,42 @@ namespace Marketbuddy
         private readonly List<PendingReprice> repriceQueue = [];
         private readonly HashSet<short> claimedSlots = [];
 
+        private bool suppressionHeld;
+
         private Configuration conf => Configuration.GetOrLoad();
 
         /// <summary>True while a quick-list initiated RetainerSell open is expected.</summary>
         public bool IsQuickListPending => DateTime.UtcNow < pendingUntil;
+
+        /// <summary>True while any stage of a quick listing is still in flight.</summary>
+        private bool HasWorkInFlight => IsQuickListPending || watches.Count > 0 || repriceQueue.Count > 0;
+
+        private void AcquireSuppression()
+        {
+            if (suppressionHeld)
+                return;
+            suppressionHeld = true;
+            AutoRetainerBridge.AcquireSuppression("quick listing");
+        }
+
+        private void ReleaseSuppressionIfHeld()
+        {
+            if (!suppressionHeld)
+                return;
+            suppressionHeld = false;
+            AutoRetainerBridge.ReleaseSuppression();
+        }
+
+        /// <summary>
+        /// Releases our suppression as soon as nothing is in flight any more.
+        /// The engine holds its own reference while it reprices, so the
+        /// hand-off never leaves a gap.
+        /// </summary>
+        private void UpdateSuppression()
+        {
+            if (suppressionHeld && !HasWorkInFlight && !engine.IsRunning)
+                ReleaseSuppressionIfHeld();
+        }
 
         public QuickLister(MarketGuiEventHandler gui, BatchReprice engine, MultiRetainerReprice tour)
         {
@@ -136,6 +168,7 @@ namespace Marketbuddy
             Framework.Update -= OnFrameworkUpdate;
             AddonLifecycle.UnregisterListener(AddonEvent.PostSetup, "RetainerSell", OnRetainerSellSetup);
             hook.Dispose();
+            ReleaseSuppressionIfHeld();
         }
 
         private void OpenForItemSlotDetour(AgentInventoryContext* agent, InventoryType inventoryType, int slot, int a4, uint addonId)
@@ -161,6 +194,13 @@ namespace Marketbuddy
                 return;
             if (IPCManager.IsLocked || engine.IsRunning || tour.IsRunning)
                 return;
+            if (AutoRetainerBridge.IsBusy)
+            {
+                AutoRetainerBridge.ArmAvailabilityNotice();
+                ChatGui.PrintError("[Marketbuddy] AutoRetainer is running - this action was skipped. You will be told when it finishes.".Loc());
+                return;
+            }
+
             if (!CanSellFrom.Contains(inventoryType))
                 return;
             // The whole flow (cap listing + engine reprice) needs the sell list.
@@ -196,6 +236,9 @@ namespace Marketbuddy
                 pendingName = ResolveItemName(item, out var baseName);
                 pendingBaseName = baseName;
                 pendingUntil = DateTime.UtcNow.AddMilliseconds(PendingTimeoutMs);
+                // Hold AutoRetainer off from the menu jump until the whole
+                // list-then-reprice flow has drained (see UpdateSuppression).
+                AcquireSuppression();
 
                 AddonHelpers.FireContextMenuSelect(addon, i);
                 agent->AgentInterface.Hide();
@@ -255,6 +298,7 @@ namespace Marketbuddy
                 PumpListingWatches();
             if (repriceQueue.Count > 0)
                 PumpRepriceQueue();
+            UpdateSuppression();
         }
 
         private void PumpListingWatches()

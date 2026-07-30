@@ -71,11 +71,12 @@ namespace Marketbuddy
                 else
                 {
                     var canStart = tour.CanStart(out var reason);
-                    if (!canStart)
+                    var disabled = !canStart && !AutoRetainerBridge.IsBusy;
+                    if (disabled)
                         ImGui.BeginDisabled();
                     if (ImGui.Button("Relist all retainers (lowest -??)".Loc(GetUndercutText()) + "##mbtourstart"))
                         tour.Start();
-                    if (!canStart)
+                    if (disabled)
                     {
                         ImGui.EndDisabled();
                         if (!string.IsNullOrEmpty(reason) && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
@@ -168,11 +169,14 @@ namespace Marketbuddy
                 return;
 
             var canStart = engine.CanStart(out var reason);
-            if (!canStart)
+            // When AutoRetainer is the only blocker, keep the button clickable
+            // so pressing it explains the situation instead of doing nothing.
+            var disabled = !canStart && !AutoRetainerBridge.IsBusy;
+            if (disabled)
                 ImGui.BeginDisabled();
             if (ImGui.Button("Relist all (lowest -??)".Loc(GetUndercutText()) + "##mbbatchstart"))
                 engine.Start();
-            if (!canStart)
+            if (disabled)
             {
                 ImGui.EndDisabled();
                 if (!string.IsNullOrEmpty(reason) && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))

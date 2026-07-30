@@ -46,6 +46,8 @@ namespace Marketbuddy
                 // resolve their .Loc() text once at construction time.
                 Localization.Init(pluginInterface.AssemblyLocation.DirectoryName);
 
+                AutoRetainerBridge.Init();
+
                 MarketGuiEventHandler = new MarketGuiEventHandler();
 
                 BatchReprice = new BatchReprice(MarketGuiEventHandler);
@@ -95,6 +97,9 @@ namespace Marketbuddy
             MultiReprice.Dispose();
             BatchReprice.Dispose();
             MarketGuiEventHandler.Dispose();
+            // Last: must run after every engine released its reference so a
+            // leftover suppression can never survive an unload.
+            AutoRetainerBridge.Shutdown();
             Commons.Dispose();
         }
 

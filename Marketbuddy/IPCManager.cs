@@ -56,5 +56,39 @@ namespace Marketbuddy
                 return false;
             }
         }
+
+        /// <summary>
+        /// True when AutoRetainer is currently suppressed (by us or anybody
+        /// else). AutoRetainer absent: false.
+        /// </summary>
+        internal static bool IsAutoRetainerSuppressed()
+        {
+            try
+            {
+                return Svc.PluginInterface.GetIpcSubscriber<bool>("AutoRetainer.GetSuppressed").InvokeFunc();
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Sets AutoRetainer's suppression flag. Returns true when the call
+        /// actually went through (false = AutoRetainer absent / IPC not ready),
+        /// so callers know whether they now own the suppression.
+        /// </summary>
+        internal static bool SetAutoRetainerSuppressed(bool suppressed)
+        {
+            try
+            {
+                Svc.PluginInterface.GetIpcSubscriber<bool, object>("AutoRetainer.SetSuppressed").InvokeAction(suppressed);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
     }
 }

@@ -49,7 +49,7 @@ namespace Marketbuddy
 
         private DateTime lastUiAction = DateTime.MinValue;
         private DateTime lastTalkClick = DateTime.MinValue;
-        private DateTime lastAutoRetainerPoll = DateTime.MinValue;
+        private bool suppressionHeld;
         private bool engineBatchAborted;
         private string engineAbortReason = string.Empty;
         private bool aborting;
@@ -80,6 +80,7 @@ namespace Marketbuddy
             queue.Completed -= OnQueueCompleted;
             if (queue.IsRunning)
                 queue.Abort("plugin unloading");
+            ReleaseSuppressionIfHeld();
         }
 
         public bool CanStart(out string reason)
@@ -93,7 +94,7 @@ namespace Marketbuddy
                 return false;
             }
 
-            if (IPCManager.IsAutoRetainerBusy())
+            if (AutoRetainerBridge.IsBusy)
             {
                 reason = "AutoRetainer is busy (or MultiMode is enabled), stop it first".Loc();
                 return false;
@@ -125,6 +126,13 @@ namespace Marketbuddy
         {
             if (!CanStart(out var reason))
             {
+                if (AutoRetainerBridge.IsBusy)
+                {
+                    AutoRetainerBridge.ArmAvailabilityNotice();
+                    ChatGui.PrintError("[Marketbuddy] AutoRetainer is running - this action was skipped. You will be told when it finishes.".Loc());
+                    return;
+                }
+
                 if (reason.Length > 0)
                     ChatGui.PrintError("[Marketbuddy] Cannot start: ??".Loc(reason));
                 return;
@@ -159,6 +167,11 @@ namespace Marketbuddy
                 queue.Enqueue($"leave {target.Name}", TimeSpan.FromSeconds(NavStepWatchdogSeconds),
                     () => TickLeaveRetainer(ctx, quitEntryText));
             }
+
+            // Hold AutoRetainer off for the whole tour; released on completion,
+            // cancel, abort and dispose alike.
+            AutoRetainerBridge.AcquireSuppression("multi-retainer tour");
+            suppressionHeld = true;
 
             ChatGui.Print("[Marketbuddy] Relisting all retainers: ?? to visit...".Loc(targets.Count));
         }
@@ -229,16 +242,12 @@ namespace Marketbuddy
                     return;
                 }
 
-                // AutoRetainer mutual exclusion, polled at 1 Hz during
-                // navigation; while the engine runs its own poll covers it.
-                if ((DateTime.UtcNow - lastAutoRetainerPoll).TotalMilliseconds >= 1000)
+                // AutoRetainer mutual exclusion (cached at 1 Hz by the bridge);
+                // while the engine runs, its own check covers this.
+                if (AutoRetainerBridge.IsBusy)
                 {
-                    lastAutoRetainerPoll = DateTime.UtcNow;
-                    if (IPCManager.IsAutoRetainerBusy())
-                    {
-                        Abort("AutoRetainer became busy".Loc());
-                        return;
-                    }
+                    Abort("AutoRetainer became busy".Loc());
+                    return;
                 }
             }
 
@@ -408,16 +417,31 @@ namespace Marketbuddy
             engineAbortReason = reason;
         }
 
+        private void ReleaseSuppressionIfHeld()
+        {
+            if (!suppressionHeld)
+                return;
+            suppressionHeld = false;
+            AutoRetainerBridge.ReleaseSuppression();
+        }
+
         private void OnQueueAborted(string reason)
         {
+            ReleaseSuppressionIfHeld();
             CurrentRetainerName = string.Empty;
             ChatGui.PrintError(
                 "[Marketbuddy] Tour cancelled: ?? (?? retainer(s) done: ?? repriced, ?? skipped, ?? delisted, ?? failed)"
                     .Loc(reason, retainersDone, totalRepriced, totalSkipped, totalDelisted, totalFailed));
+            if (AutoRetainerBridge.IsBusy)
+            {
+                AutoRetainerBridge.ArmAvailabilityNotice();
+                ChatGui.Print("[Marketbuddy] Wait for AutoRetainer to finish, then press the button again.".Loc());
+            }
         }
 
         private void OnQueueCompleted()
         {
+            ReleaseSuppressionIfHeld();
             CurrentRetainerName = string.Empty;
             ChatGui.Print(
                 "[Marketbuddy] All retainers done: ?? visited, ?? repriced, ?? skipped, ?? delisted, ?? failed"
