@@ -21,6 +21,9 @@ namespace Marketbuddy
     {
         internal Configuration conf => Configuration.GetOrLoad();
 
+        /// <summary>Injected after construction; shares the delist thresholds and tax logic with the batch engine.</summary>
+        internal BatchReprice? BatchEngine { get; set; }
+
         private IntPtr AddonRetainerSellList = IntPtr.Zero;
         private IntPtr AddonRetainerList = IntPtr.Zero;
 
@@ -205,7 +208,10 @@ namespace Marketbuddy
         {
             var retainerSell = Commons.GetUnitBase("RetainerSell");
             if (retainerSell == null) return;
-            
+
+            if (TryBlockListing(retainerSell, newPrice))
+                return;
+
             if (retainerSell->UldManager.NodeListCount != 23)
                 throw new MarketException("Unexpected fields in addon RetainerSell");
 
@@ -252,6 +258,63 @@ namespace Marketbuddy
             // Client::UI::AddonRetainerSell.ReceiveEvent this=0x214B4D360E0 evt=EventType.CHANGE               a3=21  a4=0x214B920D2E0 (src=0x214B4D360E0; tgt=0x21460686550) a5=0xBB316FE6C8
             var addonRetainerSell = (AddonRetainerSell*)retainerSell;
             Commons.SendClick(new IntPtr(addonRetainerSell), EventType.CHANGE, 21, addonRetainerSell->Confirm);
+        }
+
+        /// <summary>
+        /// Interactive-listing guard (covers the manual flow and listings
+        /// initiated by AutoRetainer's quick "put up for sale" key, which only
+        /// auto-selects the context menu entry and then hands the RetainerSell
+        /// window to us). Purely synchronous - nothing here waits, so nothing
+        /// can hang; worst case the price is simply not filled in.
+        /// Gated by the same opt-in thresholds as the batch delist feature.
+        /// </summary>
+        private unsafe bool TryBlockListing(AtkUnitBase* retainerSell, int newPrice)
+        {
+            var engine = BatchEngine;
+            if (engine == null || newPrice <= 0)
+                return false;
+
+            // Item identity: while the compare-prices list is open,
+            // InfoProxyItemSearch.SearchItemId is authoritative for the item
+            // being priced. Without it only the item-independent minimum-price
+            // check applies.
+            uint itemId = 0;
+            if (Commons.GetUnitBase("ItemSearchResult") != null)
+            {
+                var infoModule = FFXIVClientStructs.FFXIV.Client.UI.Info.InfoModule.Instance();
+                var proxy = infoModule == null
+                    ? null
+                    : (FFXIVClientStructs.FFXIV.Client.UI.Info.InfoProxyItemSearch*)infoModule->GetInfoProxyById(
+                        FFXIVClientStructs.FFXIV.Client.UI.Info.InfoProxyId.ItemSearch);
+                if (proxy != null)
+                    itemId = proxy->SearchItemId;
+            }
+
+            // HQ-ness from the sell window's displayed item name (HQ icon char).
+            var isHq = false;
+            var itemNameNode = ((AddonRetainerSell*)retainerSell)->ItemName;
+            if (itemNameNode != null)
+                isHq = Commons.Utf8StringToString(itemNameNode->NodeText)
+                    .Contains((char)SeIconChar.HighQuality);
+
+            if (!engine.ShouldBlockListing((uint)newPrice, itemId, isHq, out var reason))
+                return false;
+
+            ChatGui.PrintError("[Marketbuddy] Price not set: ??".Loc(reason));
+
+            if (conf.AutoConfirmNewPrice)
+            {
+                // The auto flow would have confirmed immediately; cancel the
+                // whole listing instead so the item stays where it was. Both
+                // closes are one-shot native calls, nothing waits on them.
+                var addonItemSearchResult = Commons.GetUnitBase("ItemSearchResult");
+                if (addonItemSearchResult != null)
+                    addonItemSearchResult->Close(true);
+                retainerSell->Close(true);
+                ChatGui.Print("[Marketbuddy] Listing cancelled, the item stays where it was".Loc());
+            }
+
+            return true;
         }
 
         private unsafe int getPricePerItem(IntPtr /* AtkResNode* */ nodeParam)

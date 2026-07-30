@@ -145,6 +145,12 @@ namespace Marketbuddy
                 return false;
             }
 
+            if (IPCManager.IsAutoRetainerMultiModeEnabled())
+            {
+                reason = "AutoRetainer MultiMode is enabled, disable it first".Loc();
+                return false;
+            }
+
             if (!gui.IsRetainerSellListOpen)
             {
                 reason = "retainer sell list is not open".Loc();
@@ -601,6 +607,41 @@ namespace Marketbuddy
             ProcessedSlots++;
             DelistedCount++;
             ChatGui.Print(chatMessage);
+        }
+
+        /// <summary>
+        /// Shared guard for interactive listings (manual flow and
+        /// AutoRetainer's quick "put up for sale"): same thresholds as the
+        /// batch delist logic, applied to the price about to be entered.
+        /// Gated by the same opt-in settings; itemId 0 (unknown) skips the
+        /// vendor comparison, the minimum-price check is item-independent.
+        /// </summary>
+        public bool ShouldBlockListing(uint price, uint itemId, bool isHq, out string reason)
+        {
+            reason = string.Empty;
+
+            if (conf.BatchDelistBelowVendor && itemId != 0)
+            {
+                var itemSheet = DataManager.GetExcelSheet<Item>();
+                if (itemSheet != null && itemSheet.TryGetRow(itemId, out var row) && row.PriceLow > 0)
+                {
+                    var vendorUnit = isHq ? row.PriceLow + 1u : row.PriceLow;
+                    var netUnit = price * (100L - CurrentTaxPercent()) / 100L;
+                    if (netUnit < vendorUnit)
+                    {
+                        reason = "market net ?? < NPC ?? gil".Loc(netUnit, vendorUnit);
+                        return true;
+                    }
+                }
+            }
+
+            if (conf.BatchMinPrice > 0 && price < (uint)conf.BatchMinPrice)
+            {
+                reason = "price ?? below your minimum ??".Loc(price, conf.BatchMinPrice);
+                return true;
+            }
+
+            return false;
         }
 
         /// <summary>Number of unexpired entries in the market data cache.</summary>

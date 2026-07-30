@@ -47,6 +47,7 @@ namespace Marketbuddy
                 MarketGuiEventHandler = new MarketGuiEventHandler();
 
                 BatchReprice = new BatchReprice(MarketGuiEventHandler);
+                MarketGuiEventHandler.BatchEngine = BatchReprice;
 
                 MultiReprice = new MultiRetainerReprice(MarketGuiEventHandler, BatchReprice);
 

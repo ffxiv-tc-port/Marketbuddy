@@ -92,6 +92,12 @@ namespace Marketbuddy
                 return false;
             }
 
+            if (IPCManager.IsAutoRetainerMultiModeEnabled())
+            {
+                reason = "AutoRetainer MultiMode is enabled, disable it first".Loc();
+                return false;
+            }
+
             if (!gui.IsRetainerListOpen)
             {
                 reason = "retainer list is not open".Loc();

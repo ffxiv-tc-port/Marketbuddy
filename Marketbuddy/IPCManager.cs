@@ -26,5 +26,25 @@ namespace Marketbuddy
             Svc.PluginInterface.GetIpcProvider<string, bool>("Marketbuddy.Unlock").UnregisterFunc();
             Svc.PluginInterface.GetIpcProvider<string, bool>("Marketbuddy.IsLocked").UnregisterFunc();
         }
+
+        /// <summary>
+        /// True when AutoRetainer is installed and its MultiMode is enabled.
+        /// AutoRetainer exposes no fine-grained "scheduler busy" IPC, so this
+        /// coarse flag is the best mutual-exclusion signal available; batch
+        /// operations refuse to start while it is set to avoid two automations
+        /// fighting over the same summoning bell.
+        /// </summary>
+        internal static bool IsAutoRetainerMultiModeEnabled()
+        {
+            try
+            {
+                return Svc.PluginInterface.GetIpcSubscriber<bool>("AutoRetainer.GetMultiModeEnabled").InvokeFunc();
+            }
+            catch
+            {
+                // AutoRetainer absent or IPC not ready: no restriction.
+                return false;
+            }
+        }
     }
 }
