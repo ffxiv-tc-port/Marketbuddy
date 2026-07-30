@@ -37,6 +37,7 @@ namespace Marketbuddy
         private const int RetryBackoffMs = 2000;     // extra wait before the retry attempt
         private const int MaxAttempts = 2;           // 1 initial attempt + 1 retry per slot
         private const int SlotWatchdogSeconds = 30;  // hard per-slot watchdog (queue-level safety net)
+        private const int EmptyResultGraceMs = 1000; // history seen + this long with no offerings => nothing on sale
 
         private enum SlotPhase
         {
@@ -65,6 +66,8 @@ namespace Marketbuddy
         private readonly List<(uint Price, bool IsHq, ulong RetainerId)> captured = new();
         private bool offeringsPending;
         private bool offeringsReceived;
+        private bool historySeen;
+        private DateTime historySeenAt;
         private uint pendingItemId;
         private int lastAcceptedRequestId = int.MinValue;
         private DateTime lastRequestAt = DateTime.MinValue;
@@ -88,12 +91,14 @@ namespace Marketbuddy
             queue.Aborted += OnQueueAborted;
             queue.Completed += OnQueueCompleted;
             MarketBoard.OfferingsReceived += OnOfferingsReceived;
+            MarketBoard.HistoryReceived += OnHistoryReceived;
             Framework.Update += OnFrameworkUpdate;
         }
 
         public void Dispose()
         {
             Framework.Update -= OnFrameworkUpdate;
+            MarketBoard.HistoryReceived -= OnHistoryReceived;
             MarketBoard.OfferingsReceived -= OnOfferingsReceived;
             // Detach handlers first so an unload-time abort stays silent.
             queue.Aborted -= OnQueueAborted;
@@ -203,6 +208,7 @@ namespace Marketbuddy
             lastAcceptedRequestId = int.MinValue;
             offeringsPending = false;
             offeringsReceived = false;
+            historySeen = false;
 
             foreach (var job in jobs)
                 queue.Enqueue(job.Name, TimeSpan.FromSeconds(SlotWatchdogSeconds), () => TickSlot(job));
@@ -285,6 +291,7 @@ namespace Marketbuddy
                     proxy->SearchItemId = job.ItemId;
                     captured.Clear();
                     offeringsReceived = false;
+                    historySeen = false;
                     pendingItemId = job.ItemId;
                     offeringsPending = true;
                     lastRequestAt = now;
@@ -311,6 +318,21 @@ namespace Marketbuddy
                 case SlotPhase.WaitOfferings:
                     if (offeringsReceived)
                     {
+                        job.Phase = SlotPhase.Apply;
+                        return TickTaskResult.Continue;
+                    }
+
+                    // The server sends NO offerings packet at all for an item with
+                    // zero listings (verified against Dalamud's NetworkHandlers:
+                    // zero pages expected when AmountToArrive == 0), but the sale
+                    // history packet of the same request still arrives. History
+                    // seen + a grace period with no offerings page is therefore
+                    // the definitive "nothing on sale" answer: skip immediately,
+                    // no retry, no full timeout.
+                    if (historySeen && (now - historySeenAt).TotalMilliseconds >= EmptyResultGraceMs)
+                    {
+                        offeringsPending = false;
+                        captured.Clear();
                         job.Phase = SlotPhase.Apply;
                         return TickTaskResult.Continue;
                     }
@@ -344,7 +366,10 @@ namespace Marketbuddy
         {
             if (captured.Count == 0)
             {
-                Skip(job, "[Marketbuddy] ??: no listings found, price left unchanged".Loc(job.Name));
+                // Nothing on sale is a normal situation, not a failure: quiet
+                // debug log, counted as skipped.
+                Log.Debug($"BatchReprice: slot {job.Slot} ({job.Name}) has no market listings, skipped");
+                Skip(job, "[Marketbuddy] ??: no one is selling this item, skipped".Loc(job.Name));
                 return;
             }
 
@@ -392,16 +417,24 @@ namespace Marketbuddy
             if (!offeringsPending)
                 return;
 
-            // Later pages of a batch we already consumed share its RequestId.
-            if (offerings.RequestId == lastAcceptedRequestId)
-                return;
-
             var listings = offerings.ItemListings;
-            // Stale response for a previously requested item: ignore. An empty
-            // page cannot be attributed, accept it as "no results" (we only ever
-            // have a single request in flight).
-            if (listings.Count > 0 && listings[0].ItemId != pendingItemId)
-                return;
+            if (listings.Count > 0)
+            {
+                // Later pages of a batch we already consumed share its RequestId.
+                if (offerings.RequestId == lastAcceptedRequestId)
+                    return;
+
+                // Stale response for a previously requested item: ignore.
+                if (listings[0].ItemId != pendingItemId)
+                    return;
+            }
+
+            // An empty response is a definitive "nothing on sale" and is always
+            // accepted while a request is pending: it cannot be a later page of
+            // an earlier batch (those always carry entries), it cannot be
+            // attributed by ItemId, and we only ever have a single request in
+            // flight. Deliberately no RequestId check for it either, so a
+            // non-incrementing RequestId can never make us drop it.
 
             lastAcceptedRequestId = offerings.RequestId;
             captured.Clear();
@@ -410,6 +443,17 @@ namespace Marketbuddy
 
             offeringsPending = false;
             offeringsReceived = true;
+        }
+
+        private void OnHistoryReceived(IMarketBoardHistory history)
+        {
+            if (!offeringsPending || historySeen)
+                return;
+            if (history.ItemId != pendingItemId)
+                return;
+
+            historySeen = true;
+            historySeenAt = DateTime.UtcNow;
         }
 
         private void OnQueueAborted(string reason)
@@ -430,6 +474,7 @@ namespace Marketbuddy
         {
             offeringsPending = false;
             offeringsReceived = false;
+            historySeen = false;
             CurrentItemName = string.Empty;
             var proxy = GetItemSearchProxy();
             if (proxy != null)
