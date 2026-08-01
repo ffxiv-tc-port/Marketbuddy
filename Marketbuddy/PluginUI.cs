@@ -93,7 +93,8 @@ namespace Marketbuddy
         {
             var showStack = conf.AdjustMaxStackSizeInSellList;
             var showBatch = conf.BatchRepriceEnabled;
-            if ((!showStack && !showBatch) ||
+            var quickListPending = marketbuddy.QuickLister?.PendingCount ?? 0;
+            if ((!showStack && !showBatch && quickListPending == 0) ||
                 !marketbuddy.MarketGuiEventHandler.AddonRetainerSellList_Position(out Vector2 position)) return;
 
             var windowVisible = true;
@@ -109,6 +110,9 @@ namespace Marketbuddy
                     ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoScrollWithMouse |
                     ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoBackground))
             {
+                if (quickListPending > 0)
+                    ImGui.TextUnformatted("Quick-list queue: ?? pending".Loc(quickListPending));
+
                 if (showStack)
                 {
                     if (ImGui.Checkbox("Limit stack size to".Loc() + " ", ref conf.UseMaxStackSize))
@@ -210,6 +214,17 @@ namespace Marketbuddy
                 ImGui.PopStyleColor();
             }
 
+            if (ImGui.Checkbox("Auto-retry a market search that looks throttled/stuck".Loc(), ref conf.AutoRequeryOnThrottle))
+                conf.Save();
+
+            DrawNestIndicator(1);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "Applies to any market price list window - the market board search and the retainer sell \"compare prices\" popup alike. No packets, hooks or memory edits: if the server keeps rejecting the query, this simply gives up after a few tries and the window is left as-is."
+                    .Loc());
+            ImGui.PopStyleColor();
+
+            ImGui.Spacing();
             if (ImGui.Checkbox("Open current prices list when adjusting a price".Loc(), ref conf.AutoOpenComparePrices))
                 conf.Save();
 

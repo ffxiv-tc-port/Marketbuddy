@@ -32,6 +32,8 @@ namespace Marketbuddy
 
         internal QuickLister? QuickLister { get; private set; }
 
+        internal ManualRequery ManualRequery { get; private set; }
+
         // Assembly compatible with dev & published versions 
         public string AssemblyLocation { get; set; } = Assembly.GetExecutingAssembly().Location;
         public string Name => "Marketbuddy";
@@ -54,6 +56,8 @@ namespace Marketbuddy
                 MarketGuiEventHandler.BatchEngine = BatchReprice;
 
                 MultiReprice = new MultiRetainerReprice(MarketGuiEventHandler, BatchReprice);
+
+                ManualRequery = new ManualRequery(MarketGuiEventHandler);
 
                 try
                 {
@@ -94,6 +98,7 @@ namespace Marketbuddy
             Common.Dalamud.CommandManager.RemoveHandler(commandName);
             PluginUi.Dispose();
             QuickLister?.Dispose();
+            ManualRequery.Dispose();
             MultiReprice.Dispose();
             BatchReprice.Dispose();
             MarketGuiEventHandler.Dispose();

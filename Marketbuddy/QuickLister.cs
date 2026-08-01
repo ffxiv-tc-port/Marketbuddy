@@ -88,18 +88,35 @@ namespace Marketbuddy
             public required DateTime Deadline;
         }
 
+        private sealed class PendingMenuSelect
+        {
+            public required uint ItemId;
+            public required string Name;
+            public required string BaseName; // sheet name only, for window identity check
+            public required DateTime Deadline;
+        }
+
         private readonly Hook<OpenForItemSlotDelegate> hook;
         private readonly MarketGuiEventHandler gui;
         private readonly BatchReprice engine;
         private readonly MultiRetainerReprice tour;
         private readonly string putUpForSaleText; // Addon sheet row 99
 
-        // One quick-list in flight at a time: set when the menu entry is
-        // selected, consumed when RetainerSell opens (or expires).
-        private uint pendingItemId;
-        private string pendingName = string.Empty;
-        private string pendingBaseName = string.Empty; // sheet name only, for window identity check
-        private DateTime pendingUntil = DateTime.MinValue;
+        // Every quick-list still waiting for its menu-jump to open a
+        // RetainerSell window. A list (not a single pending slot) so a fast
+        // burst of right-clicks - the whole point of queueing - never has one
+        // selection clobber another before its window has had a chance to
+        // open; each entry is matched to whichever RetainerSell instance
+        // shows its item name and expires on its own if that never happens.
+        private readonly List<PendingMenuSelect> pendingMenuSelects = [];
+
+        // True while a RetainerSell window is expected to be open because of
+        // our own automation (just filled + confirmed, waiting for the native
+        // close) - as opposed to a genuine manual price adjustment. BatchReprice
+        // reads IsCapListingInFlight to tell the two apart so listing item #2
+        // never gets mistaken for the user manually overriding item #1's
+        // in-flight headless reprice.
+        private bool awaitingRetainerSellClose;
 
         // Listings confirmed at the cap that we are waiting to see land in a
         // market slot, plus slots waiting for their single-slot engine run.
@@ -111,11 +128,21 @@ namespace Marketbuddy
 
         private Configuration conf => Configuration.GetOrLoad();
 
-        /// <summary>True while a quick-list initiated RetainerSell open is expected.</summary>
-        public bool IsQuickListPending => DateTime.UtcNow < pendingUntil;
+        /// <summary>True while at least one quick-list menu-jump is waiting for its RetainerSell window to open.</summary>
+        public bool IsQuickListPending => pendingMenuSelects.Count > 0;
+
+        /// <summary>
+        /// True while a RetainerSell window open right now is our own doing
+        /// (menu-jump pending, or filled+confirmed and not yet closed) rather
+        /// than the player manually adjusting a price. See <see cref="awaitingRetainerSellClose"/>.
+        /// </summary>
+        public bool IsCapListingInFlight => IsQuickListPending || awaitingRetainerSellClose;
+
+        /// <summary>Total items anywhere in the quick-list pipeline right now - surfaced in the overlay UI.</summary>
+        public int PendingCount => pendingMenuSelects.Count + watches.Count + repriceQueue.Count;
 
         /// <summary>True while any stage of a quick listing is still in flight.</summary>
-        private bool HasWorkInFlight => IsQuickListPending || watches.Count > 0 || repriceQueue.Count > 0;
+        private bool HasWorkInFlight => IsQuickListPending || awaitingRetainerSellClose || watches.Count > 0 || repriceQueue.Count > 0;
 
         private void AcquireSuppression()
         {
@@ -160,12 +187,14 @@ namespace Marketbuddy
             hook.Enable();
 
             AddonLifecycle.RegisterListener(AddonEvent.PostSetup, "RetainerSell", OnRetainerSellSetup);
+            AddonLifecycle.RegisterListener(AddonEvent.PreFinalize, "RetainerSell", OnRetainerSellFinalize);
             Framework.Update += OnFrameworkUpdate;
         }
 
         public void Dispose()
         {
             Framework.Update -= OnFrameworkUpdate;
+            AddonLifecycle.UnregisterListener(AddonEvent.PreFinalize, "RetainerSell", OnRetainerSellFinalize);
             AddonLifecycle.UnregisterListener(AddonEvent.PostSetup, "RetainerSell", OnRetainerSellSetup);
             hook.Dispose();
             ReleaseSuppressionIfHeld();
@@ -192,7 +221,14 @@ namespace Marketbuddy
                 return;
             if (!Keys[(VirtualKey)conf.QuickListKeyCode])
                 return;
-            if (IPCManager.IsLocked || engine.IsRunning || tour.IsRunning)
+            // Deliberately NOT gated on engine.IsRunning: the point of this
+            // queue is that listing item #2 must not wait for item #1's
+            // headless reprice to finish. BatchReprice's own abort checks
+            // read IsCapListingInFlight to avoid mistaking this window for a
+            // manual price adjustment while that reprice is in flight. The
+            // full-retainer tour is a different, exclusive automation and
+            // still blocks quick listing outright.
+            if (IPCManager.IsLocked || tour.IsRunning)
                 return;
             if (AutoRetainerBridge.IsBusy)
             {
@@ -232,10 +268,14 @@ namespace Marketbuddy
                     continue;
                 }
 
-                pendingItemId = item->ItemId;
-                pendingName = ResolveItemName(item, out var baseName);
-                pendingBaseName = baseName;
-                pendingUntil = DateTime.UtcNow.AddMilliseconds(PendingTimeoutMs);
+                var name = ResolveItemName(item, out var baseName);
+                pendingMenuSelects.Add(new PendingMenuSelect
+                {
+                    ItemId = item->ItemId,
+                    Name = name,
+                    BaseName = baseName,
+                    Deadline = DateTime.UtcNow.AddMilliseconds(PendingTimeoutMs),
+                });
                 // Hold AutoRetainer off from the menu jump until the whole
                 // list-then-reprice flow has drained (see UpdateSuppression).
                 AcquireSuppression();
@@ -252,26 +292,38 @@ namespace Marketbuddy
 
         private void OnRetainerSellSetup(AddonEvent type, AddonArgs args)
         {
-            if (!IsQuickListPending)
+            if (pendingMenuSelects.Count == 0)
                 return;
 
-            // Identity guard: only take over the window that shows the item we
-            // just quick-listed. A mismatched window (extreme timing with a
-            // manual open) is left alone and the pending state simply expires.
+            // Identity guard: take over the oldest pending entry whose sheet
+            // name shows up in the window. With several quick-lists queued,
+            // RetainerSell is reused sequentially for each one in turn, so
+            // matching by name (not just "something is pending") keeps a
+            // burst of right-clicks from ever being attributed to the wrong
+            // item. No match (extreme timing with a genuine manual open) is
+            // left alone; every still-pending entry simply expires on its own.
             var itemNameNode = ((AddonRetainerSell*)(IntPtr)args.Addon)->ItemName;
-            if (pendingBaseName.Length > 0 && itemNameNode != null)
+            var shownName = itemNameNode != null ? Commons.Utf8StringToString(itemNameNode->NodeText) : string.Empty;
+
+            var matchIndex = -1;
+            for (var i = 0; i < pendingMenuSelects.Count; i++)
             {
-                var shownName = Commons.Utf8StringToString(itemNameNode->NodeText);
-                if (!shownName.Contains(pendingBaseName, StringComparison.Ordinal))
+                if (pendingMenuSelects[i].BaseName.Length == 0 ||
+                    (shownName.Length > 0 && shownName.Contains(pendingMenuSelects[i].BaseName, StringComparison.Ordinal)))
                 {
-                    Log.Debug($"QuickLister: RetainerSell shows '{shownName}', expected '{pendingBaseName}', not taking over");
-                    return;
+                    matchIndex = i;
+                    break;
                 }
             }
 
-            var itemId = pendingItemId;
-            var name = pendingName;
-            pendingUntil = DateTime.MinValue; // consume
+            if (matchIndex < 0)
+            {
+                Log.Debug($"QuickLister: RetainerSell shows '{shownName}', no pending quick-list matches, not taking over");
+                return;
+            }
+
+            var pending = pendingMenuSelects[matchIndex];
+            pendingMenuSelects.RemoveAt(matchIndex);
 
             // Snapshot the occupied market slots BEFORE confirming so the new
             // listing can be identified when the server ack lands.
@@ -279,26 +331,50 @@ namespace Marketbuddy
 
             if (!gui.QuickListFillAndConfirm(args.Addon, Configuration.MAX_PRICE))
             {
-                ChatGui.PrintError("[Marketbuddy] ??: quick listing failed - set the price manually".Loc(name));
+                ChatGui.PrintError("[Marketbuddy] ??: quick listing failed - set the price manually".Loc(pending.Name));
                 return;
             }
 
+            // The window is still open pending the server's confirmation ack;
+            // BatchReprice must not mistake it for a manual price adjustment
+            // if a previous quick-list's headless reprice is running right now.
+            awaitingRetainerSellClose = true;
+
             watches.Add(new ListingWatch
             {
-                ItemId = itemId,
-                Name = name,
+                ItemId = pending.ItemId,
+                Name = pending.Name,
                 PreListingSlots = preSlots,
                 Deadline = DateTime.UtcNow.AddMilliseconds(ListingAckTimeoutMs),
             });
         }
 
+        private void OnRetainerSellFinalize(AddonEvent type, AddonArgs args)
+        {
+            awaitingRetainerSellClose = false;
+        }
+
         private void OnFrameworkUpdate(IFramework framework)
         {
+            if (pendingMenuSelects.Count > 0)
+                ExpirePendingMenuSelects();
             if (watches.Count > 0)
                 PumpListingWatches();
             if (repriceQueue.Count > 0)
                 PumpRepriceQueue();
             UpdateSuppression();
+        }
+
+        private void ExpirePendingMenuSelects()
+        {
+            for (var i = pendingMenuSelects.Count - 1; i >= 0; i--)
+            {
+                if (DateTime.UtcNow <= pendingMenuSelects[i].Deadline)
+                    continue;
+                var expired = pendingMenuSelects[i];
+                pendingMenuSelects.RemoveAt(i);
+                Log.Debug($"QuickLister: pending menu-select for '{expired.Name}' expired without a matching RetainerSell window");
+            }
         }
 
         private void PumpListingWatches()

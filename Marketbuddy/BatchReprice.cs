@@ -22,10 +22,12 @@ namespace Marketbuddy
     /// applied via InventoryManager.SetRetainerMarketPrice(). RetainerSell /
     /// ItemSearchResult windows are never opened and no native UI is touched.
     /// No hooks, no packet forgery, no memory patches; a stuck market query is
-    /// handled by timeout + one backoff retry, then the slot is skipped.
+    /// handled by timeout + a capped-backoff retry (up to MaxAttempts tries,
+    /// backoff escalating fast then capped low), then the slot is skipped.
     ///
     /// Strictly manual: runs only when the user clicks the button while a
-    /// retainer's sell list (RetainerSellList) is open. Cancellable at any time
+    /// retainer's sell list (RetainerSellList) is open, or when QuickLister
+    /// hands it a single just-listed slot to price. Cancellable at any time
     /// via the cancel button or ESC; closing the sell list also aborts.
     /// </summary>
     internal sealed unsafe class BatchReprice : IDisposable
@@ -34,11 +36,15 @@ namespace Marketbuddy
         // backoff instead of patching the client's "please wait" throttle path.
         private const int ThrottleMs = 500;          // min gap between two market data requests
         private const int OfferingsTimeoutMs = 5000; // max wait for market data per attempt
-        private const int RetryBackoffMs = 2000;     // extra wait before the retry attempt
-        private const int MaxAttempts = 2;           // 1 initial attempt + 1 retry per slot
-        private const int SlotWatchdogSeconds = 30;  // hard per-slot watchdog (queue-level safety net)
+        private const int RetryBackoffBaseMs = 500;  // backoff before retry N is min(N * this, RetryBackoffCapMs)...
+        private const int RetryBackoffCapMs = 2000;  // ...never escalating past this (stays quick even after several stalls)
+        private const int MaxAttempts = 8;           // 1 initial attempt + up to 7 retries per slot
+        private const int SlotWatchdogSeconds = 60;  // hard per-slot watchdog (queue-level safety net; sized for MaxAttempts * OfferingsTimeoutMs + backoffs, worst case ~51s, with margin)
         private const int EmptyResultGraceMs = 1000; // history seen + this long with no offerings => nothing on sale
         private const int PriceCacheTtlMinutes = 30; // reuse market data for the same item within this window
+
+        /// <summary>Backoff before retry attempt N: escalates fast, then caps low - never the multi-second climb of a classic exponential backoff.</summary>
+        private static int RetryBackoffFor(int attempt) => Math.Min(RetryBackoffBaseMs * attempt, RetryBackoffCapMs);
 
         private enum SlotPhase
         {
@@ -160,7 +166,12 @@ namespace Marketbuddy
                 return false;
             }
 
-            if (Commons.GetUnitBase("RetainerSell") != null)
+            // A RetainerSell window that QuickLister itself opened to list the
+            // next item at the price cap is not a manual override - it must
+            // not block starting this item's own reprice (that is the whole
+            // point of queueing quick-lists instead of serializing them
+            // behind engine.IsRunning). See QuickLister.IsCapListingInFlight.
+            if (Commons.GetUnitBase("RetainerSell") != null && gui.QuickLister?.IsCapListingInFlight != true)
             {
                 reason = "close the price adjustment window first".Loc();
                 return false;
@@ -354,7 +365,11 @@ namespace Marketbuddy
                 return;
             }
 
-            if (Commons.GetUnitBase("RetainerSell") != null)
+            // Same carve-out as CanStart: a RetainerSell window opened by
+            // QuickLister listing a *different* item at the price cap while
+            // this job's headless reprice runs in the background is not a
+            // manual intervention and must not abort this run.
+            if (Commons.GetUnitBase("RetainerSell") != null && gui.QuickLister?.IsCapListingInFlight != true)
             {
                 Cancel("manual price adjustment detected".Loc());
                 return;
@@ -433,7 +448,7 @@ namespace Marketbuddy
                             return TickTaskResult.Done;
                         }
 
-                        job.NotBefore = now.AddMilliseconds(RetryBackoffMs);
+                        job.NotBefore = now.AddMilliseconds(RetryBackoffFor(job.Attempt));
                         job.Phase = SlotPhase.Throttle;
                         return TickTaskResult.Continue;
                     }
@@ -475,7 +490,7 @@ namespace Marketbuddy
                             return TickTaskResult.Done;
                         }
 
-                        job.NotBefore = now.AddMilliseconds(RetryBackoffMs);
+                        job.NotBefore = now.AddMilliseconds(RetryBackoffFor(job.Attempt));
                         job.Phase = SlotPhase.Throttle;
                         return TickTaskResult.Continue;
                     }

@@ -14,6 +14,7 @@ namespace Marketbuddy
         public bool HoldShiftToStop = true;
         public bool AutoOpenComparePrices = true;
         public bool AutoOpenHistory = true;
+        public bool AutoRequeryOnThrottle = true;
         public bool SaveToClipboard = true;
         public bool AutoInputNewPrice = true;
         public bool AutoConfirmNewPrice = true;

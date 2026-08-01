@@ -29,10 +29,19 @@ namespace Marketbuddy
 
         private IntPtr AddonRetainerSellList = IntPtr.Zero;
         private IntPtr AddonRetainerList = IntPtr.Zero;
+        private IntPtr AddonItemSearchResult = IntPtr.Zero;
 
         internal bool IsRetainerSellListOpen => AddonRetainerSellList != IntPtr.Zero;
 
         internal bool IsRetainerListOpen => AddonRetainerList != IntPtr.Zero;
+
+        /// <summary>
+        /// True while the market price list (ItemSearchResult) is open, be it
+        /// the standalone market board search or the "compare prices" popup
+        /// opened from a retainer's sell window. Used by <see cref="ManualRequery"/>
+        /// to know when to watch for a stalled/throttled query.
+        /// </summary>
+        internal bool IsItemSearchResultOpen => AddonItemSearchResult != IntPtr.Zero;
 
         public MarketGuiEventHandler()
         {
@@ -40,6 +49,7 @@ namespace Marketbuddy
 
             AddonLifecycle.RegisterListener(AddonEvent.PostSetup, "RetainerSell", OnRetainerSellSetup);
             AddonLifecycle.RegisterListener(AddonEvent.PostSetup, "ItemSearchResult", OnItemSearchResultSetup);
+            AddonLifecycle.RegisterListener(AddonEvent.PreFinalize, "ItemSearchResult", OnItemSearchResultFinalize);
             AddonLifecycle.RegisterListener(AddonEvent.PostSetup, "RetainerSellList", OnRetainerSellListSetup);
             AddonLifecycle.RegisterListener(AddonEvent.PreFinalize, "RetainerSellList", OnRetainerSellListFinalize);
 
@@ -92,6 +102,7 @@ namespace Marketbuddy
         {
             DebugMessage("AddonItemSearchResult.OnSetup");
             IntPtr addon = args.Addon;
+            AddonItemSearchResult = addon;
 
             if (!IPCManager.IsLocked)
             {
@@ -187,6 +198,11 @@ namespace Marketbuddy
             }
         }
 
+        private void OnItemSearchResultFinalize(AddonEvent type, AddonArgs args)
+        {
+            AddonItemSearchResult = IntPtr.Zero;
+        }
+
         internal unsafe bool AddonRetainerSellList_Position(out Vector2 position)
         {
             position = Vector2.One;
@@ -206,6 +222,7 @@ namespace Marketbuddy
 
             AddonLifecycle.UnregisterListener(AddonEvent.PostSetup, "RetainerSell", OnRetainerSellSetup);
             AddonLifecycle.UnregisterListener(AddonEvent.PostSetup, "ItemSearchResult", OnItemSearchResultSetup);
+            AddonLifecycle.UnregisterListener(AddonEvent.PreFinalize, "ItemSearchResult", OnItemSearchResultFinalize);
             AddonLifecycle.UnregisterListener(AddonEvent.PostSetup, "RetainerSellList", OnRetainerSellListSetup);
             AddonLifecycle.UnregisterListener(AddonEvent.PreFinalize, "RetainerSellList", OnRetainerSellListFinalize);
 
