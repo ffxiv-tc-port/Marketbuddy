@@ -39,6 +39,19 @@ namespace Marketbuddy
         public int QuickListKeyCode = 0;
 
         /// <summary>
+        /// 市場資料快取的新鮮度上限（秒）。0 = 停用，每一格都重新向伺服器查一次。
+        ///
+        /// 預設 120 秒的理由（2026-08-02 實機 log，n=463 次首度查詢）：把門檻從 30 秒
+        /// 一路放寬到 30 分鐘，命中率完全不動（27/463 → 29/463），也就是說**放長根本
+        /// 換不到速度**，只會換到越來越舊的價格。另一方面「全雇員巡迴」是共用同一份快取
+        /// 的：一個雇員 20 格在 .16 的節奏下大約要 40～60 秒，所以 60 秒會在巡迴途中就
+        /// 過期。120 秒剛好蓋得住跨雇員重複道具（拆堆疊放在不同雇員是很常見的擺法，而且
+        /// 那正是快取最可能命中、又最不可能算錯價的情況——競爭對手清單是同一份）。
+        /// 舊版寫死 30 分鐘，這裡是**大幅收緊**，不是放寬。
+        /// </summary>
+        public int MarketDataCacheSeconds = 120;
+
+        /// <summary>
         /// 「即時出售品清單」：在遊戲的出售品視窗旁邊，由外掛自己畫一份永遠最新的掛單表。
         /// 純顯示、每幀重讀容器，不做任何遊戲操作、不改任何原生節點（見 LiveSellList 的說明）。
         /// 依市場紅線一律預設關閉；批次改價完成時會提示一次它的存在。
@@ -81,6 +94,7 @@ namespace Marketbuddy
                 if (conf.BatchMinPrice < 0)
                     conf.BatchMinPrice = 0;
                 conf.MarketTaxPercent = Math.Clamp(conf.MarketTaxPercent, 0, 25);
+                conf.MarketDataCacheSeconds = Math.Clamp(conf.MarketDataCacheSeconds, 0, 3600);
             }
 
             _cachedConfig = conf;

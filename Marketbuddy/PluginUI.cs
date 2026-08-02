@@ -382,9 +382,27 @@ namespace Marketbuddy
             }
 
             DrawNestIndicator(1);
-            if (ImGui.Button("Clear price cache (?? items)".Loc(marketbuddy.BatchReprice.PriceCacheCount) +
+            ImGui.TextUnformatted("Reuse market data seen in the last".Loc());
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(70);
+            if (ImGui.InputInt("seconds (0 = always ask the server)".Loc() + "##mbcachettl",
+                    ref conf.MarketDataCacheSeconds, 0))
+            {
+                conf.MarketDataCacheSeconds = Math.Clamp(conf.MarketDataCacheSeconds, 0, 3600);
+                conf.Save();
+            }
+
+            DrawNestIndicator(2);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "Market board answers are delivered to every plugin at once, so anything you (or another plugin) looked up recently is already here and can be reused without asking the server again - that is the single biggest speed-up available without touching the game. Nothing is ever triggered by receiving data; it is only remembered. The cache is dropped whenever you change world or character, and it never stores \"nobody is selling this\" unless this plugin confirmed it itself."
+                    .Loc());
+            ImGui.PopStyleColor();
+
+            DrawNestIndicator(1);
+            if (ImGui.Button("Clear price cache (?? items)".Loc(MarketDataCache.FreshCount(conf.MarketDataCacheSeconds)) +
                              "##mbclearcache"))
-                marketbuddy.BatchReprice.ClearPriceCache();
+                MarketDataCache.Clear();
 
             ImGui.Spacing();
             if (ImGui.Checkbox("Show a live sell list next to the game's one".Loc(), ref conf.LiveSellListOverlay))

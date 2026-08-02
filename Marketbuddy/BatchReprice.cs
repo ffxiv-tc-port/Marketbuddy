@@ -39,19 +39,38 @@ namespace Marketbuddy
         // MarketRequestGate 的類別註解裡，那裡才是唯一真值來源，這裡不重複。
         // 摘要：門檻約 1.5 秒、以「上一次送出」起算，由 MarketRequestGate 自我校準。
         //
-        // 逾時的形狀（同一份 n=417 的實機資料）：
-        //     REQ → HISTORY   ：min 101 / p50 124 / p90 341 / max 509 ms
-        //     REQ → OFFERINGS ：min 250 / p50 475 / p90 682 / max 861 ms
-        // 所以「送出後 1000 ms 內連一個封包都沒有」＝這次請求被吞了，可以立刻判定，
-        // 不必等滿一個泛用逾時。這讓猜錯間隔的代價從 1500 ms 降到 1000 ms。
-        private const int NoResponseDeadlineMs = 1000; // nothing at all by now => the request was swallowed
-        private const int ResponseTimeoutMs = 3000;    // hard cap per attempt once *something* did arrive (safety net)
+        // 🔴 2026-08-02 重新量測的回應延遲（把每一筆 REQUEST 配對到後續同道具的封包，
+        // 不受我們自己的逾時截斷，n=639 次有回應的請求，涵蓋 .14 與 .15 兩段）：
+        //     REQ → 第一個封包：p50 128 / p90 469 / p95 1213 / p99 1802 / **max 1955 ms**
+        //     REQ → HISTORY   ：p50 129 / p90 491 / max 1955 ms
+        //     REQ → OFFERINGS ：p50 476 / p90 765 / max 1989 ms
+        //     HISTORY → OFFERINGS：p50 312 / p99 410 / max 432 ms（n=866，>500 ms 掛零）
+        //
+        // ⚠️ 舊註解寫的「最慢 861 ms」只成立於 16:32–16:36 那段（.14，max 909 ms）。
+        // 19:17–19:36 那段（.15）有一條到 ~1.95 秒的長尾：4.25% 的請求第一個封包超過
+        // 1000 ms、3.36% 超過 1500 ms。所以舊的 NoResponseDeadlineMs=1000 會把
+        // **約 5% 真實但比較慢的回應誤判成「被伺服器吞掉」**，然後去撴寬閘門——
+        // 那正是 MarketRequestGate 註解裡描述的永久卡死路徑。
+        //
+        // 新門檻取 2500 ms：全部 639 筆量到的回應沒有任何一筆超過 2000 ms，2500 ms
+        // 比實測最大值多 28% 餘裕（而且 .16 的閘門會讓我們查得比量測當時更密，
+        // 伺服器延遲有機會更差一點，餘裕留寬一點）。
+        //
+        // 另外，「判定被吞掉」不再等於「立刻去撴寬閘門」：真正的判決延到**要送重試的
+        // 那一刻**才下（見 SlotPhase.Request）。中間只要那件道具的資料落進
+        // MarketDataCache（遲到的答案就是這樣被撿回來的），我們連重試都不會送，
+        // 閘門自然也不會被那次「其實沒被吞」的請求汙染。
+        private const int NoResponseDeadlineMs = 2500; // nothing at all by now => probably swallowed (verdict deferred to retry time)
+        private const int ResponseTimeoutMs = 3500;    // hard cap per attempt once *something* did arrive (safety net; must stay above NoResponseDeadlineMs + EmptyResultGraceMs)
         private const int RetryBackoffBaseMs = 300;    // backoff before retry N is min(N * this, RetryBackoffCapMs)...
         private const int RetryBackoffCapMs = 1200;    // ...never escalating past this (the gate adds its own spacing on top)
         private const int MaxAttempts = 8;           // 1 initial attempt + up to 7 retries per slot
-        private const int SlotWatchdogSeconds = 60;  // hard per-slot watchdog (queue-level safety net; sized for MaxAttempts attempts plus gate spacing and backoffs, with margin)
-        private const int EmptyResultGraceMs = 1000; // history seen + this long with no offerings => nothing on sale
-        private const int PriceCacheTtlMinutes = 30; // reuse market data for the same item within this window
+        // ⚠️ 這個看門狗一到期是**整批中止**（TickTaskQueue.Update → Abort），不是只放棄這一格，
+        // 所以它必須確實蓋得住最壞情況。每次嘗試最壞 = max(閘門 4000, 退避 1200) + ResponseTimeoutMs
+        // 3500 ≈ 7500 ms，×8 次 ≈ 60 秒——剛好等於舊值，等於沒有餘裕。逾時門檻調高之後同步
+        // 拉到 90 秒（約 50% 餘裕）。
+        private const int SlotWatchdogSeconds = 90;  // hard per-slot watchdog (queue-level safety net; sized for MaxAttempts attempts plus gate spacing and backoffs, with margin)
+        private const int EmptyResultGraceMs = 1000; // history seen + this long with no offerings => nothing on sale (measured HISTORY->OFFERINGS max is 432 ms, so this is 2.3x the observed worst case)
 
         /// <summary>Backoff before retry attempt N: escalates fast, then caps low - never the multi-second climb of a classic exponential backoff.</summary>
         private static int RetryBackoffFor(int attempt) => Math.Min(RetryBackoffBaseMs * attempt, RetryBackoffCapMs);
@@ -81,12 +100,14 @@ namespace Marketbuddy
             public DateTime StartedAt = DateTime.MinValue;
             /// <summary>send→send gap of the attempt currently in flight; fed back to the gate when it turns out to have been swallowed.</summary>
             public double SendGapMs = -1;
-        }
-
-        private sealed class CachedOfferings
-        {
-            public required DateTime At;
-            public required List<(uint Price, bool IsHq, ulong RetainerId)> Listings;
+            /// <summary>
+            /// 上一次嘗試什麼封包都沒收到，暫定判為「被吞掉」。判決刻意延後到真的要送重試
+            /// 的那一刻才交給閘門——因為在那之前遲到的答案還可能落進 MarketDataCache 把
+            /// 這次重試整個省掉，那就代表它根本沒被吞，不該拿去撴寬閘門。
+            /// </summary>
+            public bool RefusalPending;
+            /// <summary>暫定被吞掉的那次請求，距離前一次送出的實際毫秒數。</summary>
+            public double RefusalGapMs = -1;
         }
 
         private readonly MarketGuiEventHandler gui;
@@ -144,10 +165,9 @@ namespace Marketbuddy
         // TaxRatesReceived event; conf.MarketTaxPercent is the fallback.
         private IMarketTaxRates? taxRates;
 
-        // In-memory market data cache keyed by item id (shared across batches
-        // and retainers, never persisted). Stores the full first-page listings
-        // so NQ/HQ eligibility is still computed per slot.
-        private readonly Dictionary<uint, CachedOfferings> priceCache = new();
+        // Market data is cached globally by MarketDataCache: every offerings
+        // packet the client sees is stored there, no matter which plugin (or
+        // the player themselves) asked for it. This engine only reads from it.
 
         // Batch state (for UI / summary).
         private HashSet<ulong> ownRetainerIds = new();
@@ -464,11 +484,22 @@ namespace Marketbuddy
                 case SlotPhase.Throttle:
                     // Fresh cached market data for this item skips the whole
                     // request/wait pipeline (and the request throttle).
-                    if (TryGetCachedOfferings(job.ItemId, out var cachedListings))
+                    //
+                    // 這一步刻意排在退避與閘門檢查**之前**：一次逾時之後遲到的答案會落進
+                    // MarketDataCache，下一個 tick 就在這裡被撿回來，於是那次重試根本不會
+                    // 送出去（實測 63 次重試裡有 18 次，答案在我們重問之前就已經到了）。
+                    if (MarketDataCache.TryGet(job.ItemId, conf.MarketDataCacheSeconds, out var cachedListings,
+                            out var cacheAgeMs))
                     {
+                        Log.Information(
+                            $"{Diag} CACHE-HIT item={job.ItemId} '{job.Name}' n={cachedListings.Count} " +
+                            $"ageMs={cacheAgeMs:F0} attempt={job.Attempt} " +
+                            $"(no request sent; ttl={conf.MarketDataCacheSeconds}s)");
                         captured.Clear();
                         captured.AddRange(cachedListings);
                         job.FromCache = true;
+                        // 這次嘗試其實有答案，只是遲到 —— 不能拿去指控閘門。
+                        job.RefusalPending = false;
                         job.Phase = SlotPhase.Apply;
                         return TickTaskResult.Continue;
                     }
@@ -501,6 +532,14 @@ namespace Marketbuddy
                         return TickTaskResult.Done;
                     }
 
+                    // 這裡才是「上一次真的被吞掉了」的判決點：我們已經走過 Throttle 的快取
+                    // 檢查、確定沒有遲到的答案可以用，現在真的要再問一次同一件事。
+                    if (job.RefusalPending)
+                    {
+                        job.RefusalPending = false;
+                        MarketRequestGate.NoteRefused(job.RefusalGapMs);
+                    }
+
                     job.Attempt++;
                     proxy->EndRequest(); // reset any dangling request state
                     proxy->SearchItemId = job.ItemId;
@@ -516,10 +555,12 @@ namespace Marketbuddy
                         job.StartedAt = now;
 
                     var sent = proxy->RequestData();
+                    var cachedAgeMs = MarketDataCache.AgeMsOf(job.ItemId);
                     Log.Information(
                         $"{Diag} REQUEST item={job.ItemId} '{job.Name}' attempt={job.Attempt} " +
                         $"RequestData={sent} sendGapMs={job.SendGapMs:F0} gate={MarketRequestGate.IntervalMs} " +
-                        $"msSinceLastData={MsSince(lastDataReceivedAt):F0}");
+                        $"msSinceLastData={MsSince(lastDataReceivedAt):F0} " +
+                        $"cache={(cachedAgeMs < 0 ? "miss" : $"stale({cachedAgeMs:F0}ms)")}");
 
                     if (!sent)
                     {
@@ -547,7 +588,7 @@ namespace Marketbuddy
                             $"attempts={job.Attempt} waitMs={(now - job.WaitStart).TotalMilliseconds:F0} " +
                             $"totalMs={(now - job.StartedAt).TotalMilliseconds:F0}");
                         MarketRequestGate.NoteAccepted();
-                        StoreCachedOfferings(job.ItemId, captured);
+                        // 掛單資料已經由 MarketDataCache 的被動處理器存起來了，這裡不必再存。
                         job.Phase = SlotPhase.Apply;
                         return TickTaskResult.Continue;
                     }
@@ -570,7 +611,9 @@ namespace Marketbuddy
                         // offerings page exists for an item nobody is selling.
                         MarketRequestGate.NoteAccepted();
                         captured.Clear();
-                        StoreCachedOfferings(job.ItemId, captured);
+                        // 「沒人在賣」是被動觀察推不出來的（零掛單根本不會有 offerings 封包），
+                        // 只有走完這條 history + grace 的流程才敢寫進快取。
+                        MarketDataCache.StoreConfirmedEmpty(job.ItemId);
                         job.Phase = SlotPhase.Apply;
                         return TickTaskResult.Continue;
                     }
@@ -578,10 +621,12 @@ namespace Marketbuddy
                     var waitedMs = (now - job.WaitStart).TotalMilliseconds;
 
                     // 兩種逾時要分開，因為它們代表相反的事、需要相反的修正：
-                    //   (a) 什麼封包都沒來 → 請求被節流吞掉了 → 間隔不夠長，要往上加。
+                    //   (a) 什麼封包都沒來 → 請求可能被節流吞掉了 → 間隔不夠長，要往上加。
                     //   (b) history 來了、offerings 沒來 → 請求送到了，是伺服器/網路慢
                     //       → 間隔沒有問題，加長它只會白白拖慢每一件。
-                    // (a) 判得比 (b) 早得多：實測任何回應最遲 861 ms 就會出現。
+                    // (a) 判得比 (b) 早：實測第一個封包最遲 1955 ms 會出現，門檻取 2500 ms。
+                    // ⚠️ 判定「疑似被吞」不等於馬上撴寬閘門：真正的判決延到 SlotPhase.Request
+                    // 才下，中間遲到的答案還有機會經由快取把整次重試省掉。
                     var swallowed = !historySeen && waitedMs > NoResponseDeadlineMs;
                     if (swallowed || waitedMs > ResponseTimeoutMs)
                     {
@@ -591,7 +636,10 @@ namespace Marketbuddy
                         offeringsPending = false;
 
                         if (swallowed)
-                            MarketRequestGate.NoteRefused(job.SendGapMs);
+                        {
+                            job.RefusalPending = true;
+                            job.RefusalGapMs = job.SendGapMs;
+                        }
 
                         if (job.Attempt >= MaxAttempts)
                         {
@@ -737,6 +785,9 @@ namespace Marketbuddy
             // Diagnostics: log EVERY offerings packet and the branch it takes.
             // This is the measurement that separates "the request never went
             // out" from "the answer arrived and we threw it away".
+            // ⚠️ 這個處理器**只**負責「我們正在等的那一件」的快通道。把每一筆封包都存進
+            // 快取是 MarketDataCache 自己那個獨立的訂閱做的事——包括下面每一條 dropped
+            // 分支所丟掉的封包，它們一樣都已經被存起來了，只是不會在這裡被採用。
             var listings = offerings.ItemListings;
             Log.Information(
                 $"{Diag} OFFERINGS reqId={offerings.RequestId} count={listings.Count} " +
@@ -912,39 +963,6 @@ namespace Marketbuddy
             }
 
             return false;
-        }
-
-        /// <summary>Number of unexpired entries in the market data cache.</summary>
-        public int PriceCacheCount
-        {
-            get
-            {
-                var cutoff = DateTime.UtcNow.AddMinutes(-PriceCacheTtlMinutes);
-                return priceCache.Count(kv => kv.Value.At > cutoff);
-            }
-        }
-
-        /// <summary>Drops all cached market data so the next batch queries fresh prices.</summary>
-        public void ClearPriceCache() => priceCache.Clear();
-
-        private bool TryGetCachedOfferings(uint itemId, out List<(uint Price, bool IsHq, ulong RetainerId)> listings)
-        {
-            listings = [];
-            if (!priceCache.TryGetValue(itemId, out var entry))
-                return false;
-            if (DateTime.UtcNow - entry.At > TimeSpan.FromMinutes(PriceCacheTtlMinutes))
-            {
-                priceCache.Remove(itemId);
-                return false;
-            }
-
-            listings = entry.Listings;
-            return true;
-        }
-
-        private void StoreCachedOfferings(uint itemId, List<(uint Price, bool IsHq, ulong RetainerId)> listings)
-        {
-            priceCache[itemId] = new CachedOfferings { At = DateTime.UtcNow, Listings = new(listings) };
         }
 
         private static bool HasFreeRetainerInventorySlot(InventoryManager* inventoryManager)

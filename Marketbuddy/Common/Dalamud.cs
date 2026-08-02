@@ -29,6 +29,7 @@ namespace Marketbuddy.Common
         [PluginService] public static IGameGui GameGui { get; private set; } = null!;
         [PluginService] public static IFramework Framework { get; private set; } = null!;
         [PluginService] public static IMarketBoard MarketBoard { get; private set; } = null!;
+        [PluginService] public static IPlayerState PlayerState { get; private set; } = null!;
         [PluginService] public static IDataManager DataManager { get; private set; } = null!;
         [PluginService] public static IPluginLog Log { get; private set; } = null!;
         [PluginService] public static IGameInteropProvider Hook { get; private set; } = null!;

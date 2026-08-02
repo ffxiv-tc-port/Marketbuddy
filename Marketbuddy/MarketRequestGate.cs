@@ -23,6 +23,20 @@ namespace Marketbuddy
     /// 送出基準 + 起始 1700 ms（比實測會過的 1488 多約 200 ms 餘裕），並且可以在連續成功後
     /// 往回收，但**永遠不會低於已知會失敗的間隔 + 一個級距**，所以不會來回震盪。
     ///
+    /// 🔴 2026-08-02 第三輪（把 REQUEST 逐筆配對到後續封包，n=734 次請求，只看 attempt=1
+    /// 這個沒有歸屬歧義的族群）發現上面那套自我校準有一個會**永久卡在上限**的破口：
+    ///     送出間隔 &lt;700 ms  → 51/51 被吞（100%）
+    ///     送出間隔 700–1500 ms → 3/4 被吞
+    ///     送出間隔 1800–4000 ms → **0/411 被吞**
+    ///     送出間隔 &gt;4000 ms   → 13/145 被吞（10.5% / 5.0%）
+    /// 最後一行是關鍵：間隔**越長**反而又出現被吞的案例，所以那些絕對不是「送太快」造成的，
+    /// 把閘門撴寬對它們完全沒有幫助。但舊的 <see cref="NoteRefused"/> 會照單全收：
+    /// 一次 gap=4295 ms 的失敗會讓 knownBadGapMs=4295 → 地板變成 4595 &gt; 上限 4000，
+    /// 於是 <see cref="NoteAccepted"/> 的 <c>intervalMs &lt;= floor</c> 永遠成立、**再也收不回來**，
+    /// 間隔就永久釘在 4000 ms（＝每件 4 秒，比它想取代的 .15 還慢）。
+    /// 兩道修正：(1) 間隔已經 ≥ <see cref="MaxLearnableGapMs"/> 的失敗不列入學習，
+    /// (2) 地板一律夾在上限之下，保證任何情況下都收得回來。
+    ///
     /// 這裡只做「節流」，不做任何自動化：送不送請求仍然由使用者按下的動作決定。
     /// </summary>
     internal static class MarketRequestGate
@@ -35,6 +49,13 @@ namespace Marketbuddy
 
         /// <summary>上限（仍優於舊版實機爬到的 4000＋收資料後才起算）。</summary>
         private const int CapMs = 4000;
+
+        /// <summary>
+        /// 只從「間隔短到有可能是原因」的失敗學習。實測 attempt=1 在 1800–4000 ms 這個區間
+        /// 是 0/411 被吞，2600 ms 取在乾淨區間裡面偏保守的位置；比這個還寬還被吞，成因
+        /// 一定在別的地方（實測 &gt;4000 ms 反而有 10% 被吞），撴寬閘門只會白白拖慢每一件。
+        /// </summary>
+        private const int MaxLearnableGapMs = 2600;
 
         /// <summary>連續這麼多次乾淨的請求之後，試著把間隔往回收一個級距。</summary>
         private const int NarrowAfterCleanRequests = 15;
@@ -77,7 +98,9 @@ namespace Marketbuddy
 
             // 地板：起始值，以及「已知會失敗的間隔 + 一個級距」——兩者取大。
             // 有了這個地板，往回收就不可能收到已經證實會被吞掉的區間，也就不會震盪。
-            var floor = Math.Max(StartIntervalMs, knownBadGapMs + StepMs);
+            // 🔴 再夾一次上限：地板一旦超過 CapMs，intervalMs <= floor 就永遠成立、
+            // 間隔會永久釘在上限收不回來（.16 的實際破口）。
+            var floor = Math.Min(Math.Max(StartIntervalMs, knownBadGapMs + StepMs), CapMs - StepMs);
             if (intervalMs <= floor)
                 return;
 
@@ -97,6 +120,16 @@ namespace Marketbuddy
 
             // sendGapMs 為負（本輪第一次請求，沒有前一次）時無從學習，只把間隔往上推一級。
             var gap = sendGapMs < 0 ? 0 : (int)Math.Round(sendGapMs);
+
+            // 間隔已經寬到不可能是原因：記下來但不學、也不撴寬。見類別註解的實測分佈。
+            if (gap >= MaxLearnableGapMs)
+            {
+                Log.Information(
+                    $"[MBDIAG] GATE ignored a swallow at send-gap {gap} ms (>= {MaxLearnableGapMs}, " +
+                    $"spacing cannot be the cause); interval stays {intervalMs} ms");
+                return;
+            }
+
             if (gap > knownBadGapMs)
                 knownBadGapMs = gap;
 

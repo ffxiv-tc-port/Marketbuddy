@@ -52,6 +52,11 @@ namespace Marketbuddy
 
                 AutoRetainerBridge.Init();
 
+                // Passive global market data cache. Must come up before the
+                // engines so nothing that arrives during startup is lost; it
+                // only ever writes to a dictionary and never drives anything.
+                MarketDataCache.Init();
+
                 MarketGuiEventHandler = new MarketGuiEventHandler();
 
                 BatchReprice = new BatchReprice(MarketGuiEventHandler);
@@ -109,6 +114,7 @@ namespace Marketbuddy
             MultiReprice.Dispose();
             BatchReprice.Dispose();
             MarketGuiEventHandler.Dispose();
+            MarketDataCache.Shutdown();
             // Last: must run after every engine released its reference so a
             // leftover suppression can never survive an unload.
             AutoRetainerBridge.Shutdown();
