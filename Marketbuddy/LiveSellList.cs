@@ -46,6 +46,15 @@ namespace Marketbuddy
         /// <summary>How long a repriced row keeps its "just changed" highlight.</summary>
         private static readonly TimeSpan ChangeHighlightFor = TimeSpan.FromMinutes(10);
 
+        /// <summary>
+        /// 「正在處理這一件」的列底色（半透明琥珀）。
+        ///
+        /// 刻意跟「已改價」那個綠色**分屬不同視覺通道**：進行中是整列底色，已改價是
+        /// 單價欄的綠字。兩者可以同時出現在同一列（剛改完價、下一輪又輪到它）而不打架，
+        /// 而且顏色本身也分得開——琥珀＝正在做，綠＝做完了。
+        /// </summary>
+        private static readonly Vector4 InProgressRowColor = new(1.00f, 0.72f, 0.15f, 0.22f);
+
         private readonly struct Row(short slot, string name, uint quantity, uint unitPrice)
         {
             public readonly short Slot = slot;
@@ -229,6 +238,14 @@ namespace Marketbuddy
             var changes = engine.RecentChanges;
             var changesApply = snapshotRetainerId != 0 && engine.RecentChangesRetainerId == snapshotRetainerId;
 
+            // 「此刻正在被處理的那一格」。批次重掛與快速上架的單件定價走的是同一個引擎，
+            // 所以這一個判斷就同時涵蓋兩條路徑（見 BatchReprice.CurrentSlot）。
+            // ⚠️ 用**格號**比對而不是道具名：同款道具拆成好幾格掛是常態，比名字會一次亮好幾列。
+            var activeSlot = engine.IsRunning && snapshotRetainerId != 0 &&
+                             engine.CurrentBatchRetainerId == snapshotRetainerId
+                ? engine.CurrentSlot
+                : (short)-1;
+
             if (!ImGui.BeginTable("##mblivesellisttable", 4,
                     ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerH))
                 return;
@@ -243,8 +260,28 @@ namespace Marketbuddy
             {
                 ImGui.TableNextRow();
 
+                // 進行中的那一列：整列底色 + 道具名改成琥珀色。
+                // 目前處理中的道具**不在**這張表裡時（例如快速上架還沒把它掛上去、
+                // 或引擎的目標格已經空掉）就什麼都不亮——刻意不退而求其次去比對名稱，
+                // 硬找一列亮起來只會亮到錯的那一件。
+                var inProgress = row.Slot == activeSlot;
+                if (inProgress)
+                    ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg1,
+                        ImGui.ColorConvertFloat4ToU32(InProgressRowColor));
+
                 ImGui.TableNextColumn();
-                ImGui.TextUnformatted(row.Name);
+                if (inProgress)
+                {
+                    ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudYellow);
+                    ImGui.TextUnformatted(row.Name);
+                    ImGui.PopStyleColor();
+                    if (ImGui.IsItemHovered())
+                        ImGui.SetTooltip("Working on this one right now".Loc());
+                }
+                else
+                {
+                    ImGui.TextUnformatted(row.Name);
+                }
 
                 ImGui.TableNextColumn();
                 ImGui.TextUnformatted(row.Quantity.ToString("N0"));

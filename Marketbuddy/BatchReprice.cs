@@ -211,6 +211,25 @@ namespace Marketbuddy
         public int FailedCount { get; private set; }
         public string CurrentItemName { get; private set; } = string.Empty;
 
+        /// <summary>
+        /// 此刻正在處理的那一格的市場容器索引，閒置時 -1。**純顯示用**
+        /// （<see cref="LiveSellList"/> 靠它把那一列亮起來），沒有任何行為作用。
+        ///
+        /// 它在 <see cref="TickSlot"/> 一進來就設好、直到下一格接手才變，
+        /// 所以整段「送出 → 等回應 → 定價 → 完成」都指著同一格，不會只閃一下；
+        /// 快取命中（根本沒送請求）那條路徑也一樣會經過這裡。
+        /// 快速上架的單件定價走的是 <see cref="StartQuickReprice"/> → <see cref="BeginBatch"/>，
+        /// 也就是同一條 TickSlot，所以兩條路徑都涵蓋得到。
+        /// </summary>
+        public short CurrentSlot { get; private set; } = -1;
+
+        /// <summary>
+        /// <see cref="CurrentSlot"/> 屬於哪個僱員。格號是**每個僱員各自**編的，
+        /// 少了這道比對，僱員 B 的第 3 格會繼承僱員 A 第 3 格的高亮
+        /// （<see cref="RecentChangesRetainerId"/> 存在的理由完全相同）。
+        /// </summary>
+        public ulong CurrentBatchRetainerId { get; private set; }
+
         private Configuration conf => Configuration.GetOrLoad();
 
         public BatchReprice(MarketGuiEventHandler gui)
@@ -426,6 +445,8 @@ namespace Marketbuddy
             DelistedCount = 0;
             FailedCount = 0;
             CurrentItemName = string.Empty;
+            CurrentSlot = -1;
+            CurrentBatchRetainerId = ActiveRetainerId();
             batchStartedAt = DateTime.UtcNow;
             lastAcceptedRequestId = int.MinValue;
             offeringsPending = false;
@@ -502,6 +523,8 @@ namespace Marketbuddy
         private TickTaskResult TickSlot(SlotJob job)
         {
             CurrentItemName = job.Name;
+            // 顯示用：一進來就指向這一格，直到下一格接手（見 CurrentSlot 的說明）。
+            CurrentSlot = job.Slot;
             var now = DateTime.UtcNow;
 
             switch (job.Phase)
@@ -1184,6 +1207,7 @@ namespace Marketbuddy
             offeringsReceived = false;
             historySeen = false;
             CurrentItemName = string.Empty;
+            CurrentSlot = -1;
             // 這一輪結束了，槽裡任何還沒被取走的答覆都已經無主，丟掉。
             MarketRequestResultProbe.ArmForRequest();
 
