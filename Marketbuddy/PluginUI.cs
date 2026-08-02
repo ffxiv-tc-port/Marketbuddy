@@ -51,61 +51,99 @@ namespace Marketbuddy
             marketbuddy.LiveSellList.Draw(repriceBottom);
         }
 
+        /// <summary>
+        /// 僱員選單旁的「巡迴」面板。2026-08-03 由**一顆浮在僱員選單標題列上的裸按鈕**
+        /// （無背景、無標題、ItemSpacing 被壓成 1 px）改成獨立面板，形式比照出售品視窗旁
+        /// 那一欄。理由：那顆按鈕會用到的堆疊上限／降價設定全部藏在另一個視窗裡，
+        /// 使用者在僱員選單前看不到自己按下去會發生什麼事，跑起來也沒有任何進度。
+        ///
+        /// 設定列是 <see cref="DrawSharedPricingRows"/>——與出售品視窗那一欄**同一份**
+        /// config 欄位，不是第二套設定。
+        /// </summary>
         private void DrawRetainerListOverlay()
         {
             if (!conf.BatchRepriceEnabled ||
-                !marketbuddy.MarketGuiEventHandler.AddonRetainerList_Position(out Vector2 position)) return;
+                !marketbuddy.MarketGuiEventHandler.AddonRetainerList_Frame(out var topLeft, out var size))
+                return;
 
             var tour = marketbuddy.MultiReprice;
-            var windowVisible = true;
-            ImGui.SetNextWindowPos(position);
 
-            var hSpace = new Vector2(1, 0);
-            ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
-            ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, hSpace);
-            ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, hSpace);
-            ImGui.PushStyleVar(ImGuiStyleVar.ItemInnerSpacing, hSpace);
-            ImGui.PushStyleVar(ImGuiStyleVar.WindowMinSize, Vector2.One);
-            if (ImGui.Begin("Marketbuddy_retainerlist", ref windowVisible,
-                    ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoScrollWithMouse |
-                    ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoBackground))
+            ImGui.SetNextWindowPos(new Vector2(
+                topLeft.X + size.X + conf.RetainerPanelOffset.X,
+                topLeft.Y + conf.RetainerPanelOffset.Y));
+
+            if (!ImGui.Begin("Marketbuddy_retainerlist",
+                    ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove |
+                    ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.AlwaysAutoResize |
+                    ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoSavedSettings))
             {
-                if (tour.IsRunning)
-                {
-                    ImGui.TextUnformatted("Retainer ??/??: ??".Loc(
-                        tour.CurrentRetainerNumber, tour.TotalRetainers, tour.CurrentRetainerName));
-                    ImGui.SameLine();
-                    if (ImGui.Button("Cancel".Loc() + "##mbtourcancel"))
-                        tour.CancelByButton();
-                }
-                else
-                {
-                    var canStart = tour.CanStart(out var reason);
-                    var disabled = !canStart && !AutoRetainerBridge.IsBusy;
-                    if (disabled)
-                        ImGui.BeginDisabled();
-                    // 降價設成 0 時「（最低價 -0gil）」是純噪音，卻佔掉按鈕一半寬度：
-                    // 括號整個收掉，定價規則改用滑鼠提示交代（提示不佔版面）。
-                    var tourLabel = UndercutIsZero
-                        ? "Relist all retainers".Loc()
-                        : "Relist all retainers (lowest -??)".Loc(GetUndercutText());
-                    if (ImGui.Button(tourLabel + "##mbtourstart"))
-                        tour.Start();
-                    if (disabled)
-                    {
-                        ImGui.EndDisabled();
-                        if (!string.IsNullOrEmpty(reason) && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-                            ImGui.SetTooltip(reason);
-                    }
-                    else if (ImGui.IsItemHovered())
-                    {
-                        ImGui.SetTooltip(PricingRuleText());
-                    }
-                }
+                ImGui.End();
+                return;
             }
 
-            ImGui.PopStyleVar(5);
+            ImGui.TextUnformatted("All retainers".Loc());
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Show or hide these controls in /mbuddy".Loc());
+
+            ImGui.Separator();
+            DrawSharedPricingRows();
+
+            ImGui.Separator();
+            if (tour.IsRunning)
+                DrawTourProgress(tour);
+            else
+                DrawTourStartButton(tour);
+
             ImGui.End();
+        }
+
+        /// <summary>
+        /// 巡迴進行中的進度。兩層都要顯示，因為它們回答不同的問題：
+        /// 僱員層（第幾個／共幾個／誰）來自巡迴本身，道具層（第幾件／共幾件／哪一件）
+        /// 來自巡迴此刻正在驅動的那個引擎。在僱員之間移動時引擎沒在跑，只會有僱員那一行。
+        /// </summary>
+        private void DrawTourProgress(MultiRetainerReprice tour)
+        {
+            ImGui.TextUnformatted("Retainer ??/??: ??".Loc(
+                tour.CurrentRetainerNumber, tour.TotalRetainers, tour.CurrentRetainerName));
+
+            var engine = marketbuddy.BatchReprice;
+            if (engine.IsRunning)
+            {
+                var currentIndex = Math.Min(engine.ProcessedSlots + 1, engine.TotalSlots);
+                ImGui.TextUnformatted(
+                    "Repricing ??/??: ??".Loc(currentIndex, engine.TotalSlots, engine.CurrentItemName));
+            }
+
+            if (ImGui.Button("Cancel".Loc() + "##mbtourcancel"))
+                tour.CancelByButton();
+        }
+
+        private void DrawTourStartButton(MultiRetainerReprice tour)
+        {
+            var canStart = tour.CanStart(out var reason);
+            // When AutoRetainer is the only blocker, keep the button clickable
+            // so pressing it explains the situation instead of doing nothing.
+            var disabled = !canStart && !AutoRetainerBridge.IsBusy;
+            if (disabled)
+                ImGui.BeginDisabled();
+            // 降價設成 0 時「（最低價 -0gil）」是純噪音，卻佔掉按鈕一半寬度：
+            // 括號整個收掉，定價規則改用滑鼠提示交代（提示不佔版面）。
+            var tourLabel = UndercutIsZero
+                ? "Relist all retainers".Loc()
+                : "Relist all retainers (lowest -??)".Loc(GetUndercutText());
+            if (ImGui.Button(tourLabel + "##mbtourstart"))
+                tour.Start();
+            if (disabled)
+            {
+                ImGui.EndDisabled();
+                if (!string.IsNullOrEmpty(reason) && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                    ImGui.SetTooltip(reason);
+            }
+            else if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(PricingRuleText());
+            }
         }
 
         /// <summary>
@@ -492,6 +530,15 @@ namespace Marketbuddy
                     "Moves both side panels at once: the relisting controls sit at the top right of the game's sell list and the live listing table is stacked directly underneath them."
                         .Loc());
                 ImGui.PopStyleColor();
+            }
+
+            if (conf.BatchRepriceEnabled)
+            {
+                ImGui.Spacing();
+                ImGui.DragFloat2("All-retainers panel position (relative to the retainer list's top right)".Loc(),
+                    ref conf.RetainerPanelOffset, 1f, -4000f, 4000f, "%.0f");
+                if (ImGui.IsItemDeactivatedAfterEdit())
+                    conf.Save();
             }
 
             ImGui.Spacing();

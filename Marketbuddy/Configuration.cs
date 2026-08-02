@@ -85,6 +85,13 @@ namespace Marketbuddy
         /// </summary>
         public Vector2 RepriceWindowOffset = new Vector2(0, 4);
 
+        /// <summary>
+        /// 僱員選單旁那塊「巡迴」面板相對於僱員選單「右上角」的位移。
+        /// 版面形式與出售品視窗旁那一欄相同（見 <see cref="LiveSellListOffset"/>），
+        /// 但兩個視窗會同時開著、位置互不相干，所以位移分開存。
+        /// </summary>
+        public Vector2 RetainerPanelOffset = new Vector2(4, 0);
+
         public int Version { get; set; } = 0;
 
         // the below exist just to make saving/loading less cumbersome

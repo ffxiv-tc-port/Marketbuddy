@@ -67,16 +67,31 @@ namespace Marketbuddy
             AddonRetainerList = IntPtr.Zero;
         }
 
-        internal unsafe bool AddonRetainerList_Position(out Vector2 position)
+        /// <summary>
+        /// 僱員選單目前的螢幕矩形：左上角座標與**已套用縮放**的尺寸。
+        /// 巡迴面板靠它貼在原生視窗右邊並跟著它跑。
+        ///
+        /// 🔴 與 <see cref="AddonRetainerSellList_Frame"/> 同一套作法，只讀已建模的**純欄位**，
+        /// 不呼叫任何特徵碼解析的原生函式（理由見那個方法的說明）。
+        /// </summary>
+        internal unsafe bool AddonRetainerList_Frame(out Vector2 topLeft, out Vector2 size)
         {
-            position = Vector2.One;
+            topLeft = Vector2.Zero;
+            size = Vector2.Zero;
             if (AddonRetainerList == IntPtr.Zero)
                 return false;
 
-            position = new Vector2(
-                ((AtkUnitBase*)AddonRetainerList)->X + 60,
-                ((AtkUnitBase*)AddonRetainerList)->Y + 6
-            );
+            var addon = (AtkUnitBase*)AddonRetainerList;
+            if (!addon->IsVisible || addon->RootNode == null ||
+                addon->UldManager.LoadedState != AtkLoadState.Loaded)
+                return false;
+
+            var scale = addon->Scale;
+            if (scale <= 0f || float.IsNaN(scale))
+                scale = 1f;
+
+            topLeft = new Vector2(addon->X, addon->Y);
+            size = new Vector2(addon->RootNode->Width * scale, addon->RootNode->Height * scale);
             return true;
         }
 
