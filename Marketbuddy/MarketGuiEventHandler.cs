@@ -203,16 +203,33 @@ namespace Marketbuddy
             AddonItemSearchResult = IntPtr.Zero;
         }
 
-        internal unsafe bool AddonRetainerSellList_Position(out Vector2 position)
+        /// <summary>
+        /// 出售品視窗目前的螢幕矩形：左上角座標與**已套用縮放**的尺寸。
+        /// 重掛面板靠它貼在原生視窗下方並跟著它跑。
+        ///
+        /// 🔴 與 <see cref="LiveSellList"/> 同一套作法，刻意只讀已建模的**純欄位**
+        /// （X / Y / RootNode->Width / RootNode->Height / Scale），不呼叫
+        /// GetScaledWidth() 之類**特徵碼解析**的原生函式——台服上解到錯的函式就是
+        /// AccessViolation，而 AVE 在 .NET Core 是 corrupted-state exception，try/catch 攔不到。
+        /// </summary>
+        internal unsafe bool AddonRetainerSellList_Frame(out Vector2 topLeft, out Vector2 size)
         {
-            position = Vector2.One;
+            topLeft = Vector2.Zero;
+            size = Vector2.Zero;
             if (AddonRetainerSellList == IntPtr.Zero)
                 return false;
 
-            position = new Vector2(
-                ((AtkUnitBase*)AddonRetainerSellList)->X + conf.AdjustMaxStackSizeInSellListOffset.X,
-                ((AtkUnitBase*)AddonRetainerSellList)->Y + conf.AdjustMaxStackSizeInSellListOffset.Y
-            );
+            var addon = (AtkUnitBase*)AddonRetainerSellList;
+            if (!addon->IsVisible || addon->RootNode == null ||
+                addon->UldManager.LoadedState != AtkLoadState.Loaded)
+                return false;
+
+            var scale = addon->Scale;
+            if (scale <= 0f || float.IsNaN(scale))
+                scale = 1f;
+
+            topLeft = new Vector2(addon->X, addon->Y);
+            size = new Vector2(addon->RootNode->Width * scale, addon->RootNode->Height * scale);
             return true;
         }
 

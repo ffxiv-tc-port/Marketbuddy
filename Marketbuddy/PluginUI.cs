@@ -37,7 +37,7 @@ namespace Marketbuddy
         public void Draw()
         {
             DrawSettingsWindow();
-            DrawOverlayWindow();
+            DrawRepriceWindow();
             DrawRetainerListOverlay();
             marketbuddy.LiveSellList.Draw();
         }
@@ -99,67 +99,90 @@ namespace Marketbuddy
             ImGui.End();
         }
 
-        private void DrawOverlayWindow()
+        /// <summary>
+        /// 重掛面板。2026-08-03 由「釘在出售品視窗標題列上的一條浮動列」改成**獨立視窗**，
+        /// 形式比照 <see cref="LiveSellList"/>（使用者確認那個面板的手感是對的）。
+        ///
+        /// 舊版把勾選框、兩個數字輸入框、單位選單與按鈕全部 <c>SameLine()</c> 擠在一行，
+        /// 而且 <c>ItemSpacing</c> 被壓成 1 px、視窗無背景，所以「哪個輸入框對應哪個標籤」
+        /// 完全看不出來。這裡改成一列一件事、每個輸入框緊跟著自己的單位標籤。
+        ///
+        /// ⚠️ **行為零變更**：控制項、它們讀寫的設定欄位、以及各自的顯示條件
+        /// （堆疊列吃 <c>AdjustMaxStackSizeInSellList</c>、按鈕吃 <c>BatchRepriceEnabled</c>、
+        /// 佇列列吃待處理數）全部原封不動，只換了容器與排版。
+        /// </summary>
+        private void DrawRepriceWindow()
         {
             var showStack = conf.AdjustMaxStackSizeInSellList;
             var showBatch = conf.BatchRepriceEnabled;
             var quickListPending = marketbuddy.QuickLister?.PendingCount ?? 0;
             if ((!showStack && !showBatch && quickListPending == 0) ||
-                !marketbuddy.MarketGuiEventHandler.AddonRetainerSellList_Position(out Vector2 position)) return;
+                !marketbuddy.MarketGuiEventHandler.AddonRetainerSellList_Frame(out var topLeft, out var size))
+                return;
 
-            var windowVisible = true;
-            ImGui.SetNextWindowPos(position);
+            // 貼在原生視窗的**左下角**下方。即時掛單面板貼右邊，兩者不會打架。
+            ImGui.SetNextWindowPos(new Vector2(
+                topLeft.X + conf.RepriceWindowOffset.X,
+                topLeft.Y + size.Y + conf.RepriceWindowOffset.Y));
 
-            var hSpace = new Vector2(1, 0);
-            ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
-            ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, hSpace);
-            ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, hSpace);
-            ImGui.PushStyleVar(ImGuiStyleVar.ItemInnerSpacing, hSpace);
-            ImGui.PushStyleVar(ImGuiStyleVar.WindowMinSize, Vector2.One);
-            if (ImGui.Begin("Marketbuddy_stacklimit", ref windowVisible,
-                    ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoScrollWithMouse |
-                    ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoBackground))
+            if (!ImGui.Begin("Marketbuddy_reprice",
+                    ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove |
+                    ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.AlwaysAutoResize |
+                    ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoSavedSettings))
             {
-                if (quickListPending > 0)
-                    ImGui.TextUnformatted("Quick-list queue: ?? pending".Loc(quickListPending));
-
-                if (showStack)
-                {
-                    if (ImGui.Checkbox("Limit stack size to".Loc() + " ", ref conf.UseMaxStackSize))
-                        conf.Save();
-
-                    ImGui.SameLine();
-                    ImGui.SetNextItemWidth(30);
-                    if (ImGui.InputInt("items".Loc(), ref conf.MaximumStackSize, 0))
-                        MaximumStackSizeChanged();
-
-                    ImGui.SameLine();
-                    ImGui.Dummy(new(20, 1));
-
-                    ImGui.SameLine();
-                    ImGui.SetNextItemWidth(30);
-                    if (conf.UndercutUsePercent)
-                    {
-                        if (ImGui.InputInt("##percundercut", ref conf.UndercutPercent, 0))
-                            UndercutPriceChanged();
-                    }
-                    else
-                    {
-                        if (ImGui.InputInt("##gilundercut", ref conf.UndercutPrice, 0))
-                            UndercutPriceChanged();
-                    }
-                    ImGui.SameLine();
-                    ImGui.SetNextItemWidth(40);
-                    DrawUndercutTypeSelector();
-                    ImGui.SameLine();
-                    ImGui.Text("undercut".Loc());
-                }
-
-                if (showBatch)
-                    DrawBatchRepriceRow();
+                ImGui.End();
+                return;
             }
 
-            ImGui.PopStyleVar(5);
+            ImGui.TextUnformatted("Relisting".Loc());
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Show or hide these controls in /mbuddy".Loc());
+
+            if (quickListPending > 0)
+            {
+                ImGui.Separator();
+                ImGui.TextUnformatted("Quick-list queue: ?? pending".Loc(quickListPending));
+            }
+
+            if (showStack)
+            {
+                ImGui.Separator();
+
+                // 一列一件事。輸入框的單位標籤（「個」）由 InputInt 自己畫在右邊，
+                // 所以數字跟它的單位永遠黏在一起，不會像舊版那樣隔著一個 Dummy。
+                if (ImGui.Checkbox("Limit stack size to".Loc() + " ", ref conf.UseMaxStackSize))
+                    conf.Save();
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(70);
+                if (ImGui.InputInt("items".Loc(), ref conf.MaximumStackSize, 0))
+                    MaximumStackSizeChanged();
+
+                // 降價獨立成一列：標籤在前，接著金額，再接著單位選單（gil / %）。
+                ImGui.TextUnformatted("undercut".Loc());
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(90);
+                if (conf.UndercutUsePercent)
+                {
+                    if (ImGui.InputInt("##percundercut", ref conf.UndercutPercent, 0))
+                        UndercutPriceChanged();
+                }
+                else
+                {
+                    if (ImGui.InputInt("##gilundercut", ref conf.UndercutPrice, 0))
+                        UndercutPriceChanged();
+                }
+
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(70);
+                DrawUndercutTypeSelector();
+            }
+
+            if (showBatch)
+            {
+                ImGui.Separator();
+                DrawBatchRepriceRow();
+            }
+
             ImGui.End();
         }
 
@@ -334,11 +357,14 @@ namespace Marketbuddy
                     ref conf.AdjustMaxStackSizeInSellList))
                 conf.Save();
 
-            if (conf.AdjustMaxStackSizeInSellList)
+            // 重掛面板現在是獨立視窗（貼在出售品視窗下方），所以位置設定跟著改綁
+            // RepriceWindowOffset，而且只要面板會出現就該調得到——它不再只屬於堆疊列。
+            // 範圍也放開成可負值：舊版下限寫死 1，往左／往上微調不了。
+            if (conf.AdjustMaxStackSizeInSellList || conf.BatchRepriceEnabled)
             {
                 DrawNestIndicator(2);
-                ImGui.DragFloat2("Position (relative to top left)".Loc(), ref conf.AdjustMaxStackSizeInSellListOffset,
-                        1f, 1, float.MaxValue, "%.0f");
+                ImGui.DragFloat2("Position (relative to the sell list's bottom left)".Loc(),
+                    ref conf.RepriceWindowOffset, 1f, -4000f, 4000f, "%.0f");
                 if (ImGui.IsItemDeactivatedAfterEdit())
                     conf.Save();
             }

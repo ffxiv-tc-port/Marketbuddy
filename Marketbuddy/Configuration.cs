@@ -23,6 +23,12 @@ namespace Marketbuddy
         public bool HoldAltHistoryHandling = false;
 
         public bool AdjustMaxStackSizeInSellList = true;
+
+        /// <summary>
+        /// ⚠️ **已停用，保留只為了不動到既有設定檔。** 這是舊的「貼在出售品視窗標題列上的
+        /// 浮動列」相對**左上角**的位移；2026-08-03 重掛介面改成獨立視窗之後，位置改由
+        /// <see cref="RepriceWindowOffset"/> 決定。改這個欄位不會有任何效果。
+        /// </summary>
         public Vector2 AdjustMaxStackSizeInSellListOffset = new Vector2(77, 10);
         public bool UseMaxStackSize = false;
         public int MaximumStackSize = 99;
@@ -60,6 +66,16 @@ namespace Marketbuddy
 
         /// <summary>面板相對於出售品視窗「右上角」的位移。</summary>
         public Vector2 LiveSellListOffset = new Vector2(4, 0);
+
+        /// <summary>
+        /// 重掛面板相對於出售品視窗「左下角」的位移。
+        ///
+        /// ⚠️ 刻意**不**沿用 <see cref="AdjustMaxStackSizeInSellListOffset"/>：那個值是為
+        /// 舊的「貼在標題列上的浮動列」調出來的（預設 77,10 是相對**左上角**），
+        /// 直接拿來當左下角的位移等於偷偷把每個既有使用者的面板搬到別的地方。
+        /// 這裡給新欄位與適合新版面的預設值，舊欄位原封不動。
+        /// </summary>
+        public Vector2 RepriceWindowOffset = new Vector2(0, 4);
 
         public int Version { get; set; } = 0;
 
