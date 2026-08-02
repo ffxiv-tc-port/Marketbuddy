@@ -40,26 +40,37 @@ namespace Marketbuddy
     }
 
     /// <summary>
-    /// 「把這名僱員上架中的道具全部下架回**玩家背包**」批次引擎。
+    /// 「把這名僱員上架中的道具全部下架」批次引擎。
     ///
-    /// 🔑 **目的地是玩家背包不是僱員物品欄，而且這是這個功能的重點不是偏好。**
-    /// 使用者要的是「收回來、整理同款道具、重新上架」：同一款道具散在不同僱員身上時，
-    /// 只有全部回到**同一個**容器才會併成一個堆疊。收到僱員自己的物品欄就合併不了，
-    /// 因為每個僱員的物品欄是各自獨立的。所以走
-    /// <c>InventoryManager.MoveFromRetainerMarketToPlayerInventory()</c>。
+    /// 🔑 **目的地由設定 <see cref="Configuration.DelistToRetainerInventory"/> 決定，
+    /// 預設是玩家背包，而那個預設是有理由的、不是隨便挑的。**
+    /// 使用者的用途是「收回來、把同款道具併成堆疊、重新上架」：同一款道具散在不同僱員
+    /// 身上時，只有全部回到**同一個**容器才會併成一個堆疊。收到僱員自己的物品欄就合併
+    /// 不了，因為每個僱員的物品欄是各自獨立的。所以預設走
+    /// <c>MoveFromRetainerMarketToPlayerInventory()</c>；設定改成僱員時走
+    /// <c>MoveFromRetainerMarketToRetainerInventory()</c>。
+    ///
+    /// ⚠️ 這個設定同時管改價流程裡的自動下架（<see cref="BatchReprice.DelistSlot"/>）
+    /// 與兩顆手動下架按鈕，**兩邊必須讀同一個欄位**，否則同一句「下架收回至」會有兩種
+    /// 意思。而且目的地一換，**跟著換的不只是呼叫哪支函式**：錯誤訊息的主詞、空間檢查
+    /// 要數哪個容器、「滿了停手」的說法、以及收工時「佔掉幾格」的意義全部都得跟著走。
+    ///
+    /// 🔑 **目的地在 <see cref="Start"/> 當下抄成快照（<see cref="toRetainerInventory"/>），
+    /// 之後整輪都用那份快照。** 使用者中途改設定不該讓同一批東西一半進背包一半進僱員，
+    /// 更不該讓開跑訊息、空間量測與結束語各自講不同的容器。
     ///
     /// ——**不是** <c>MoveItemSlot</c>。這個差別很重要：<c>MoveItemSlot</c> 對僱員這種
-    /// 伺服器權威容器只會更新本機、假裝成功；而這個函式（離線反編譯 TC 7.20 客戶端證實）
+    /// 伺服器權威容器只會更新本機、假裝成功；而這兩支函式（離線反編譯 TC 7.20 客戶端證實）
     /// 會寫一筆待處理交易記錄再送封包給伺服器，也就是真的來回。因此這裡**不**用
     /// 「送出即算成功」，每一件都等到那一格真的空掉才算數。
     ///
-    /// 🔑 **「背包滿了」是預期中的正常結束，不是錯誤。** 玩家背包 140 格，而九個僱員
-    /// 最多可以掛 180 件，所以跑不完是常態（會併堆疊，所以實際能收多少無法事先算準）。
-    /// 撞到背包滿時整輪乾淨停手、照實回報進度與剩餘量，而且**不計入失敗數**——
-    /// 那一件根本沒被動到，還好好掛在市場上。
+    /// 🔑 **「目的地滿了」是預期中的正常結束，不是錯誤。** 收回玩家背包時尤其如此：
+    /// 背包 140 格，而九個僱員最多可以掛 180 件，所以跑不完是常態（會併堆疊，所以實際
+    /// 能收多少無法事先算準）。撞到滿時整輪乾淨停手、照實回報進度與剩餘量，而且
+    /// **不計入失敗數**——那一件根本沒被動到，還好好掛在市場上。
     ///
     /// 續跑不需要任何狀態：巡迴每次都重新挑「還有掛單的僱員」，這裡每一件也都重新找
-    /// 「目前第一個有東西的格子」，所以清完背包再按一次，自然就從剩下的地方接著跑。
+    /// 「目前第一個有東西的格子」，所以清出空間再按一次，自然就從剩下的地方接著跑。
     ///
     /// 🔴 嚴格手動：只有使用者按下按鈕（且通過二次確認）才會跑。
     /// 沒有任何事件驅動的接手鏈，關掉視窗／按 ESC／IPC 鎖定／AutoRetainer 開始運作
@@ -98,7 +109,12 @@ namespace Marketbuddy
         private const int SlotWatchdogSeconds = 30;
 
         // ------------------------------------------------------------------
-        // MoveFromRetainerMarketToPlayerInventory 的回傳值。
+        // 兩支取回函式的回傳值（→玩家背包／→僱員物品欄）。
+        //
+        // 🔑 **數值兩支相同，所以下面這組常數兩支共用**；但 0x19／0x1C 的**主詞不同**，
+        // 所以翻成人話時一定要知道目的地是誰——見 DescribeMoveError 的 toRetainerInventory
+        // 參數。以下的反編譯記錄是針對「→玩家背包」那一支做的（僱員那一支在更早一輪
+        // 就驗過，rva 0x83D470，這一輪重掃結果一致）。
         //
         // ⚠️ **這是重新驗過的表，不是沿用「→僱員物品欄」那一支的。** 那是另一支函式，
         // 錯誤碼不保證相同，所以 2026-08-03 對 TC 7.20 客戶端重新離線反編譯了一次。
@@ -167,18 +183,34 @@ namespace Marketbuddy
         private readonly MarketGuiEventHandler gui;
         private readonly TickTaskQueue queue = new();
 
+        private Configuration conf => Configuration.GetOrLoad();
+
         private DateTime lastMove = DateTime.MinValue;
         private bool suppressionHeld;
 
-        /// <summary>開跑當下玩家背包的空格數，用來在收工時算出「這一輪佔掉幾格」。</summary>
-        private int freeBagSlotsAtStart;
+        /// <summary>
+        /// 這一輪的目的地：true = 僱員自己的物品欄，false = 玩家背包。
+        ///
+        /// 🔑 這是 <see cref="Start"/> 當下對 <see cref="Configuration.DelistToRetainerInventory"/>
+        /// 取的**快照**，不是每次用的時候現讀。理由是整輪的一致性：開跑訊息、空間量測、
+        /// 呼叫哪支函式、錯誤訊息主詞、結束語全都要講同一個容器，而使用者隨時可以在
+        /// 設定視窗裡把開關撥過去。現讀會讓一批東西一半進背包一半進僱員，而且訊息會
+        /// 說謊（例如開跑說「收回背包」、結束說「佔用僱員 N 格」）。
+        /// </summary>
+        private bool toRetainerInventory;
+
+        /// <summary>
+        /// 開跑當下**目的地容器**的空格數，用來在收工時算出「這一輪佔掉幾格」。
+        /// 目的地是背包就數背包、是僱員就數僱員的物品欄頁。
+        /// </summary>
+        private int freeDestinationSlotsAtStart;
 
         public bool IsRunning => queue.IsRunning;
         public int TotalSlots { get; private set; }
         public int ProcessedSlots { get; private set; }
 
         /// <summary>
-        /// 這一輪是不是因為**玩家背包滿了**而停的。
+        /// 這一輪是不是因為**目的地容器滿了**而停的（背包或僱員物品欄，看設定）。
         /// 🔑 這不是錯誤旗標，是「正常收工但沒跑完」——巡迴靠它決定要講哪一種結束語。
         /// </summary>
         public bool StoppedForSpace { get; private set; }
@@ -297,16 +329,22 @@ namespace Marketbuddy
             CurrentItemName = string.Empty;
             lastMove = DateTime.MinValue;
 
+            // 🔑 目的地在這裡定案，整輪不再改（理由見 toRetainerInventory 的說明）。
+            toRetainerInventory = conf.DelistToRetainerInventory;
+
             // 🔑 開始前的空間資訊刻意是**告知而不是攔阻**，而且刻意**不做預估**。
-            // 我們數得到的只有「空格數」，但道具會併進已有的同款堆疊（而合併正是這個
-            // 功能的目的），所以空格數是一個會低估的下界——拿它當閘門會產生「其實
-            // 放得下卻拒絕開始」的假拒絕，拿它去換算「大概可以下架幾件」則會算出一個
-            // 騙人的數字。真正會算堆疊的檢查是遊戲自己那顆（見上面回傳值 0x19 的說明）。
+            // 我們數得到的只有「空格數」，但道具會併進已有的同款堆疊（收回玩家背包時，
+            // 合併正是這個功能的目的），所以空格數是一個會低估的下界——拿它當閘門會
+            // 產生「其實放得下卻拒絕開始」的假拒絕，拿它去換算「大概可以下架幾件」則會
+            // 算出一個騙人的數字。真正會算堆疊的檢查是遊戲自己那顆（見上面 0x19 的說明），
+            // **權威永遠是回傳碼，不是我們數的這個數字。**
             //
-            // ⚠️ 而且目的地換成玩家背包之後，「空間不足」從邊緣情況變成常態
-            // （140 格 vs 最多 180 件），所以這裡**不能**再印警告——每次都跳的警告
-            // 就是狼來了。改成把兩個實際數字併進開跑訊息裡，讓它變成有用的資訊。
-            freeBagSlotsAtStart = (int)inventoryManager->GetEmptySlotsInBag();
+            // ⚠️ 而且收回玩家背包時「空間不足」是常態不是邊緣情況（140 格 vs 最多 180 件），
+            // 所以這裡**不能**印警告——每次都跳的警告就是狼來了。改成把實際數字併進
+            // 開跑訊息裡，讓它變成有用的資訊。
+            //
+            // ⚠️ 數哪個容器要跟著目的地走：數錯容器的「剩 N 格」比不講還糟。
+            freeDestinationSlotsAtStart = CountFreeDestinationSlots(inventoryManager);
 
             AutoRetainerBridge.AcquireSuppression("batch delist");
             suppressionHeld = true;
@@ -319,8 +357,10 @@ namespace Marketbuddy
 
             var active = retainerManager->GetActiveRetainer();
             var retainerName = active == null ? string.Empty : active->NameString;
-            ChatGui.Print("[Marketbuddy] Delisting ?? item(s) into your bags (retainer: ??, ?? bag slot(s) free)..."
-                .Loc(listed, retainerName, freeBagSlotsAtStart));
+            ChatGui.Print((toRetainerInventory
+                    ? "[Marketbuddy] Delisting ?? item(s) into the retainer's own inventory (retainer: ??, ?? retainer slot(s) free)..."
+                    : "[Marketbuddy] Delisting ?? item(s) into your bags (retainer: ??, ?? bag slot(s) free)...")
+                .Loc(listed, retainerName, freeDestinationSlotsAtStart));
         }
 
         public void CancelByButton() => queue.Abort("cancelled by user".Loc());
@@ -401,21 +441,29 @@ namespace Marketbuddy
                     CurrentItemName = job.Name;
 
                     var quantity = (uint)Math.Max(1, slot->Quantity);
-                    var result = inventoryManager->MoveFromRetainerMarketToPlayerInventory(
-                        InventoryType.RetainerMarket, (ushort)slotIndex, quantity);
+
+                    // ⚠️ 兩支函式**不能**互相退回：目的地是使用者的設定，撞牆時如實
+                    // 停手／回報，絕不靜默改送到另一個容器（那會把東西放到使用者沒
+                    // 預期的地方，而且事後很難查）。
+                    var result = toRetainerInventory
+                        ? inventoryManager->MoveFromRetainerMarketToRetainerInventory(
+                            InventoryType.RetainerMarket, (ushort)slotIndex, quantity)
+                        : inventoryManager->MoveFromRetainerMarketToPlayerInventory(
+                            InventoryType.RetainerMarket, (ushort)slotIndex, quantity);
                     lastMove = now;
                     Log.Information(
-                        $"[Marketbuddy] BatchDelist: slot {slotIndex} ({job.Name}) qty {quantity}, move returned {result}");
+                        $"[Marketbuddy] BatchDelist: slot {slotIndex} ({job.Name}) qty {quantity} -> " +
+                        $"{(toRetainerInventory ? "retainer inventory" : "player inventory")}, move returned {result}");
 
                     if (result == MoveErrNoSpace)
                     {
-                        // 🔑 背包滿了**不是失敗**，是這個功能預期中的正常結束
-                        // （140 格裝不下最多 180 件，跑不完是常態）。
+                        // 🔑 目的地滿了**不是失敗**，是這個功能預期中的正常結束
+                        // （收回背包時尤其如此：140 格裝不下最多 180 件，跑不完是常態）。
                         // 刻意**不**走 Fail()：那一件根本沒被動到，還好好掛在市場上，
                         // 把它算成「失敗」會讓使用者以為東西出事了。
                         // 整輪停在這裡，剩下的掛單原封不動留著等下一次。
                         StoppedForSpace = true;
-                        queue.Abort(BagFullReason);
+                        queue.Abort(DestinationFullReason(toRetainerInventory));
                         return TickTaskResult.Continue; // Abort 已經清空佇列
                     }
 
@@ -424,7 +472,8 @@ namespace Marketbuddy
                         // 🔴 送出被遊戲當場擋下來，而且不是空間問題。
                         // 這是「有明確原因的失敗」，絕對不能當成正常結束帶過去。
                         // 只影響這一件，記成失敗之後繼續處理下一件。
-                        Fail(job, DescribeMoveError(result, toRetainerInventory: false));
+                        // ⚠️ 目的地要傳進去：0x19／0x1C 兩支的主詞不同（見常數區）。
+                        Fail(job, DescribeMoveError(result, toRetainerInventory));
                         return TickTaskResult.Done;
                     }
 
@@ -445,7 +494,10 @@ namespace Marketbuddy
                         // 那一格已經不是原本那件道具了 = 伺服器收下並執行了。
                         ProcessedSlots++;
                         DelistedCount++;
-                        ChatGui.Print("[Marketbuddy] ??: delisted into your bags".Loc(job.Name));
+                        ChatGui.Print((toRetainerInventory
+                                ? "[Marketbuddy] ??: delisted into the retainer's inventory"
+                                : "[Marketbuddy] ??: delisted into your bags")
+                            .Loc(job.Name));
                         return TickTaskResult.Done;
                     }
 
@@ -474,8 +526,13 @@ namespace Marketbuddy
             ChatGui.PrintError("[Marketbuddy] ??: failed - ??".Loc(job.Name, reason));
         }
 
-        /// <summary>「玩家背包滿了」的說法。停手原因與錯誤字串共用同一句，措辭才不會分岔。</summary>
-        internal static string BagFullReason => "your inventory is full, cannot delist".Loc();
+        /// <summary>
+        /// 「目的地滿了」的說法。
+        /// 🔑 刻意直接轉呼 <see cref="DescribeMoveError"/> 的 0x19 分支：停手原因與錯誤
+        /// 字串共用**同一份來源**，措辭才不可能分岔成兩套。
+        /// </summary>
+        internal static string DestinationFullReason(bool toRetainerInventory)
+            => DescribeMoveError(MoveErrNoSpace, toRetainerInventory);
 
         /// <summary>
         /// 把取回函式的回傳碼翻成一句人看得懂的原因。<see cref="BatchReprice.DelistSlot"/> 共用同一份。
@@ -506,14 +563,50 @@ namespace Marketbuddy
             return inventoryManager == null ? 0 : CountListedSlots(inventoryManager);
         }
 
-        /// <summary>這一輪佔掉了玩家背包幾格；量不到就回 null，**不編數字**。</summary>
-        private int? BagSlotsUsed()
+        /// <summary>
+        /// 這一輪佔掉了**目的地容器**幾格；量不到就回 null，**不編數字**。
+        /// 開跑與收工兩次都用 <see cref="CountFreeDestinationSlots"/> 數同一個容器，
+        /// 所以兩端一定對得起來。
+        /// </summary>
+        private int? DestinationSlotsUsed()
         {
             var inventoryManager = InventoryManager.Instance();
             if (inventoryManager == null)
                 return null;
-            var used = freeBagSlotsAtStart - (int)inventoryManager->GetEmptySlotsInBag();
+            var used = freeDestinationSlotsAtStart - CountFreeDestinationSlots(inventoryManager);
             return used < 0 ? null : used;
+        }
+
+        /// <summary>目的地容器目前的空格數：背包用遊戲自己的計數，僱員則逐頁數。</summary>
+        private int CountFreeDestinationSlots(InventoryManager* inventoryManager)
+            => toRetainerInventory
+                ? CountFreeRetainerInventorySlots(inventoryManager)
+                : (int)inventoryManager->GetEmptySlotsInBag();
+
+        /// <summary>
+        /// 目前這名僱員物品欄的空格數。
+        ///
+        /// ⚠️ 只數 <c>IsLoaded</c> 的頁：沒載入的頁我們**看不到內容**，把它當成「全空」
+        /// 會憑空多報幾十格。⚠️ 這個數字跟背包那個一樣**只拿來顯示，不當閘門**——
+        /// 它不會算「併進既有堆疊」，所以是個會低估的下界；權威永遠是取回函式的回傳碼。
+        /// </summary>
+        private static int CountFreeRetainerInventorySlots(InventoryManager* inventoryManager)
+        {
+            var free = 0;
+            for (var type = InventoryType.RetainerPage1; type <= InventoryType.RetainerPage7; type++)
+            {
+                var container = inventoryManager->GetInventoryContainer(type);
+                if (container == null || !container->IsLoaded)
+                    continue;
+                for (var i = 0; i < container->Size; i++)
+                {
+                    var slot = inventoryManager->GetInventorySlot(type, i);
+                    if (slot != null && slot->ItemId == 0)
+                        free++;
+                }
+            }
+
+            return free;
         }
 
         /// <summary>目前市場容器裡第一個有東西的格子（每次都重新找，見 <see cref="DelistJob"/> 的說明）。</summary>
@@ -571,7 +664,7 @@ namespace Marketbuddy
             ReleaseSuppressionIfHeld();
             CurrentItemName = string.Empty;
 
-            // 🔑 「背包滿了」與「出錯了」**必須長得不一樣**。
+            // 🔑 「目的地滿了」與「出錯了」**必須長得不一樣**。
             // 前者是預期中的正常結束：用一般訊息（不是紅字錯誤）、講清楚進度與剩餘量、
             // 並且明說再按一次就會接著跑。把它印成錯誤會讓使用者以為東西掉了。
             //
@@ -580,9 +673,12 @@ namespace Marketbuddy
             // 於是每個僱員都白跑一趟。單僱員直接跑時沒有訂閱者，發了也不會有副作用。
             if (StoppedForSpace)
             {
-                ChatGui.Print(
-                    "[Marketbuddy] Bags are full - stopped here, this is not an error. ?? delisted, ?? still listed on this retainer. Free up space and press the button again to carry on."
-                        .Loc(DelistedCount, CountRemainingListed()));
+                // ⚠️ 講對是哪個容器滿了：使用者要去清的地方不一樣（背包 vs 這名僱員的
+                // 物品欄），講錯等於叫他去整理一個根本沒滿的容器。
+                ChatGui.Print((toRetainerInventory
+                        ? "[Marketbuddy] This retainer's inventory is full - stopped here, this is not an error. ?? delisted, ?? still listed on this retainer. Make room in that retainer's inventory and press the button again to carry on."
+                        : "[Marketbuddy] Bags are full - stopped here, this is not an error. ?? delisted, ?? still listed on this retainer. Free up space and press the button again to carry on.")
+                    .Loc(DelistedCount, CountRemainingListed()));
             }
             else
             {
@@ -602,10 +698,20 @@ namespace Marketbuddy
         {
             ReleaseSuppressionIfHeld();
             CurrentItemName = string.Empty;
-            var used = BagSlotsUsed();
+
+            // 🔑 「佔掉幾格」在收回**玩家背包**時不只是副作用，而是這個功能的**產出**：
+            // 使用者要的就是把散在各個僱員身上的同款道具併成堆疊，而「下架 N 件只佔掉
+            // M 格」正是合併真的發生了的證據。
+            //
+            // ⚠️ 收回**僱員自己的物品欄**時這個意義不成立：每名僱員的物品欄各自獨立，
+            // 跨僱員合併根本不可能發生。所以那邊只講一句中性的「佔用 N 格」，
+            // 不沿用任何跟合併有關的說法，免得暗示了一件不會發生的事。
+            var used = DestinationSlotsUsed();
             ChatGui.Print(used is null
                 ? "[Marketbuddy] Delist finished: ?? delisted, ?? failed".Loc(DelistedCount, FailedCount)
-                : "[Marketbuddy] Delist finished: ?? delisted, ?? failed (?? bag slot(s) used)"
+                : (toRetainerInventory
+                        ? "[Marketbuddy] Delist finished: ?? delisted, ?? failed (?? retainer inventory slot(s) used)"
+                        : "[Marketbuddy] Delist finished: ?? delisted, ?? failed (?? bag slot(s) used)")
                     .Loc(DelistedCount, FailedCount, used.Value));
         }
     }

@@ -160,7 +160,8 @@ namespace Marketbuddy
         private static readonly TimeSpan DelistArmWindow = TimeSpan.FromSeconds(6);
 
         /// <summary>
-        /// 全僱員下架。**刻意做成兩段式**：第一下只是「武裝」，按鈕會變成紅色的
+        /// 全僱員下架。目的地同樣聽設定「下架收回至」，預設玩家背包。
+        /// **刻意做成兩段式**：第一下只是「武裝」，按鈕會變成紅色的
         /// 確認鈕並開始倒數，要在倒數內再按一次才真的開始；倒數結束自動解除。
         ///
         /// 🔴 為什麼一定要二次確認：這個動作把一整輪上架的成果全部收回來，
@@ -200,14 +201,18 @@ namespace Marketbuddy
 
                 ImGui.PopStyleColor(3);
                 if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Every listing of every retainer goes back into your own bags. Click again to go ahead, or wait for this to time out.".Loc());
+                    ImGui.SetTooltip((conf.DelistToRetainerInventory
+                        ? "Every listing of every retainer goes back into that retainer's own inventory. Click again to go ahead, or wait for this to time out."
+                        : "Every listing of every retainer goes back into your own bags. Click again to go ahead, or wait for this to time out.").Loc());
             }
             else
             {
                 if (ImGui.Button("Delist all retainers".Loc() + "##mbdelistarm"))
                     delistArmedUntil = DateTime.UtcNow + DelistArmWindow;
                 if (!disabled && ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Takes every listing of every retainer off the market and back into your own bags, so identical items from different retainers stack together. Stops when your bags fill up - just clear space and press it again. Asks for confirmation first.".Loc());
+                    ImGui.SetTooltip((conf.DelistToRetainerInventory
+                        ? "Takes every listing of every retainer off the market and back into that retainer's own inventory (\"Delist destination\" in the settings). Stops when a retainer's inventory fills up. Asks for confirmation first."
+                        : "Takes every listing of every retainer off the market and back into your own bags, so identical items from different retainers stack together. Stops when your bags fill up - just clear space and press it again. Asks for confirmation first.").Loc());
             }
 
             if (disabled)
@@ -371,7 +376,9 @@ namespace Marketbuddy
         private DateTime sellListDelistArmedUntil = DateTime.MinValue;
 
         /// <summary>
-        /// 「本僱員全下架」——把這一名僱員的掛單全部收回**玩家背包**（跨僱員合併堆疊用）。
+        /// 「本僱員全下架」——把這一名僱員的掛單全部下架收回。
+        /// 目的地聽設定「下架收回至」（<see cref="Configuration.DelistToRetainerInventory"/>），
+        /// 預設是玩家背包（跨僱員合併堆疊用）；提示文字會跟著目的地換句話說。
         ///
         /// 🔑 這顆按鈕**沒有自己的執行邏輯**：它直接驅動 <see cref="BatchDelist"/>，
         /// 也就是全僱員巡迴在每一名僱員身上跑的那同一個引擎。所以二次確認、等那一格
@@ -430,14 +437,18 @@ namespace Marketbuddy
 
                 ImGui.PopStyleColor(3);
                 if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Every listing of this retainer goes back into your own bags. Click again to go ahead, or wait for this to time out.".Loc());
+                    ImGui.SetTooltip((conf.DelistToRetainerInventory
+                        ? "Every listing of this retainer goes back into the retainer's own inventory. Click again to go ahead, or wait for this to time out."
+                        : "Every listing of this retainer goes back into your own bags. Click again to go ahead, or wait for this to time out.").Loc());
             }
             else
             {
                 if (ImGui.Button("Delist this retainer".Loc() + "##mbselldelistarm"))
                     sellListDelistArmedUntil = DateTime.UtcNow + DelistArmWindow;
                 if (!disabled && ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Takes every listing of this retainer off the market and back into your own bags, so identical items from different retainers stack together. Asks for confirmation first.".Loc());
+                    ImGui.SetTooltip((conf.DelistToRetainerInventory
+                        ? "Takes every listing of this retainer off the market and back into the retainer's own inventory (\"Delist destination\" in the settings). Asks for confirmation first."
+                        : "Takes every listing of this retainer off the market and back into your own bags, so identical items from different retainers stack together. Asks for confirmation first.").Loc());
             }
 
             if (disabled)
@@ -610,28 +621,6 @@ namespace Marketbuddy
             }
 
             DrawNestIndicator(1);
-            ImGui.TextUnformatted("Delist destination".Loc());
-            ImGui.SameLine();
-            ImGui.SetNextItemWidth(160);
-            if (ImGui.BeginCombo("##mbdelistdest",
-                    conf.DelistToRetainerInventory ? "Retainer inventory".Loc() : "Player inventory".Loc()))
-            {
-                if (ImGui.Selectable("Player inventory".Loc(), !conf.DelistToRetainerInventory))
-                {
-                    conf.DelistToRetainerInventory = false;
-                    conf.Save();
-                }
-
-                if (ImGui.Selectable("Retainer inventory".Loc(), conf.DelistToRetainerInventory))
-                {
-                    conf.DelistToRetainerInventory = true;
-                    conf.Save();
-                }
-
-                ImGui.EndCombo();
-            }
-
-            DrawNestIndicator(1);
             ImGui.TextUnformatted("Reuse market data seen in the last".Loc());
             ImGui.SameLine();
             // 步進 60（一分鐘）／快速步進 300（五分鐘）：跑一輪多角色時常用的值是
@@ -655,6 +644,39 @@ namespace Marketbuddy
             if (ImGui.Button("Clear price cache (?? items)".Loc(MarketDataCache.FreshCount(conf.MarketDataCacheSeconds)) +
                              "##mbclearcache"))
                 MarketDataCache.Clear();
+
+            // 🔴 這一項刻意畫在**最外層**、不掛在重掛那一組底下。
+            // 它管的範圍比「批次重掛」大：改價流程裡的自動下架**以及**兩顆手動下架按鈕
+            // （出售品視窗的「本僱員全下架」、僱員選單的「全僱員下架」）通通聽它。
+            // 縮排在重掛底下會讓人以為關掉重掛就與它無關，但按鈕照樣會照它走。
+            ImGui.Spacing();
+            ImGui.TextUnformatted("Delist destination".Loc());
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(160);
+            if (ImGui.BeginCombo("##mbdelistdest",
+                    conf.DelistToRetainerInventory ? "Retainer inventory".Loc() : "Player inventory".Loc()))
+            {
+                if (ImGui.Selectable("Player inventory".Loc(), !conf.DelistToRetainerInventory))
+                {
+                    conf.DelistToRetainerInventory = false;
+                    conf.Save();
+                }
+
+                if (ImGui.Selectable("Retainer inventory".Loc(), conf.DelistToRetainerInventory))
+                {
+                    conf.DelistToRetainerInventory = true;
+                    conf.Save();
+                }
+
+                ImGui.EndCombo();
+            }
+
+            DrawNestIndicator(1);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "Where delisted items go - this applies to every delist this plugin does: the automatic ones during relisting (the two settings above) and both manual buttons, \"Delist this retainer\" in the sell list and \"Delist all retainers\" in the retainer menu. Player inventory is the default because it is the only choice that merges stacks: identical items spread across several retainers only combine when they all land in the same container, and each retainer's inventory is separate from every other one's. Your bags are smaller than what nine retainers can list, so a full-inventory stop is normal - clear space and press the button again to carry on."
+                    .Loc());
+            ImGui.PopStyleColor();
 
             ImGui.Spacing();
             if (ImGui.Checkbox("Show a live sell list next to the game's one".Loc(), ref conf.LiveSellListOverlay))
