@@ -34,6 +34,8 @@ namespace Marketbuddy
 
         internal ManualRequery ManualRequery { get; private set; }
 
+        internal LiveSellList LiveSellList { get; private set; }
+
         // Assembly compatible with dev & published versions 
         public string AssemblyLocation { get; set; } = Assembly.GetExecutingAssembly().Location;
         public string Name => "Marketbuddy";
@@ -58,6 +60,10 @@ namespace Marketbuddy
                 MultiReprice = new MultiRetainerReprice(MarketGuiEventHandler, BatchReprice);
 
                 ManualRequery = new ManualRequery(MarketGuiEventHandler);
+
+                // Display only: draws a live copy of the retainer's listings next to the
+                // game's own (which never redraws itself after a headless reprice).
+                LiveSellList = new LiveSellList(MarketGuiEventHandler, BatchReprice);
 
                 try
                 {
@@ -97,6 +103,7 @@ namespace Marketbuddy
             PluginInterface.UiBuilder.OpenConfigUi -= DrawConfigUi;
             Common.Dalamud.CommandManager.RemoveHandler(commandName);
             PluginUi.Dispose();
+            LiveSellList.Dispose();
             QuickLister?.Dispose();
             ManualRequery.Dispose();
             MultiReprice.Dispose();

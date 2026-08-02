@@ -38,6 +38,16 @@ namespace Marketbuddy
         public bool DelistToRetainerInventory = false;
         public int QuickListKeyCode = 0;
 
+        /// <summary>
+        /// 「即時出售品清單」：在遊戲的出售品視窗旁邊，由外掛自己畫一份永遠最新的掛單表。
+        /// 純顯示、每幀重讀容器，不做任何遊戲操作、不改任何原生節點（見 LiveSellList 的說明）。
+        /// 依市場紅線一律預設關閉；批次改價完成時會提示一次它的存在。
+        /// </summary>
+        public bool LiveSellListOverlay = false;
+
+        /// <summary>面板相對於出售品視窗「右上角」的位移。</summary>
+        public Vector2 LiveSellListOffset = new Vector2(4, 0);
+
         public int Version { get; set; } = 0;
 
         // the below exist just to make saving/loading less cumbersome

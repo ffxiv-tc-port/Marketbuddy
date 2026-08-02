@@ -39,6 +39,7 @@ namespace Marketbuddy
             DrawSettingsWindow();
             DrawOverlayWindow();
             DrawRetainerListOverlay();
+            marketbuddy.LiveSellList.Draw();
         }
 
         private void DrawRetainerListOverlay()
@@ -384,6 +385,26 @@ namespace Marketbuddy
             if (ImGui.Button("Clear price cache (?? items)".Loc(marketbuddy.BatchReprice.PriceCacheCount) +
                              "##mbclearcache"))
                 marketbuddy.BatchReprice.ClearPriceCache();
+
+            ImGui.Spacing();
+            if (ImGui.Checkbox("Show a live sell list next to the game's one".Loc(), ref conf.LiveSellListOverlay))
+                conf.Save();
+
+            DrawNestIndicator(1);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "Batch repricing writes prices straight into the retainer's market container without opening any game window - which is exactly why it is fast, but it also means the game's sell list never redraws and keeps showing the prices it had when you opened it (a just-listed item stays at 999,999,999 on screen even though the server already has the right price). This panel is drawn by the plugin and re-read every frame, so it is always current. It only reads: no game windows are touched and nothing is clicked for you."
+                    .Loc());
+            ImGui.PopStyleColor();
+
+            if (conf.LiveSellListOverlay)
+            {
+                DrawNestIndicator(2);
+                ImGui.DragFloat2("Position (relative to the sell list's top right)".Loc(),
+                    ref conf.LiveSellListOffset, 1f, -4000f, 4000f, "%.0f");
+                if (ImGui.IsItemDeactivatedAfterEdit())
+                    conf.Save();
+            }
 
             ImGui.Spacing();
             ImGui.TextUnformatted("Quick listing: hold this key and right-click an item to put it up for sale".Loc());

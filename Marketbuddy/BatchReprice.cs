@@ -34,52 +34,27 @@ namespace Marketbuddy
     {
         // Pacing / safety constants. Requests are throttled and retried with
         // backoff instead of patching the client's "please wait" throttle path.
-        // 🔑 2026-08-02 實機診斷（MBDIAG，n=39，零重疊）定案了節流的真實形狀：
-        // 送出請求時「距離上一次收到資料」的毫秒數，完全決定這次請求會不會被靜默吞掉。
-        //     ✅ 拿到資料：3107 – 5572 ms（n=20）
-        //     ❌ 靜默逾時：  14 –   69 ms（n=19，連 history 封包都沒有＝根本沒送出去）
-        // 也就是說：客戶端會把「太快的下一次市場請求」直接丟掉，不回錯誤、不發封包。
-        // 舊的 ThrottleMs=500 是從「上一次**送出**」起算的，而且 500ms 遠低於真實門檻，
-        // 所以每一件的第一次嘗試都必然白等滿 OfferingsTimeoutMs，第二次才拿得到
-        // ——每件固定浪費一整個逾時，這就是「比手動還慢」的全部成因。
         //
-        // 修法兩件：(1) 改成從「上一次**收到資料**」起算；(2) 間隔改成自我校準（見
-        // learnedRequestIntervalMs）。真實門檻只知道落在 69ms 與 3107ms 之間，硬編一個數字
-        // 遲早過期，所以讓它自己往上爬到不再被吞為止。
-        private const int RequestIntervalStartMs = 2500;  // 起始間隔（保守；已知 3107 一定過）
-        private const int RequestIntervalStepMs = 500;    // 每次被吞就往上加
-        private const int RequestIntervalCapMs = 4000;    // 上限（仍優於舊行為的 6000+）
-
-        // 逾時砍到 1500：實測成功的回應在請求後 ~100-290ms 出現 history、~350-650ms 出現
-        // offerings，5000ms 是實際需要的 7 倍以上。砍短之後「猜錯間隔」的代價從 5s 降到 1.5s，
-        // 自我校準才付得起學習成本。
-        private const int OfferingsTimeoutMs = 1500;  // max wait for market data per attempt
-        private const int RetryBackoffBaseMs = 500;  // backoff before retry N is min(N * this, RetryBackoffCapMs)...
-        private const int RetryBackoffCapMs = 2000;  // ...never escalating past this (stays quick even after several stalls)
+        // 🔑 送出節流的真實形狀（以及它為什麼是 send→send 而不是 data→send）整段寫在
+        // MarketRequestGate 的類別註解裡，那裡才是唯一真值來源，這裡不重複。
+        // 摘要：門檻約 1.5 秒、以「上一次送出」起算，由 MarketRequestGate 自我校準。
+        //
+        // 逾時的形狀（同一份 n=417 的實機資料）：
+        //     REQ → HISTORY   ：min 101 / p50 124 / p90 341 / max 509 ms
+        //     REQ → OFFERINGS ：min 250 / p50 475 / p90 682 / max 861 ms
+        // 所以「送出後 1000 ms 內連一個封包都沒有」＝這次請求被吞了，可以立刻判定，
+        // 不必等滿一個泛用逾時。這讓猜錯間隔的代價從 1500 ms 降到 1000 ms。
+        private const int NoResponseDeadlineMs = 1000; // nothing at all by now => the request was swallowed
+        private const int ResponseTimeoutMs = 3000;    // hard cap per attempt once *something* did arrive (safety net)
+        private const int RetryBackoffBaseMs = 300;    // backoff before retry N is min(N * this, RetryBackoffCapMs)...
+        private const int RetryBackoffCapMs = 1200;    // ...never escalating past this (the gate adds its own spacing on top)
         private const int MaxAttempts = 8;           // 1 initial attempt + up to 7 retries per slot
-        private const int SlotWatchdogSeconds = 60;  // hard per-slot watchdog (queue-level safety net; sized for MaxAttempts * OfferingsTimeoutMs + backoffs, worst case ~51s, with margin)
+        private const int SlotWatchdogSeconds = 60;  // hard per-slot watchdog (queue-level safety net; sized for MaxAttempts attempts plus gate spacing and backoffs, with margin)
         private const int EmptyResultGraceMs = 1000; // history seen + this long with no offerings => nothing on sale
         private const int PriceCacheTtlMinutes = 30; // reuse market data for the same item within this window
 
         /// <summary>Backoff before retry attempt N: escalates fast, then caps low - never the multi-second climb of a classic exponential backoff.</summary>
         private static int RetryBackoffFor(int attempt) => Math.Min(RetryBackoffBaseMs * attempt, RetryBackoffCapMs);
-
-        /// <summary>
-        /// 自我校準的「兩次市場請求之間、從收到上一份資料起算」的最小間隔。
-        /// 刻意用 static：一次巡迴會跑過多名雇員，學到的值要跨雇員沿用，不然每個雇員都要重學。
-        /// 只往上爬、不往下降 —— 往下降會震盪，而每次猜錯的代價是一個完整逾時。
-        /// </summary>
-        private static int learnedRequestIntervalMs = RequestIntervalStartMs;
-
-        private static void WidenRequestInterval()
-        {
-            if (learnedRequestIntervalMs >= RequestIntervalCapMs)
-                return;
-
-            var before = learnedRequestIntervalMs;
-            learnedRequestIntervalMs = Math.Min(learnedRequestIntervalMs + RequestIntervalStepMs, RequestIntervalCapMs);
-            Log.Information($"{Diag} INTERVAL widened {before} -> {learnedRequestIntervalMs} ms (request was swallowed)");
-        }
 
         private enum SlotPhase
         {
@@ -104,6 +79,8 @@ namespace Marketbuddy
             public DateTime WaitStart;
             /// <summary>Diagnostics only: when this slot was first ticked, for total-elapsed reporting.</summary>
             public DateTime StartedAt = DateTime.MinValue;
+            /// <summary>send→send gap of the attempt currently in flight; fed back to the gate when it turns out to have been swallowed.</summary>
+            public double SendGapMs = -1;
         }
 
         private sealed class CachedOfferings
@@ -123,8 +100,18 @@ namespace Marketbuddy
         private DateTime historySeenAt;
         private uint pendingItemId;
         private int lastAcceptedRequestId = int.MinValue;
-        private DateTime lastRequestAt = DateTime.MinValue;
         private bool suppressionHeld;
+
+        // Per-slot record of what the batch actually changed, for the live sell
+        // list overlay (display only - see LiveSellList). Keyed by market slot.
+        private readonly Dictionary<short, (uint OldPrice, uint NewPrice, DateTime At)> recentChanges = new();
+        private ulong recentChangesRetainerId;
+
+        /// <summary>Read-only view of the prices this session changed, so the overlay can flag them. Display only.</summary>
+        public IReadOnlyDictionary<short, (uint OldPrice, uint NewPrice, DateTime At)> RecentChanges => recentChanges;
+
+        /// <summary>Retainer the <see cref="RecentChanges"/> marks belong to; the overlay ignores them for anybody else.</summary>
+        public ulong RecentChangesRetainerId => recentChangesRetainerId;
 
         // ---------------------------------------------------------------
         // Temporary instrumentation (2026-08-02).
@@ -489,10 +476,10 @@ namespace Marketbuddy
                     if (now < job.NotBefore)
                         return TickTaskResult.Continue;
 
-                    // 🔑 從「上一次收到資料」起算，不是從「上一次送出」起算——實機診斷證實
-                    // 決定請求會不會被吞掉的是前者（見檔頭 RequestIntervalStartMs 的說明）。
-                    // lastDataReceivedAt 為 MinValue（本次巡迴的第一件）時差值極大，直接放行。
-                    if ((now - lastDataReceivedAt).TotalMilliseconds < learnedRequestIntervalMs)
+                    // 🔑 從「上一次**送出**」起算（見 MarketRequestGate）。舊版從「上一次
+                    // 收到資料」起算，在前一件是「沒人在賣」的道具時會讓時間戳停在再上一件，
+                    // 於是 send→send 只隔 1.1～1.4 秒就撞牆 —— 實機三次逾時全是這個形狀。
+                    if (!MarketRequestGate.IsReady(now))
                         return TickTaskResult.Continue;
 
                     job.Phase = SlotPhase.Request;
@@ -522,7 +509,8 @@ namespace Marketbuddy
                     historySeen = false;
                     pendingItemId = job.ItemId;
                     offeringsPending = true;
-                    lastRequestAt = now;
+                    job.SendGapMs = MarketRequestGate.MsSinceLastRequest(now);
+                    MarketRequestGate.NoteRequestSent(now);
                     job.WaitStart = now;
                     if (job.StartedAt == DateTime.MinValue)
                         job.StartedAt = now;
@@ -530,7 +518,8 @@ namespace Marketbuddy
                     var sent = proxy->RequestData();
                     Log.Information(
                         $"{Diag} REQUEST item={job.ItemId} '{job.Name}' attempt={job.Attempt} " +
-                        $"RequestData={sent} msSinceLastData={MsSince(lastDataReceivedAt):F0}");
+                        $"RequestData={sent} sendGapMs={job.SendGapMs:F0} gate={MarketRequestGate.IntervalMs} " +
+                        $"msSinceLastData={MsSince(lastDataReceivedAt):F0}");
 
                     if (!sent)
                     {
@@ -557,6 +546,7 @@ namespace Marketbuddy
                             $"{Diag} SLOT-DONE item={job.ItemId} '{job.Name}' via=offerings " +
                             $"attempts={job.Attempt} waitMs={(now - job.WaitStart).TotalMilliseconds:F0} " +
                             $"totalMs={(now - job.StartedAt).TotalMilliseconds:F0}");
+                        MarketRequestGate.NoteAccepted();
                         StoreCachedOfferings(job.ItemId, captured);
                         job.Phase = SlotPhase.Apply;
                         return TickTaskResult.Continue;
@@ -575,25 +565,33 @@ namespace Marketbuddy
                             $"{Diag} SLOT-DONE item={job.ItemId} '{job.Name}' via=history-grace(empty) " +
                             $"attempts={job.Attempt} totalMs={(now - job.StartedAt).TotalMilliseconds:F0}");
                         offeringsPending = false;
+                        // The history packet proves the request reached the server, so this
+                        // counts as a clean request for pacing purposes even though no
+                        // offerings page exists for an item nobody is selling.
+                        MarketRequestGate.NoteAccepted();
                         captured.Clear();
                         StoreCachedOfferings(job.ItemId, captured);
                         job.Phase = SlotPhase.Apply;
                         return TickTaskResult.Continue;
                     }
 
-                    if ((now - job.WaitStart).TotalMilliseconds > OfferingsTimeoutMs)
+                    var waitedMs = (now - job.WaitStart).TotalMilliseconds;
+
+                    // 兩種逾時要分開，因為它們代表相反的事、需要相反的修正：
+                    //   (a) 什麼封包都沒來 → 請求被節流吞掉了 → 間隔不夠長，要往上加。
+                    //   (b) history 來了、offerings 沒來 → 請求送到了，是伺服器/網路慢
+                    //       → 間隔沒有問題，加長它只會白白拖慢每一件。
+                    // (a) 判得比 (b) 早得多：實測任何回應最遲 861 ms 就會出現。
+                    var swallowed = !historySeen && waitedMs > NoResponseDeadlineMs;
+                    if (swallowed || waitedMs > ResponseTimeoutMs)
                     {
                         Log.Information(
                             $"{Diag} TIMEOUT item={job.ItemId} '{job.Name}' attempt={job.Attempt} " +
-                            $"historySeen={historySeen} waitedMs={(now - job.WaitStart).TotalMilliseconds:F0}");
+                            $"historySeen={historySeen} swallowed={swallowed} waitedMs={waitedMs:F0}");
                         offeringsPending = false;
 
-                        // history 一片空白＝這次請求根本沒送出去（被客戶端節流吞掉），
-                        // 不是伺服器慢 —— 那代表我們的間隔還不夠長，往上加。
-                        // 反之若 history 有來、只是 offerings 沒到，那是另一回事（真的在等
-                        // 伺服器），不該因此拉長間隔。
-                        if (!historySeen)
-                            WidenRequestInterval();
+                        if (swallowed)
+                            MarketRequestGate.NoteRefused(job.SendGapMs);
 
                         if (job.Attempt >= MaxAttempts)
                         {
@@ -728,6 +726,7 @@ namespace Marketbuddy
             }
 
             inventoryManager->SetRetainerMarketPrice(job.Slot, newPrice);
+            NoteChange(job.Slot, (uint)current, newPrice);
             ProcessedSlots++;
             RepricedCount++;
             ChatGui.Print(successMessage ?? "[Marketbuddy] ??: ?? → ?? gil".Loc(job.Name, current, newPrice) + cacheTag);
@@ -874,6 +873,7 @@ namespace Marketbuddy
             }
 
             Log.Debug($"BatchReprice: delist slot {job.Slot} ({job.Name}) qty {quantity}, move returned {result}");
+            ForgetChange(job.Slot);
             ProcessedSlots++;
             DelistedCount++;
             ChatGui.Print(chatMessage + destinationTag);
@@ -984,7 +984,62 @@ namespace Marketbuddy
             ResetRequestState();
             ChatGui.Print("[Marketbuddy] Relist finished: ?? repriced, ?? skipped, ?? delisted, ?? failed"
                 .Loc(RepricedCount, SkippedCount, DelistedCount, FailedCount));
+            HintAboutStaleSellList();
             BatchFinished?.Invoke();
+        }
+
+        /// <summary>
+        /// Prices are written straight into the retainer's market container, so the game's
+        /// own sell list never redraws - it keeps showing whatever it showed when it opened.
+        /// The plugin can draw a live list instead (see <see cref="LiveSellList"/>), but that
+        /// is opt-in, so point the player at it once per session when it is off and something
+        /// actually changed. One line, once - deliberately not every batch.
+        /// </summary>
+        private static bool staleListHintShown;
+
+        private void HintAboutStaleSellList()
+        {
+            if (staleListHintShown || conf.LiveSellListOverlay)
+                return;
+            if (RepricedCount == 0 && DelistedCount == 0)
+                return;
+
+            staleListHintShown = true;
+            ChatGui.Print(
+                "[Marketbuddy] The game's sell list does not redraw itself, so it still shows the old prices - the new ones are already on the server. Turn on \"Live sell list\" in /mbuddy to see them right away."
+                    .Loc());
+        }
+
+        /// <summary>
+        /// Records a price change for the live sell list overlay (display only).
+        /// Slots are per-retainer, so the marks are dropped the moment a different
+        /// retainer becomes active - otherwise retainer B's slot 3 would inherit
+        /// retainer A's "changed" flag.
+        /// </summary>
+        private void NoteChange(short slot, uint oldPrice, uint newPrice)
+        {
+            var retainerId = ActiveRetainerId();
+            if (retainerId != recentChangesRetainerId)
+            {
+                recentChanges.Clear();
+                recentChangesRetainerId = retainerId;
+            }
+
+            recentChanges[slot] = (oldPrice, newPrice, DateTime.UtcNow);
+        }
+
+        private void ForgetChange(short slot)
+        {
+            if (ActiveRetainerId() == recentChangesRetainerId)
+                recentChanges.Remove(slot);
+        }
+
+        /// <summary>Content id of the retainer currently being interacted with, or 0.</summary>
+        public static ulong ActiveRetainerId()
+        {
+            var retainerManager = RetainerManager.Instance();
+            var active = retainerManager == null ? null : retainerManager->GetActiveRetainer();
+            return active == null ? 0ul : active->RetainerId;
         }
 
 

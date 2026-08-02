@@ -121,6 +121,12 @@ namespace Marketbuddy
 
             attempt++;
             Log.Information($"[Marketbuddy] ManualRequery: item {watchedItemId} search looked stalled, retrying ({attempt}/{MaxAttempts})");
+            // Same shared server-side pacing applies to this request as to the batch
+            // engine's, so it has to be recorded even though this path never waits on
+            // the gate itself: the player is watching this window and a retry that is
+            // 200 ms "too early" is far better than one that never fires. Recording it
+            // keeps a batch started right afterwards from colliding with it.
+            MarketRequestGate.NoteRequestSent(DateTime.UtcNow);
             proxy->RequestData();
             var backoff = Math.Min(BackoffStepMs * attempt, BackoffCapMs);
             nextActionAt = DateTime.UtcNow.AddMilliseconds(backoff);
