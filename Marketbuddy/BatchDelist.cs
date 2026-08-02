@@ -51,14 +51,22 @@ namespace Marketbuddy
         /// <summary>僱員市場容器的格數上限；每個索引兩端都會檢查。</summary>
         private const int MaxMarketSlots = 20;
 
-        /// <summary>送出取回請求之後，等那一格真的空掉的上限。</summary>
-        private const int MoveAckTimeoutMs = 10000;
+        /// <summary>
+        /// 送出取回請求之後，等那一格真的空掉的上限。
+        ///
+        /// ⚠️ 20 秒看起來很久，但這個數字**不是隨手取的**：先前在別的地方量過僱員容器
+        /// 的伺服器來回，本機狀態被伺服器推翻／確認的時間實測落在 3.9～10.6 秒。
+        /// 門檻壓在 10 秒等於把「比較慢但其實成功」的那條長尾誤判成失敗，
+        /// 然後停掉整輪並跟使用者說伺服器沒回應——那是最糟的一種假警報。
+        /// 逾時只是最後的保險絲，設寬一點的代價只有「真的壞掉時多等一下」。
+        /// </summary>
+        private const int MoveAckTimeoutMs = 20000;
 
         /// <summary>連續兩次取回之間的最小間隔，避免一口氣把 20 筆交易全丟給伺服器。</summary>
         private const int MoveThrottleMs = 250;
 
         /// <summary>每一格的看門狗（佇列層的最後保險，必須寬於 MoveAckTimeoutMs）。</summary>
-        private const int SlotWatchdogSeconds = 20;
+        private const int SlotWatchdogSeconds = 30;
 
         // ------------------------------------------------------------------
         // MoveFromRetainerMarketToRetainerInventory 的回傳值。
