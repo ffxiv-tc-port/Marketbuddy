@@ -425,6 +425,18 @@ namespace Marketbuddy
             }
         }
 
+        /// <summary>上一次記錄過的阻塞原因；只在原因改變時才寫 log，避免每幀洗版。</summary>
+        private string lastBlockReason = string.Empty;
+
+        private void NoteBlockReason(string reason)
+        {
+            if (reason == lastBlockReason)
+                return;
+            lastBlockReason = reason;
+            // Information：使用者的記錄等級會濾掉 Debug/Verbose。
+            Log.Information($"[Marketbuddy] [MBDIAG] QUICKLIST-BLOCKED {reason}");
+        }
+
         private void PumpRepriceQueue()
         {
             // Expire first so a stuck head never blocks the rest.
@@ -439,17 +451,39 @@ namespace Marketbuddy
             }
 
             if (repriceQueue.Count == 0)
+            {
+                lastBlockReason = string.Empty;
                 return;
-            if (engine.IsRunning || tour.IsRunning || IPCManager.IsLocked || !gui.IsRetainerSellListOpen)
+            }
+
+            // 🔴 這五個條件原本全部靜默 return，所以「排進佇列卻沒人接手、30 秒後噴
+            // 『請手動定價』」在 log 裡完全沒有線索（2026-08-02 實機遇到，只能靠推理）。
+            // 佇列非空卻動不了時就把原因記下來——只在原因「改變」時記一次，不會洗版。
+            var blocked =
+                engine.IsRunning ? "engine already running"
+                : tour.IsRunning ? "multi-retainer tour running"
+                : IPCManager.IsLocked ? "IPC locked by another plugin"
+                : !gui.IsRetainerSellListOpen ? "RetainerSellList not open"
+                : string.Empty;
+
+            if (blocked.Length > 0)
+            {
+                NoteBlockReason($"{blocked} (queued={repriceQueue.Count}, head='{repriceQueue[0].Name}')");
                 return;
+            }
 
             var next = repriceQueue[0];
             if (engine.StartQuickReprice(next.Slot))
             {
+                lastBlockReason = string.Empty;
                 repriceQueue.RemoveAt(0);
                 claimedSlots.Remove(next.Slot);
+                return;
             }
+
             // On false: the engine cannot start right now; retry until the deadline.
+            // StartQuickReprice 內部自己有更細的原因（CanStart 的 reason），這裡把它撈出來。
+            NoteBlockReason($"engine refused: {engine.LastStartRefusalReason} (queued={repriceQueue.Count}, head='{next.Name}')");
         }
 
         private static string ResolveItemName(InventoryItem* item, out string baseName)

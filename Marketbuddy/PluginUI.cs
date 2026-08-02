@@ -224,6 +224,16 @@ namespace Marketbuddy
                     .Loc());
             ImGui.PopStyleColor();
 
+            if (ImGui.Checkbox("[Experimental] Redraw the sell list after repricing".Loc(), ref conf.RefreshSellListAfterReprice))
+                conf.Save();
+
+            DrawNestIndicator(1);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudOrange);
+            ImGui.TextWrapped(
+                "Prices are written straight to the retainer's market container without opening any game window, so the sell list keeps showing the values it had when you opened it - a just-listed item stays at 999,999,999 on screen even though the server already has the right price. Turning this on asks that window to redraw itself.\n\nRISK: this addon is not modelled by ClientStructs and its redraw path has never been verified on the Taiwan client. If it misbehaves the game can crash outright (this class of fault cannot be caught). Leave it off unless the stale display genuinely bothers you; turning it off restores the previous behaviour completely."
+                    .Loc());
+            ImGui.PopStyleColor();
+
             ImGui.Spacing();
             if (ImGui.Checkbox("Open current prices list when adjusting a price".Loc(), ref conf.AutoOpenComparePrices))
                 conf.Save();
