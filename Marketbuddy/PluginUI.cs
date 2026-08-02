@@ -280,6 +280,7 @@ namespace Marketbuddy
             {
                 ImGui.Separator();
                 DrawBatchRepriceRow();
+                DrawSingleRetainerDelistRow();
             }
 
             var bottom = ImGui.GetWindowPos().Y + ImGui.GetWindowSize().Y;
@@ -363,6 +364,87 @@ namespace Marketbuddy
             else if (ImGui.IsItemHovered())
             {
                 ImGui.SetTooltip(PricingRuleText());
+            }
+        }
+
+        /// <summary>本僱員全下架的「已武裝」到期時間；<see cref="DateTime.MinValue"/> = 沒武裝。</summary>
+        private DateTime sellListDelistArmedUntil = DateTime.MinValue;
+
+        /// <summary>
+        /// 「本僱員全下架」——把這一名僱員的掛單全部收回**玩家背包**（跨僱員合併堆疊用）。
+        ///
+        /// 🔑 這顆按鈕**沒有自己的執行邏輯**：它直接驅動 <see cref="BatchDelist"/>，
+        /// 也就是全僱員巡迴在每一名僱員身上跑的那同一個引擎。所以二次確認、等那一格
+        /// 真的空掉才算數、背包滿了乾淨停手並照實回報——全部自動一致，不會分岔成兩套。
+        /// 全僱員版本就是「巡迴 + 對每個僱員跑這一個引擎」。
+        ///
+        /// 🔴 二次確認**沒有因為只有一名僱員就放寬**：它一樣是把一整批上架成果收回來，
+        /// 而且就在重掛按鈕正下方，手滑的代價一樣高。形式比照僱員選單那顆。
+        /// </summary>
+        private void DrawSingleRetainerDelistRow()
+        {
+            var engine = marketbuddy.BatchDelist;
+            if (engine.IsRunning)
+            {
+                ImGui.Separator();
+                var currentIndex = Math.Min(engine.ProcessedSlots + 1, engine.TotalSlots);
+                ImGui.TextUnformatted(
+                    "Delisting ??/??: ??".Loc(currentIndex, engine.TotalSlots, engine.CurrentItemName));
+                ImGui.SameLine();
+                if (ImGui.Button("Cancel".Loc() + "##mbselldelistcancel"))
+                    engine.CancelByButton();
+                return;
+            }
+
+            // 巡迴在跑的時候引擎歸巡迴所有，不要在這裡再開第二個入口。
+            // （重掛那一列也是同樣的處理。）
+            if (marketbuddy.MultiTour.IsRunning || marketbuddy.BatchReprice.IsRunning)
+                return;
+
+            ImGui.Separator();
+
+            var armed = sellListDelistArmedUntil > DateTime.UtcNow;
+            if (!armed && sellListDelistArmedUntil != DateTime.MinValue)
+                sellListDelistArmedUntil = DateTime.MinValue;
+
+            var canStart = engine.CanStart(out var reason);
+            var disabled = !canStart && !AutoRetainerBridge.IsBusy;
+            if (disabled)
+            {
+                sellListDelistArmedUntil = DateTime.MinValue;
+                armed = false;
+                ImGui.BeginDisabled();
+            }
+
+            if (armed)
+            {
+                var left = (int)Math.Ceiling((sellListDelistArmedUntil - DateTime.UtcNow).TotalSeconds);
+                ImGui.PushStyleColor(ImGuiCol.Button, ImGuiColors.DalamudRed);
+                ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ImGuiColors.DalamudRed);
+                ImGui.PushStyleColor(ImGuiCol.ButtonActive, ImGuiColors.DalamudRed);
+                if (ImGui.Button("Confirm: take this retainer's listings off the market (??)".Loc(left) + "##mbselldeliststart"))
+                {
+                    sellListDelistArmedUntil = DateTime.MinValue;
+                    engine.Start();
+                }
+
+                ImGui.PopStyleColor(3);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Every listing of this retainer goes back into your own bags. Click again to go ahead, or wait for this to time out.".Loc());
+            }
+            else
+            {
+                if (ImGui.Button("Delist this retainer".Loc() + "##mbselldelistarm"))
+                    sellListDelistArmedUntil = DateTime.UtcNow + DelistArmWindow;
+                if (!disabled && ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Takes every listing of this retainer off the market and back into your own bags, so identical items from different retainers stack together. Asks for confirmation first.".Loc());
+            }
+
+            if (disabled)
+            {
+                ImGui.EndDisabled();
+                if (!string.IsNullOrEmpty(reason) && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                    ImGui.SetTooltip(reason);
             }
         }
 
