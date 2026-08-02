@@ -16,14 +16,6 @@ namespace Marketbuddy
         public bool AutoOpenHistory = true;
         public bool AutoRequeryOnThrottle = true;
 
-        /// <summary>
-        /// 🧪 實驗性、預設關閉：批次改價結束後請「出售品」清單重畫一次，讓畫面立刻顯示新價格
-        /// （不開的話要關掉再重開出售品視窗才看得到；伺服器上的價格本來就是對的，純顯示問題）。
-        /// 🔴 有當掉風險：`RetainerSellList` 在 ClientStructs 裡沒有被建模，台服上它怎麼處理
-        /// OnRefresh 沒有人驗證過。詳見 BatchReprice.TryRefreshSellListDisplay 的說明。
-        /// </summary>
-        public bool RefreshSellListAfterReprice = false;
-
         public bool SaveToClipboard = true;
         public bool AutoInputNewPrice = true;
         public bool AutoConfirmNewPrice = true;

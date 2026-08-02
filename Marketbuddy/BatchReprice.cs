@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using Dalamud.Game.ClientState.Keys;
@@ -7,7 +7,6 @@ using Dalamud.Game.Text;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI.Info;
-using FFXIVClientStructs.FFXIV.Component.GUI;
 using Lumina.Excel.Sheets;
 using Marketbuddy.Common;
 using static Marketbuddy.Common.Dalamud;
@@ -985,40 +984,9 @@ namespace Marketbuddy
             ResetRequestState();
             ChatGui.Print("[Marketbuddy] Relist finished: ?? repriced, ?? skipped, ?? delisted, ?? failed"
                 .Loc(RepricedCount, SkippedCount, DelistedCount, FailedCount));
-            if (RepricedCount > 0 || DelistedCount > 0)
-                TryRefreshSellListDisplay();
             BatchFinished?.Invoke();
         }
 
-        /// <summary>
-        /// 🧪 實驗性：批次結束後請「出售品」清單重畫一次。
-        ///
-        /// 為什麼需要：改價是走 SetRetainerMarketPrice 直寫容器的（刻意不開任何原生視窗），
-        /// 所以 RetainerSellList 這個 addon 不會自己重繪 —— 畫面上會停在開窗當下的舊價格，
-        /// 尤其剛上架的道具會一直顯示 999,999,999。伺服器上的價格是對的，純顯示問題。
-        ///
-        /// 🔴 為什麼預設關閉：`RetainerSellList` **在 FFXIVClientStructs 裡沒有被建模**
-        /// （只有單件改價用的 `RetainerSell`），艦隊裡也沒有任何一個已驗證的 addon 重繪慣例
-        /// 可以抄。這裡呼叫 `OnRefresh(0, null)` —— 傳 0 個值是最不容易被解參考的形式，
-        /// 但**台服的這個 addon 怎麼實作 OnRefresh 沒有人驗證過**。若它不檢查 valueCount
-        /// 就去讀 values[0]，那是 AccessViolationException，在 .NET Core 屬 corrupted-state
-        /// exception，try/catch 攔不到，會直接把遊戲帶走。
-        ///
-        /// 所以：預設關閉、設定頁明確標示風險、由使用者自行決定要不要開。
-        /// 開了之後若遊戲當掉，關掉這個選項即可完全回到原本的行為。
-        /// </summary>
-        private void TryRefreshSellListDisplay()
-        {
-            if (!conf.RefreshSellListAfterReprice)
-                return;
-
-            var addon = (AtkUnitBase*)Commons.GetUnitBase("RetainerSellList");
-            if (addon == null || !addon->IsVisible || addon->UldManager.LoadedState != AtkLoadState.Loaded)
-                return;
-
-            Log.Information($"{Diag} REFRESH calling RetainerSellList.OnRefresh(0, null) (experimental)");
-            addon->OnRefresh(0, null);
-        }
 
         private void ResetRequestState()
         {
