@@ -212,6 +212,12 @@ namespace Marketbuddy
         public string CurrentItemName { get; private set; } = string.Empty;
 
         /// <summary>
+        /// 重掛永遠是 false：它撞到目的地容器滿的時候只讓**這一件**失敗然後繼續跑，
+        /// 不會整輪停手，所以沒有「因為空間而停」這種結束方式。
+        /// </summary>
+        public bool StoppedForSpace => false;
+
+        /// <summary>
         /// 此刻正在處理的那一格的市場容器索引，閒置時 -1。**純顯示用**
         /// （<see cref="LiveSellList"/> 靠它把那一列亮起來），沒有任何行為作用。
         ///
@@ -1068,7 +1074,9 @@ namespace Marketbuddy
             // 那裡是唯一真值來源；這裡只要知道 0 才是成功。
             if (result != BatchDelist.MoveOk)
             {
-                Fail(job, BatchDelist.DescribeMoveError(result));
+                // ⚠️ 錯誤字串必須跟著目的地走：兩支取回函式的回傳碼數值相同，但
+                // 0x19／0x1C 講的是不同的容器（遊戲自己印的 LogMessage 就分兩套）。
+                Fail(job, BatchDelist.DescribeMoveError(result, conf.DelistToRetainerInventory));
                 return;
             }
 

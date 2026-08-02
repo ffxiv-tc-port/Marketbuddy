@@ -46,6 +46,9 @@ namespace Marketbuddy
             public required uint SortedIndex;
             public required ulong RetainerId;
             public required string Name;
+
+            /// <summary>這名僱員的掛單數（遊戲自己的計數），用來回報「還剩幾件沒下架」。</summary>
+            public required int Listed;
         }
 
         private sealed class RetainerContext
@@ -65,6 +68,16 @@ namespace Marketbuddy
         private bool engineBatchAborted;
         private string engineAbortReason = string.Empty;
         private bool aborting;
+
+        /// <summary>
+        /// 這一趟巡迴是不是因為**玩家背包滿了**而停的。
+        /// 🔑 目的地換成玩家背包之後這是常態不是意外（140 格 vs 最多 180 件），
+        /// 所以結束語必須跟「出事了」分開講，否則使用者每次都會以為壞掉。
+        /// </summary>
+        private bool tourStoppedForSpace;
+
+        /// <summary>巡迴開跑當下玩家背包的空格數，用來在收工時算出總共佔掉幾格。</summary>
+        private int freeBagSlotsAtStart;
 
         // Aggregated stats for the final summary.
         private int totalRepriced, totalSkipped, totalDelisted, totalFailed, retainersDone;
@@ -180,6 +193,9 @@ namespace Marketbuddy
             CurrentRetainerName = string.Empty;
             totalRepriced = totalSkipped = totalDelisted = totalFailed = retainersDone = 0;
             aborting = false;
+            tourStoppedForSpace = false;
+            var inventoryManager = InventoryManager.Instance();
+            freeBagSlotsAtStart = inventoryManager == null ? -1 : (int)inventoryManager->GetEmptySlotsInBag();
 
             var number = 0;
             foreach (var target in targets)
@@ -228,6 +244,7 @@ namespace Marketbuddy
                     SortedIndex = i,
                     RetainerId = retainer->RetainerId,
                     Name = retainer->NameString,
+                    Listed = retainer->MarketItemCount,
                 });
             }
 
@@ -370,6 +387,9 @@ namespace Marketbuddy
 
             if (engineBatchAborted)
             {
+                // 引擎是「因為背包滿了」停的還是「出錯」停的，決定整趟巡迴的結束語。
+                // 兩種都要停整趟——背包滿了再去下一個僱員也只會立刻再滿一次。
+                tourStoppedForSpace = engine.StoppedForSpace;
                 // The engine already reported the reason; stop the whole tour.
                 Abort(engineAbortReason.Length > 0 ? engineAbortReason : "batch aborted".Loc());
                 return TickTaskResult.Continue; // queue is already cleared by Abort
@@ -462,10 +482,44 @@ namespace Marketbuddy
             AutoRetainerBridge.ReleaseSuppression();
         }
 
+        /// <summary>現在還有幾名僱員、共幾件掛單沒下架（每次重新數，不留狀態）。</summary>
+        private static (int Retainers, int Items) CountRemaining()
+        {
+            var targets = CollectTargets();
+            var items = 0;
+            foreach (var t in targets)
+                items += t.Listed;
+            return (targets.Count, items);
+        }
+
+        /// <summary>整趟巡迴佔掉玩家背包幾格；量不到就回 null，**不編數字**。</summary>
+        private int? BagSlotsUsed()
+        {
+            var inventoryManager = InventoryManager.Instance();
+            if (inventoryManager == null || freeBagSlotsAtStart < 0)
+                return null;
+            var used = freeBagSlotsAtStart - (int)inventoryManager->GetEmptySlotsInBag();
+            return used < 0 ? null : used;
+        }
+
         private void OnQueueAborted(string reason)
         {
             ReleaseSuppressionIfHeld();
             CurrentRetainerName = string.Empty;
+
+            // 🔑 「背包滿了」是這個功能**預期中**的結束方式，不是故障。
+            // 用一般訊息（不是紅字）、講清楚已完成多少與還剩多少、並明說再按一次就接著跑。
+            // ⚠️ 刻意**不做**「還可以下架幾件」的預估：道具會併堆疊，空格數換算件數
+            // 一定不準，給一個會騙人的數字比不給還糟。
+            if (tourStoppedForSpace)
+            {
+                var (retainersLeft, itemsLeft) = CountRemaining();
+                ChatGui.Print(
+                    "[Marketbuddy] Bags are full - stopped here, this is not an error. ?? item(s) delisted so far; ?? item(s) across ?? retainer(s) still listed. Clear space and press the button again to carry on where it left off."
+                        .Loc(totalDelisted, itemsLeft, retainersLeft));
+                return;
+            }
+
             // 🔴 停手原因照實帶出來，而且**永遠**跟著已完成的件數一起講：
             // 「撞到限制卻印成正常結束」是我們踩過的雷，這裡不會重蹈。
             ChatGui.PrintError(Mode == TourMode.Delist
@@ -484,11 +538,22 @@ namespace Marketbuddy
         {
             ReleaseSuppressionIfHeld();
             CurrentRetainerName = string.Empty;
-            ChatGui.Print(Mode == TourMode.Delist
+            if (Mode != TourMode.Delist)
+            {
+                ChatGui.Print("[Marketbuddy] All retainers done: ?? visited, ?? repriced, ?? skipped, ?? delisted, ?? failed"
+                    .Loc(retainersDone, totalRepriced, totalSkipped, totalDelisted, totalFailed));
+                return;
+            }
+
+            // 🔑 「佔掉幾格」是這個功能的**產出**不只是副作用：使用者要的就是把散在各個
+            // 僱員身上的同款道具併成堆疊，而「下架 N 件只佔掉 M 格」正是合併的證據。
+            // 這是實際量到的（開跑前後各數一次空格），不是推估——量不到就不講。
+            var used = BagSlotsUsed();
+            ChatGui.Print(used is null
                 ? "[Marketbuddy] All retainers delisted: ?? visited, ?? delisted, ?? failed"
                     .Loc(retainersDone, totalDelisted, totalFailed)
-                : "[Marketbuddy] All retainers done: ?? visited, ?? repriced, ?? skipped, ?? delisted, ?? failed"
-                    .Loc(retainersDone, totalRepriced, totalSkipped, totalDelisted, totalFailed));
+                : "[Marketbuddy] All retainers delisted: ?? visited, ?? delisted, ?? failed (?? bag slot(s) used)"
+                    .Loc(retainersDone, totalDelisted, totalFailed, used.Value));
         }
     }
 }

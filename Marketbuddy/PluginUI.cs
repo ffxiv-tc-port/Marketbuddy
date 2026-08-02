@@ -200,14 +200,14 @@ namespace Marketbuddy
 
                 ImGui.PopStyleColor(3);
                 if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Every listing of every retainer goes back into that retainer's own inventory. Click again to go ahead, or wait for this to time out.".Loc());
+                    ImGui.SetTooltip("Every listing of every retainer goes back into your own bags. Click again to go ahead, or wait for this to time out.".Loc());
             }
             else
             {
                 if (ImGui.Button("Delist all retainers".Loc() + "##mbdelistarm"))
                     delistArmedUntil = DateTime.UtcNow + DelistArmWindow;
                 if (!disabled && ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Takes every listing of every retainer off the market and back into that retainer's own inventory. Asks for confirmation first.".Loc());
+                    ImGui.SetTooltip("Takes every listing of every retainer off the market and back into your own bags, so identical items from different retainers stack together. Stops when your bags fill up - just clear space and press it again. Asks for confirmation first.".Loc());
             }
 
             if (disabled)
