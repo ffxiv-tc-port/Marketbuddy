@@ -1058,7 +1058,20 @@ namespace Marketbuddy
                 destinationTag = " " + "(moved to your inventory)".Loc();
             }
 
-            Log.Debug($"BatchReprice: delist slot {job.Slot} ({job.Name}) qty {quantity}, move returned {result}");
+            Log.Information(
+                $"BatchReprice: delist slot {job.Slot} ({job.Name}) qty {quantity}, move returned {result}");
+
+            // 🔴 這裡原本**完全不看回傳值**：不管遊戲收不收，一律 DelistedCount++ 並印
+            // 「已下架」。也就是說僱員／玩家背包放不下時，畫面上會說下架成功，
+            // 東西卻還掛在市場上——「撞到限制卻印成正常結束」的同一類謊。
+            // 回傳值的意義（離線反編譯 TC 7.20 客戶端取得）整理在 BatchDelist 的常數區，
+            // 那裡是唯一真值來源；這裡只要知道 0 才是成功。
+            if (result != BatchDelist.MoveOk)
+            {
+                Fail(job, BatchDelist.DescribeMoveError(result));
+                return;
+            }
+
             ForgetChange(job.Slot);
             ProcessedSlots++;
             DelistedCount++;

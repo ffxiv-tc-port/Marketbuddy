@@ -75,7 +75,7 @@ namespace Marketbuddy
         // 失敗時遊戲自己也會在紀錄裡印一行（0x19 → 訊息 0x4D8、0x1C → 訊息 0x11E9），
         // 所以我們的訊息是補充不是唯一線索。
         // ------------------------------------------------------------------
-        private const int MoveOk = 0;
+        internal const int MoveOk = 0;
         private const int MoveErrNoSourceSlot = 4;
         private const int MoveErrNotAllowedNow = 10;
         private const int MoveErrNoSpace = 0x19;
@@ -403,7 +403,8 @@ namespace Marketbuddy
             ChatGui.PrintError("[Marketbuddy] ??: failed - ??".Loc(job.Name, reason));
         }
 
-        private static string DescribeMoveError(int result) => result switch
+        /// <summary>把取回函式的回傳碼翻成一句人看得懂的原因。<see cref="BatchReprice.DelistSlot"/> 共用同一份。</summary>
+        internal static string DescribeMoveError(int result) => result switch
         {
             MoveErrNoSpace => "retainer inventory is full, cannot delist".Loc(),
             MoveErrUniqueAlreadyHeld => "the retainer already holds this unique item".Loc(),
