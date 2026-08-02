@@ -37,7 +37,8 @@ namespace Marketbuddy
         //
         // 🔑 送出節流的真實形狀（以及它為什麼是 send→send 而不是 data→send）整段寫在
         // MarketRequestGate 的類別註解裡，那裡才是唯一真值來源，這裡不重複。
-        // 摘要：門檻約 1.5 秒、以「上一次送出」起算，由 MarketRequestGate 自我校準。
+        // 摘要：以「上一次送出」起算、基準 1700 ms，單發拒絕當成一次便宜的重試吸收掉，
+        // 只有拒絕成群或持續率超過 15%（撴寬的損益兩平點）才動間隔，之後自動衰減回 1700。
         //
         // 🔴 2026-08-02 重新量測的回應延遲（把每一筆 REQUEST 配對到後續同道具的封包，
         // 不受我們自己的逾時截斷，n=639 次有回應的請求，涵蓋 .14 與 .15 兩段）：
@@ -172,6 +173,12 @@ namespace Marketbuddy
         // Grep tag: MBDIAG
         private const string Diag = "[MBDIAG]";
         private DateTime lastDataReceivedAt = DateTime.MinValue;
+
+        /// <summary>
+        /// 這一批（＝這一個雇員的一輪，或 QuickLister 的單件）開始的時間。
+        /// 只用來替 CACHE-HIT 標出 within-batch / cross-batch，沒有行為作用。
+        /// </summary>
+        private DateTime batchStartedAt = DateTime.MinValue;
 
         private static double MsSince(DateTime t) =>
             t == DateTime.MinValue ? -1 : (DateTime.UtcNow - t).TotalMilliseconds;
@@ -417,6 +424,7 @@ namespace Marketbuddy
             DelistedCount = 0;
             FailedCount = 0;
             CurrentItemName = string.Empty;
+            batchStartedAt = DateTime.UtcNow;
             lastAcceptedRequestId = int.MinValue;
             offeringsPending = false;
             offeringsReceived = false;
@@ -506,9 +514,16 @@ namespace Marketbuddy
                     if (MarketDataCache.TryGet(job.ItemId, conf.MarketDataCacheSeconds, out var cachedListings,
                             out var cacheAgeMs))
                     {
+                        // 🔑 scope 讓事後分得出「這一輪自己剛查過」與「上一輪／上一個雇員留下來的」。
+                        // 使用者的實際流程是反覆補滿同一個雇員再換下一個，跨輪次的命中才是
+                        // 1800 秒 TTL 真正的價值所在，而單一批次內的樣本永遠看不到它。
+                        var batchAgeMs = batchStartedAt == DateTime.MinValue
+                            ? -1
+                            : (now - batchStartedAt).TotalMilliseconds;
+                        var scope = batchAgeMs < 0 || cacheAgeMs > batchAgeMs ? "cross-batch" : "within-batch";
                         Log.Information(
                             $"{Diag} CACHE-HIT item={job.ItemId} '{job.Name}' n={cachedListings.Count} " +
-                            $"ageMs={cacheAgeMs:F0} attempt={job.Attempt} " +
+                            $"ageMs={cacheAgeMs:F0} scope={scope} batchAgeMs={batchAgeMs:F0} attempt={job.Attempt} " +
                             $"(no request sent; ttl={conf.MarketDataCacheSeconds}s)");
                         captured.Clear();
                         captured.AddRange(cachedListings);
@@ -521,6 +536,18 @@ namespace Marketbuddy
 
                     if (now < job.NotBefore)
                         return TickTaskResult.Continue;
+
+                    // 🔴 上一次真的被吞掉/被拒絕的**判決點**。走到這裡代表已經過了退避、
+                    // 也確認快取裡沒有遲到的答案可用，現在真的要再問一次同一件事。
+                    // ⚠️ 必須在下面的 IsReady 之前呼叫：舊版把它放在 SlotPhase.Request，
+                    // 那時閘門檢查早就通過了，所以撴寬對「這一次重試」完全無效——
+                    // 實機 .19 拒絕於 send-gap 1719 ms，重試仍然以 send-gap 1718 ms 送出
+                    // （順帶證明了間隔不是拒絕的原因，見 MarketRequestGate 的類別註解）。
+                    if (job.RefusalPending)
+                    {
+                        job.RefusalPending = false;
+                        MarketRequestGate.NoteRefused(job.RefusalGapMs);
+                    }
 
                     // 🔑 從「上一次**送出**」起算（見 MarketRequestGate）。舊版從「上一次
                     // 收到資料」起算，在前一件是「沒人在賣」的道具時會讓時間戳停在再上一件，
@@ -547,13 +574,8 @@ namespace Marketbuddy
                         return TickTaskResult.Done;
                     }
 
-                    // 這裡才是「上一次真的被吞掉了」的判決點：我們已經走過 Throttle 的快取
-                    // 檢查、確定沒有遲到的答案可以用，現在真的要再問一次同一件事。
-                    if (job.RefusalPending)
-                    {
-                        job.RefusalPending = false;
-                        MarketRequestGate.NoteRefused(job.RefusalGapMs);
-                    }
+                    // ⚠️ 拒絕的判決已經在 SlotPhase.Throttle 下過了（刻意在閘門檢查之前），
+                    // 這裡不要重複，否則撴寬又會晚一拍。
 
                     job.Attempt++;
 
@@ -1071,6 +1093,7 @@ namespace Marketbuddy
 
         private void OnQueueAborted(string reason)
         {
+            MarketRequestGate.LogSummary("batch aborted");
             ResetRequestState();
             ChatGui.PrintError("[Marketbuddy] Relist cancelled: ?? (?? repriced, ?? skipped, ?? delisted, ?? failed)"
                 .Loc(reason, RepricedCount, SkippedCount, DelistedCount, FailedCount));
@@ -1085,6 +1108,9 @@ namespace Marketbuddy
 
         private void OnQueueCompleted()
         {
+            // 每一輪（每個雇員 / 每件快速上架）印一次閘門軌跡：這是事後判斷
+            // 「往下探 → 成功還是被拒 → 收斂到多少」唯一不必翻 68 行 REQUEST 的入口。
+            MarketRequestGate.LogSummary("batch finished");
             ResetRequestState();
             ChatGui.Print("[Marketbuddy] Relist finished: ?? repriced, ?? skipped, ?? delisted, ?? failed"
                 .Loc(RepricedCount, SkippedCount, DelistedCount, FailedCount));
