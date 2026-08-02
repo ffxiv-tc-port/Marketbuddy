@@ -60,7 +60,13 @@ namespace Marketbuddy
         // 那一刻**才下（見 SlotPhase.Request）。中間只要那件道具的資料落進
         // MarketDataCache（遲到的答案就是這樣被撿回來的），我們連重試都不會送，
         // 閘門自然也不會被那次「其實沒被吞」的請求汙染。
-        private const int NoResponseDeadlineMs = 2500; // nothing at all by now => probably swallowed (verdict deferred to retry time)
+        //
+        // 🔑 2026-08-02（v7.20.0.18 探針實測，83 次請求）：**這個門檻已經退居保險絲。**
+        // 探針證明台服的拒絕**有封包**（`errorCode = 0x70000003`，送出後 229 ms 就到），
+        // 所以「被拒絕」現在由 MarketRequestResultProbe 直接判，不再靠這個 2500 ms 的猜測。
+        // 它剩下的兩個用途都是退路：探針解不出位址而停用時、以及封包真的完全沒到時。
+        // ⚠️ 因此**不能調低**（要蓋住實測 1955 ms 的回應長尾），也不必調高。
+        private const int NoResponseDeadlineMs = 2500; // fuse only: nothing at all by now => probably swallowed (verdict deferred to retry time)
         private const int ResponseTimeoutMs = 3500;    // hard cap per attempt once *something* did arrive (safety net; must stay above NoResponseDeadlineMs + EmptyResultGraceMs)
         private const int RetryBackoffBaseMs = 300;    // backoff before retry N is min(N * this, RetryBackoffCapMs)...
         private const int RetryBackoffCapMs = 1200;    // ...never escalating past this (the gate adds its own spacing on top)
@@ -108,6 +114,15 @@ namespace Marketbuddy
             public bool RefusalPending;
             /// <summary>暫定被吞掉的那次請求，距離前一次送出的實際毫秒數。</summary>
             public double RefusalGapMs = -1;
+            /// <summary>
+            /// 這一次嘗試已經從 <see cref="MarketRequestResultProbe"/> 收到伺服器的答覆了。
+            /// 每次送出新請求時重設（見 <see cref="SlotPhase.Request"/>）。
+            /// </summary>
+            public bool ProbeAnswered;
+            /// <summary>伺服器明確拒絕了這一次查詢（<c>errorCode != 0</c>）。真值，不是逾時推測。</summary>
+            public bool ProbeRefused;
+            /// <summary>伺服器明確回答「零掛售」（<c>errorCode == 0 &amp;&amp; listingCount == 0</c>）。</summary>
+            public bool ProbeEmpty;
         }
 
         private readonly MarketGuiEventHandler gui;
@@ -541,13 +556,31 @@ namespace Marketbuddy
                     }
 
                     job.Attempt++;
-                    proxy->EndRequest(); // reset any dangling request state
+
+                    // 🔎 2026-08-02 鑑識：台服 InfoProxyItemSearch 的 vf10 (`EndRequest`) 位元組是
+                    // `C2 00 00` —— **空函式**。舊註解寫的「reset any dangling request state」
+                    // 描述的效果從來不存在。真的要重設只能自己寫這兩個欄位，而遊戲自己在
+                    // ProcessRequestResult 的尾段做的也正是這件事（`mov [rbx+0x4810], ebp` 與
+                    // vf13 的 `mov [rcx+0x10], 0`），所以偏移與寫法都有二進位佐證。
+                    // 為什麼要清：從這裡到伺服器回覆之間，SearchItemId 已經是**新**道具，
+                    // 但 ListingCount/EntryCount 還是**上一件**的 —— 這段期間任何讀 proxy 的
+                    // 消費者（含遊戲自己的市場面板）會把舊清單當成新道具的清單。
+                    // EndRequest() 仍然照呼叫：台服是空函式所以零成本，改版變回實作時自動生效。
+                    proxy->EndRequest();
+                    proxy->ListingCount = 0;
+                    proxy->EntryCount = 0;
+
                     proxy->SearchItemId = job.ItemId;
                     captured.Clear();
                     offeringsReceived = false;
                     historySeen = false;
                     pendingItemId = job.ItemId;
                     offeringsPending = true;
+                    job.ProbeAnswered = false;
+                    job.ProbeRefused = false;
+                    job.ProbeEmpty = false;
+                    // 丟掉還留在探針槽裡的舊答覆，這樣取到的一定是這一次請求之後才到的。
+                    MarketRequestResultProbe.ArmForRequest();
                     job.SendGapMs = MarketRequestGate.MsSinceLastRequest(now);
                     MarketRequestGate.NoteRequestSent(now);
                     job.WaitStart = now;
@@ -581,6 +614,24 @@ namespace Marketbuddy
                 }
 
                 case SlotPhase.WaitOfferings:
+                {
+                    // 🔑 伺服器對這一次查詢的**真實答覆**（見 MarketRequestResultProbe）。
+                    // 這是唯一一個不必猜的訊號源：實機量到拒絕在送出後 229 ms 就到，
+                    // 而逾時要 2502 ms 才判得出來。取一次就消費掉，所以放在最前面。
+                    if (!job.ProbeAnswered && MarketRequestResultProbe.TryTakeResult(job.ItemId, out var verdict))
+                    {
+                        job.ProbeAnswered = true;
+                        job.ProbeRefused = verdict.Refused;
+                        // listingCount 是跨所有分頁的**總**筆數；為 0 時客戶端不會送續頁請求，
+                        // 所以 offerings 封包永遠不會來（反編譯證實，見探針的類別註解）。
+                        job.ProbeEmpty = !verdict.Refused && verdict.ListingCount == 0;
+                        Log.Information(
+                            $"{Diag} VERDICT item={job.ItemId} '{job.Name}' attempt={job.Attempt} " +
+                            $"refused={verdict.Refused} errorCode=0x{verdict.ErrorCode:X} " +
+                            $"listingCount={verdict.ListingCount} " +
+                            $"afterMs={(now - job.WaitStart).TotalMilliseconds:F0}");
+                    }
+
                     if (offeringsReceived)
                     {
                         Log.Information(
@@ -593,26 +644,53 @@ namespace Marketbuddy
                         return TickTaskResult.Continue;
                     }
 
-                    // The server sends NO offerings packet at all for an item with
-                    // zero listings (verified against Dalamud's NetworkHandlers:
-                    // zero pages expected when AmountToArrive == 0), but the sale
-                    // history packet of the same request still arrives. History
-                    // seen + a grace period with no offerings page is therefore
-                    // the definitive "nothing on sale" answer: skip immediately,
-                    // no retry, no full timeout.
-                    if (historySeen && (now - historySeenAt).TotalMilliseconds >= EmptyResultGraceMs)
+                    // ① 伺服器**明確拒絕**了這一次查詢。以前只能靠「什麼都沒來 + 逾時 2500 ms」
+                    //    去猜，現在有真值，所以立刻走重試流程 —— 實機那一次省下 2.27 秒。
+                    // 🔴 這裡**不**直接呼叫 RequestData()：重送一律回到 Throttle，由既有的
+                    //    Request 階段經 MarketRequestGate 送出，否則 NoteRequestSent 會被繞過。
+                    if (job.ProbeRefused)
                     {
                         Log.Information(
-                            $"{Diag} SLOT-DONE item={job.ItemId} '{job.Name}' via=history-grace(empty) " +
+                            $"{Diag} REFUSED item={job.ItemId} '{job.Name}' attempt={job.Attempt} " +
+                            $"afterMs={(now - job.WaitStart).TotalMilliseconds:F0} (server verdict, not a timeout)");
+                        offeringsPending = false;
+
+                        // 判決仍然延到真的要重送的那一刻才交給閘門（見 SlotPhase.Request）：
+                        // 中間若有遲到的答案落進 MarketDataCache，那次重試會整個被省掉，
+                        // 也就不該拿這次拒絕去撴寬閘門。
+                        job.RefusalPending = true;
+                        job.RefusalGapMs = job.SendGapMs;
+
+                        if (job.Attempt >= MaxAttempts)
+                        {
+                            Fail(job, "the server refused the market query".Loc());
+                            return TickTaskResult.Done;
+                        }
+
+                        job.NotBefore = now.AddMilliseconds(RetryBackoffFor(job.Attempt));
+                        job.Phase = SlotPhase.Throttle;
+                        return TickTaskResult.Continue;
+                    }
+
+                    // ② 「沒人在賣」的兩條認定路徑，快的那條優先：
+                    //   • job.ProbeEmpty —— 伺服器直說 listingCount == 0。反編譯證實客戶端在
+                    //     這個情況下**不送續頁請求**，所以 offerings 封包永遠不會來，
+                    //     等 EmptyResultGraceMs 是在等一個保證不會發生的事件。
+                    //   • historySeen + 寬限 —— 探針沒掛上（IsInstalled == false）或訊號被別的
+                    //     查詢蓋掉時的退路，行為與 .18 之前完全相同。
+                    if (job.ProbeEmpty || (historySeen && (now - historySeenAt).TotalMilliseconds >= EmptyResultGraceMs))
+                    {
+                        Log.Information(
+                            $"{Diag} SLOT-DONE item={job.ItemId} '{job.Name}' " +
+                            $"via={(job.ProbeEmpty ? "verdict(empty)" : "history-grace(empty)")} " +
                             $"attempts={job.Attempt} totalMs={(now - job.StartedAt).TotalMilliseconds:F0}");
                         offeringsPending = false;
-                        // The history packet proves the request reached the server, so this
-                        // counts as a clean request for pacing purposes even though no
-                        // offerings page exists for an item nobody is selling.
+                        // 伺服器確實回答了這次查詢，所以就算沒有 offerings 分頁，
+                        // 對節流而言這仍然算一次乾淨的請求。
                         MarketRequestGate.NoteAccepted();
                         captured.Clear();
                         // 「沒人在賣」是被動觀察推不出來的（零掛單根本不會有 offerings 封包），
-                        // 只有走完這條 history + grace 的流程才敢寫進快取。
+                        // 只有走完上面兩條確認流程之一才敢寫進快取。
                         MarketDataCache.StoreConfirmedEmpty(job.ItemId);
                         job.Phase = SlotPhase.Apply;
                         return TickTaskResult.Continue;
@@ -620,19 +698,26 @@ namespace Marketbuddy
 
                     var waitedMs = (now - job.WaitStart).TotalMilliseconds;
 
+                    // 走到這裡代表探針沒給出答覆（沒掛上、或這次真的一個封包都沒回來）。
                     // 兩種逾時要分開，因為它們代表相反的事、需要相反的修正：
                     //   (a) 什麼封包都沒來 → 請求可能被節流吞掉了 → 間隔不夠長，要往上加。
                     //   (b) history 來了、offerings 沒來 → 請求送到了，是伺服器/網路慢
                     //       → 間隔沒有問題，加長它只會白白拖慢每一件。
                     // (a) 判得比 (b) 早：實測第一個封包最遲 1955 ms 會出現，門檻取 2500 ms。
-                    // ⚠️ 判定「疑似被吞」不等於馬上撴寬閘門：真正的判決延到 SlotPhase.Request
-                    // 才下，中間遲到的答案還有機會經由快取把整次重試省掉。
+                    //
+                    // 🔑 NoResponseDeadlineMs 現在是**純保險絲**，不再是主要判準。
+                    // 探針上線後，「伺服器拒絕」由 errorCode 直接判（實機 229 ms），這條逾時
+                    // 只剩下兩個用途：(1) 探針解不出位址而停用時的退路；
+                    // (2) 真的連 ProcessRequestResult 都沒被呼叫（封包完全沒到）的情況。
+                    // 所以門檻**不能調低**——它要蓋住實測 1955 ms 的回應長尾，2500 ms 留 28% 餘裕。
+                    // 反過來說也不必調高：真正需要快速反應的情境已經被探針接走了。
                     var swallowed = !historySeen && waitedMs > NoResponseDeadlineMs;
                     if (swallowed || waitedMs > ResponseTimeoutMs)
                     {
                         Log.Information(
                             $"{Diag} TIMEOUT item={job.ItemId} '{job.Name}' attempt={job.Attempt} " +
-                            $"historySeen={historySeen} swallowed={swallowed} waitedMs={waitedMs:F0}");
+                            $"historySeen={historySeen} swallowed={swallowed} waitedMs={waitedMs:F0} " +
+                            $"probeInstalled={MarketRequestResultProbe.IsInstalled} probeAnswered={job.ProbeAnswered}");
                         offeringsPending = false;
 
                         if (swallowed)
@@ -653,6 +738,7 @@ namespace Marketbuddy
                     }
 
                     return TickTaskResult.Continue;
+                }
 
                 case SlotPhase.Apply:
                     ApplySlot(job);
@@ -1068,9 +1154,20 @@ namespace Marketbuddy
             offeringsReceived = false;
             historySeen = false;
             CurrentItemName = string.Empty;
+            // 這一輪結束了，槽裡任何還沒被取走的答覆都已經無主，丟掉。
+            MarketRequestResultProbe.ArmForRequest();
+
             var proxy = GetItemSearchProxy();
-            if (proxy != null)
-                proxy->EndRequest();
+            if (proxy == null)
+                return;
+
+            // ⚠️ 台服的 vf10 (`EndRequest`) 是空函式（`C2 00 00`），所以**它自己什麼都不重設**
+            // —— 舊註解「reset any dangling request state」描述的效果從來不存在。
+            // 真正的重設是下面兩行；遊戲自己在 ProcessRequestResult 尾段做的也是同兩個欄位。
+            // 呼叫仍然保留：零成本，且改版把它變回實作時會自動生效。
+            proxy->EndRequest();
+            proxy->ListingCount = 0;
+            proxy->EntryCount = 0;
         }
 
         private void Skip(SlotJob job, string chatMessage)

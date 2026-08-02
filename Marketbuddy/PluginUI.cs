@@ -384,9 +384,11 @@ namespace Marketbuddy
             DrawNestIndicator(1);
             ImGui.TextUnformatted("Reuse market data seen in the last".Loc());
             ImGui.SameLine();
-            ImGui.SetNextItemWidth(70);
+            // 步進 60（一分鐘）／快速步進 300（五分鐘）：跑一輪多角色時常用的值是
+            // 1800（30 分），用預設的無步進版本只能手動輸入，按不出來。
+            ImGui.SetNextItemWidth(160);
             if (ImGui.InputInt("seconds (0 = always ask the server)".Loc() + "##mbcachettl",
-                    ref conf.MarketDataCacheSeconds, 0))
+                    ref conf.MarketDataCacheSeconds, 60, 300))
             {
                 conf.MarketDataCacheSeconds = Math.Clamp(conf.MarketDataCacheSeconds, 0, 3600);
                 conf.Save();
@@ -395,7 +397,7 @@ namespace Marketbuddy
             DrawNestIndicator(2);
             ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
             ImGui.TextWrapped(
-                "Market board answers are delivered to every plugin at once, so anything you (or another plugin) looked up recently is already here and can be reused without asking the server again - that is the single biggest speed-up available without touching the game. Nothing is ever triggered by receiving data; it is only remembered. The cache is dropped whenever you change world or character, and it never stores \"nobody is selling this\" unless this plugin confirmed it itself."
+                "Market board answers are delivered to every plugin at once, so anything you (or another plugin) looked up recently is already here and can be reused without asking the server again - that is the single biggest speed-up available without touching the game. Nothing is ever triggered by receiving data; it is only remembered. Listings belong to a world, not to a character, so the cache now survives character switches and is only dropped when you change world - raise this if you work through several characters in one sitting. It never stores \"nobody is selling this\" unless this plugin confirmed it itself."
                     .Loc());
             ImGui.PopStyleColor();
 

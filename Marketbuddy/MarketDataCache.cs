@@ -37,10 +37,18 @@ namespace Marketbuddy
     /// <list type="bullet">
     ///   <item><b>HQ／NQ</b>：存的是整頁原始掛單（含每一筆的 IsHq），HQ/NQ 的取捨仍然由
     ///         BatchReprice 依該格自己的品質逐格判斷，快取不做任何預先篩選。</item>
-    ///   <item><b>伺服器</b>：市場板是**每個世界各自一份**，所以整份快取綁在一個
-    ///         (世界, 角色) 身分上；世界一變（跨界／服務器旅行）或換角色就整份清掉。
-    ///         世界 ID 由 Framework tick 讀取後快取起來，封包處理器只讀這個欄位，
-    ///         不在事件裡碰任何遊戲狀態。</item>
+    ///   <item><b>伺服器</b>：市場板是**每個世界各自一份**，所以整份快取綁在**世界**上；
+    ///         世界一變（跨界／服務器旅行）就整份清掉。世界 ID 由 Framework tick 讀取後
+    ///         快取起來，封包處理器只讀這個欄位，不在事件裡碰任何遊戲狀態。
+    ///         <para>
+    ///         🔑 2026-08-02：**身分刻意不含角色 ID。** 掛售資料是「世界」的屬性而不是
+    ///         「角色」的屬性 —— 同一個世界上任何角色查同一件道具，伺服器回的掛售完全相同。
+    ///         而「最低價是不是自己的」這個唯一跟角色有關的判斷，發生在**讀取時**
+    ///         （<c>BatchReprice.ownRetainerIds</c> 每批重算後才過濾），快取存的是**未經任何
+    ///         過濾的原始 listings**，所以換角色之後這份資料仍然完全正確。
+    ///         舊版把角色 ID 放進身分，等於使用者每換一個角色就把整份快取清光 ——
+    ///         而「一輪整理所有角色的包包」正是這個外掛最主要的使用情境。
+    ///         </para></item>
     ///   <item><b>雇員</b>：掛單裡帶 RetainerId，「最低價是不是自己的」是拿**當下**的雇員清單
     ///         去比對的（BatchReprice.ownRetainerIds 每批重算），所以換雇員不影響快取正確性。</item>
     ///   <item><b>「沒人在賣」</b>：零掛單的道具伺服器根本不送 offerings 封包，
@@ -77,9 +85,9 @@ namespace Marketbuddy
 
         private static readonly Dictionary<uint, Entry> Cache = new();
 
-        // 這份快取屬於哪一個 (世界, 角色)。只在 Framework tick 裡更新，封包處理器只讀。
+        // 這份快取屬於哪一個**世界**（刻意不含角色，理由見類別註解）。
+        // 只在 Framework tick 裡更新，封包處理器只讀。
         private static uint ownerWorldId;
-        private static ulong ownerContentId;
 
         private static bool initialized;
 
@@ -104,7 +112,6 @@ namespace Marketbuddy
             MarketBoard.OfferingsReceived -= OnOfferingsReceived;
             Cache.Clear();
             ownerWorldId = 0;
-            ownerContentId = 0;
         }
 
         /// <summary>手動清空（設定畫面的按鈕）。</summary>
@@ -172,15 +179,19 @@ namespace Marketbuddy
 
         private static void OnFrameworkUpdate(IFramework framework)
         {
-            // 只在這裡讀遊戲狀態（保證在遊戲主執行緒上），封包處理器只讀下面兩個欄位。
+            // 只在這裡讀遊戲狀態（保證在遊戲主執行緒上），封包處理器只讀 ownerWorldId。
             var worldId = PlayerState.CurrentWorld.RowId;
-            var contentId = PlayerState.ContentId;
+
+            // ⚠️ ContentId **只當「真的登入了嗎」的閘門**，不是快取身分的一部分：
+            // 換角色不清快取（見類別註解）。但在角色選擇／讀取畫面時 CurrentWorld 可能
+            // 還留著上一個值，所以仍然要有一個獨立的登入判定才不會在切換途中誤判。
+            var loggedIn = PlayerState.ContentId != 0;
 
             // 讀不到（讀取畫面／尚未登入）時什麼都不做：維持現狀，也不接受新資料。
-            if (worldId == 0 || contentId == 0)
+            if (worldId == 0 || !loggedIn)
                 return;
 
-            if (worldId == ownerWorldId && contentId == ownerContentId)
+            if (worldId == ownerWorldId)
             {
                 Prune();
                 return;
@@ -189,13 +200,11 @@ namespace Marketbuddy
             if (Cache.Count > 0)
             {
                 Log.Information(
-                    $"{Diag} CACHE-CLEAR reason=identity world {ownerWorldId}->{worldId} " +
-                    $"character {ownerContentId:X}->{contentId:X} dropped={Cache.Count}");
+                    $"{Diag} CACHE-CLEAR reason=world-changed {ownerWorldId}->{worldId} dropped={Cache.Count}");
                 Cache.Clear();
             }
 
             ownerWorldId = worldId;
-            ownerContentId = contentId;
         }
 
         /// <summary>丟掉任何設定值都已經用不到的舊資料，讓字典不會無限成長。</summary>
