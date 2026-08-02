@@ -67,6 +67,8 @@ namespace Marketbuddy
             public SlotPhase Phase = SlotPhase.Throttle;
             public DateTime NotBefore = DateTime.MinValue;
             public DateTime WaitStart;
+            /// <summary>Diagnostics only: when this slot was first ticked, for total-elapsed reporting.</summary>
+            public DateTime StartedAt = DateTime.MinValue;
         }
 
         private sealed class CachedOfferings
@@ -88,6 +90,33 @@ namespace Marketbuddy
         private int lastAcceptedRequestId = int.MinValue;
         private DateTime lastRequestAt = DateTime.MinValue;
         private bool suppressionHeld;
+
+        // ---------------------------------------------------------------
+        // Temporary instrumentation (2026-08-02).
+        //
+        // Measured from the live log: every fresh market query costs a flat
+        // ~6.0s (was ~7.5s before the backoff was shortened), and the two
+        // populations differ by exactly the change in RetryBackoff - which
+        // proves the FULL OfferingsTimeoutMs is burned on attempt 1 of every
+        // query, and that attempt 2 then answers in ~0.5s. Exactly one query
+        // per batch (the first) is fast.
+        //
+        // What that does NOT tell us is WHY attempt 1 never completes. Two
+        // candidates produce identical timing and need opposite fixes:
+        //   (a) the request never reaches the server (client-side market
+        //       throttle) - no offerings packet arrives at all; or
+        //   (b) the packet DOES arrive and one of the guards in
+        //       OnOfferingsReceived drops it (RequestId collision, or an
+        //       ItemId mismatch).
+        // These logs are Information level on purpose: the user's log level
+        // filters out DBG/VRB, and Dalamud's own marketboard packet tracing
+        // is Verbose, so it is invisible in their captures.
+        // Grep tag: MBDIAG
+        private const string Diag = "[MBDIAG]";
+        private DateTime lastDataReceivedAt = DateTime.MinValue;
+
+        private static double MsSince(DateTime t) =>
+            t == DateTime.MinValue ? -1 : (DateTime.UtcNow - t).TotalMilliseconds;
 
         // Live market tax rates, cached opportunistically from the
         // TaxRatesReceived event; conf.MarketTaxPercent is the fallback.
@@ -438,8 +467,15 @@ namespace Marketbuddy
                     offeringsPending = true;
                     lastRequestAt = now;
                     job.WaitStart = now;
+                    if (job.StartedAt == DateTime.MinValue)
+                        job.StartedAt = now;
 
-                    if (!proxy->RequestData())
+                    var sent = proxy->RequestData();
+                    Log.Information(
+                        $"{Diag} REQUEST item={job.ItemId} '{job.Name}' attempt={job.Attempt} " +
+                        $"RequestData={sent} msSinceLastData={MsSince(lastDataReceivedAt):F0}");
+
+                    if (!sent)
                     {
                         offeringsPending = false;
                         if (job.Attempt >= MaxAttempts)
@@ -460,6 +496,10 @@ namespace Marketbuddy
                 case SlotPhase.WaitOfferings:
                     if (offeringsReceived)
                     {
+                        Log.Information(
+                            $"{Diag} SLOT-DONE item={job.ItemId} '{job.Name}' via=offerings " +
+                            $"attempts={job.Attempt} waitMs={(now - job.WaitStart).TotalMilliseconds:F0} " +
+                            $"totalMs={(now - job.StartedAt).TotalMilliseconds:F0}");
                         StoreCachedOfferings(job.ItemId, captured);
                         job.Phase = SlotPhase.Apply;
                         return TickTaskResult.Continue;
@@ -474,6 +514,9 @@ namespace Marketbuddy
                     // no retry, no full timeout.
                     if (historySeen && (now - historySeenAt).TotalMilliseconds >= EmptyResultGraceMs)
                     {
+                        Log.Information(
+                            $"{Diag} SLOT-DONE item={job.ItemId} '{job.Name}' via=history-grace(empty) " +
+                            $"attempts={job.Attempt} totalMs={(now - job.StartedAt).TotalMilliseconds:F0}");
                         offeringsPending = false;
                         captured.Clear();
                         StoreCachedOfferings(job.ItemId, captured);
@@ -483,6 +526,9 @@ namespace Marketbuddy
 
                     if ((now - job.WaitStart).TotalMilliseconds > OfferingsTimeoutMs)
                     {
+                        Log.Information(
+                            $"{Diag} TIMEOUT item={job.ItemId} '{job.Name}' attempt={job.Attempt} " +
+                            $"historySeen={historySeen} waitedMs={(now - job.WaitStart).TotalMilliseconds:F0}");
                         offeringsPending = false;
                         if (job.Attempt >= MaxAttempts)
                         {
@@ -624,19 +670,37 @@ namespace Marketbuddy
 
         private void OnOfferingsReceived(IMarketBoardCurrentOfferings offerings)
         {
-            if (!offeringsPending)
-                return;
-
+            // Diagnostics: log EVERY offerings packet and the branch it takes.
+            // This is the measurement that separates "the request never went
+            // out" from "the answer arrived and we threw it away".
             var listings = offerings.ItemListings;
+            Log.Information(
+                $"{Diag} OFFERINGS reqId={offerings.RequestId} count={listings.Count} " +
+                $"firstItem={(listings.Count > 0 ? listings[0].ItemId : 0)} " +
+                $"pendingItem={pendingItemId} pending={offeringsPending} " +
+                $"lastAcceptedReqId={lastAcceptedRequestId}");
+
+            if (!offeringsPending)
+            {
+                Log.Information($"{Diag} OFFERINGS dropped: no request pending");
+                return;
+            }
+
             if (listings.Count > 0)
             {
                 // Later pages of a batch we already consumed share its RequestId.
                 if (offerings.RequestId == lastAcceptedRequestId)
+                {
+                    Log.Information($"{Diag} OFFERINGS dropped: RequestId == lastAcceptedRequestId ({offerings.RequestId})");
                     return;
+                }
 
                 // Stale response for a previously requested item: ignore.
                 if (listings[0].ItemId != pendingItemId)
+                {
+                    Log.Information($"{Diag} OFFERINGS dropped: itemId mismatch (got {listings[0].ItemId}, want {pendingItemId})");
                     return;
+                }
             }
 
             // An empty response is a definitive "nothing on sale" and is always
@@ -653,10 +717,16 @@ namespace Marketbuddy
 
             offeringsPending = false;
             offeringsReceived = true;
+            lastDataReceivedAt = DateTime.UtcNow;
+            Log.Information($"{Diag} OFFERINGS accepted: {captured.Count} listings for item {pendingItemId}");
         }
 
         private void OnHistoryReceived(IMarketBoardHistory history)
         {
+            Log.Information(
+                $"{Diag} HISTORY item={history.ItemId} pendingItem={pendingItemId} " +
+                $"pending={offeringsPending} alreadySeen={historySeen}");
+
             if (!offeringsPending || historySeen)
                 return;
             if (history.ItemId != pendingItemId)
