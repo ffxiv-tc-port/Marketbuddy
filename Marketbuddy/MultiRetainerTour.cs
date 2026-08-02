@@ -9,11 +9,19 @@ using static Marketbuddy.Common.Dalamud;
 
 namespace Marketbuddy
 {
+    /// <summary>巡迴到每個僱員身上要做的事。導航完全相同，只有中間那一段不一樣。</summary>
+    internal enum TourMode
+    {
+        /// <summary>全僱員重掛（<see cref="BatchReprice"/>）。</summary>
+        Reprice,
+
+        /// <summary>全僱員下架（<see cref="BatchDelist"/>）。</summary>
+        Delist,
+    }
+
     /// <summary>
-    /// "Relist all retainers" tour: from the retainer list, visits every
-    /// retainer that has market listings, opens its sell list, runs the
-    /// single-retainer BatchReprice engine (sharing its price cache), then
-    /// leaves and moves on.
+    /// 全僱員巡迴：從僱員選單出發，逐一拜訪有掛單的僱員，開它的出售品視窗，
+    /// 跑單僱員引擎（重掛或下架，見 <see cref="TourMode"/>），然後離開換下一個。
     ///
     /// Navigation follows the TC-production-proven AutoRetainer recipes:
     /// RetainerList Callback(2, index), SelectString menu entries matched via
@@ -22,8 +30,11 @@ namespace Marketbuddy
     /// hardcoded. Strictly manual trigger; cancellable at any time (button or
     /// ESC); every navigation step has a watchdog so a stall aborts the tour
     /// instead of hanging.
+    ///
+    /// 🔴 兩種模式**共用同一個佇列與同一份導航**，所以「重掛巡迴」與「下架巡迴」
+    /// 在結構上不可能同時跑，<see cref="IsRunning"/> 同時就是兩者的互斥閘。
     /// </summary>
-    internal sealed unsafe class MultiRetainerReprice : IDisposable
+    internal sealed unsafe class MultiRetainerTour : IDisposable
     {
         private const int NavActionThrottleMs = 500; // min gap between fired UI actions
         private const int TalkThrottleMs = 250;      // min gap between Talk advances
@@ -44,7 +55,8 @@ namespace Marketbuddy
         }
 
         private readonly MarketGuiEventHandler gui;
-        private readonly BatchReprice engine;
+        private readonly BatchReprice repriceEngine;
+        private readonly BatchDelist delistEngine;
         private readonly TickTaskQueue queue = new();
 
         private DateTime lastUiAction = DateTime.MinValue;
@@ -58,24 +70,37 @@ namespace Marketbuddy
         private int totalRepriced, totalSkipped, totalDelisted, totalFailed, retainersDone;
 
         public bool IsRunning => queue.IsRunning;
+
+        /// <summary>目前（或最近一次）跑的是哪一種巡迴。UI 靠它決定要畫哪一種進度。</summary>
+        public TourMode Mode { get; private set; } = TourMode.Reprice;
+
         public int TotalRetainers { get; private set; }
         public int CurrentRetainerNumber { get; private set; }
         public string CurrentRetainerName { get; private set; } = string.Empty;
 
-        public MultiRetainerReprice(MarketGuiEventHandler gui, BatchReprice engine)
+        /// <summary>巡迴此刻正在驅動的單僱員引擎（依 <see cref="Mode"/>）。</summary>
+        public IRetainerBatchEngine ActiveEngine => EngineFor(Mode);
+
+        private IRetainerBatchEngine EngineFor(TourMode mode) =>
+            mode == TourMode.Delist ? delistEngine : repriceEngine;
+
+        public MultiRetainerTour(MarketGuiEventHandler gui, BatchReprice repriceEngine, BatchDelist delistEngine)
         {
             this.gui = gui;
-            this.engine = engine;
+            this.repriceEngine = repriceEngine;
+            this.delistEngine = delistEngine;
             queue.Aborted += OnQueueAborted;
             queue.Completed += OnQueueCompleted;
-            engine.BatchAborted += OnEngineBatchAborted;
+            repriceEngine.BatchAborted += OnEngineBatchAborted;
+            delistEngine.BatchAborted += OnEngineBatchAborted;
             Framework.Update += OnFrameworkUpdate;
         }
 
         public void Dispose()
         {
             Framework.Update -= OnFrameworkUpdate;
-            engine.BatchAborted -= OnEngineBatchAborted;
+            delistEngine.BatchAborted -= OnEngineBatchAborted;
+            repriceEngine.BatchAborted -= OnEngineBatchAborted;
             queue.Aborted -= OnQueueAborted;
             queue.Completed -= OnQueueCompleted;
             if (queue.IsRunning)
@@ -83,10 +108,12 @@ namespace Marketbuddy
             ReleaseSuppressionIfHeld();
         }
 
-        public bool CanStart(out string reason)
+        public bool CanStart(TourMode mode, out string reason)
         {
             reason = string.Empty;
-            if (IsRunning || engine.IsRunning)
+            // 兩個引擎都要空著：出售品視窗那顆單僱員按鈕、快速上架的單件定價、
+            // 以及另一種模式的巡迴，任何一個在跑都不能再開一輪。
+            if (IsRunning || repriceEngine.IsRunning || delistEngine.IsRunning)
                 return false;
             if (IPCManager.IsLocked)
             {
@@ -122,9 +149,9 @@ namespace Marketbuddy
             return true;
         }
 
-        public void Start()
+        public void Start(TourMode mode)
         {
-            if (!CanStart(out var reason))
+            if (!CanStart(mode, out var reason))
             {
                 if (AutoRetainerBridge.IsBusy)
                 {
@@ -147,6 +174,7 @@ namespace Marketbuddy
             }
 
             var targets = CollectTargets();
+            Mode = mode;
             TotalRetainers = targets.Count;
             CurrentRetainerNumber = 0;
             CurrentRetainerName = string.Empty;
@@ -173,7 +201,9 @@ namespace Marketbuddy
             AutoRetainerBridge.AcquireSuppression("multi-retainer tour");
             suppressionHeld = true;
 
-            ChatGui.Print("[Marketbuddy] Relisting all retainers: ?? to visit...".Loc(targets.Count));
+            ChatGui.Print(mode == TourMode.Delist
+                ? "[Marketbuddy] Delisting all retainers: ?? to visit...".Loc(targets.Count)
+                : "[Marketbuddy] Relisting all retainers: ?? to visit...".Loc(targets.Count));
         }
 
         public void CancelByButton() => Abort("cancelled by user".Loc());
@@ -220,6 +250,7 @@ namespace Marketbuddy
             // Tour-level guard rails. While the per-retainer batch runs, the
             // engine applies its own guards; an engine abort surfaces through
             // OnEngineBatchAborted and stops the tour.
+            var engine = ActiveEngine;
             if (!engine.IsRunning)
             {
                 if (Keys[VirtualKey.ESCAPE])
@@ -295,7 +326,7 @@ namespace Marketbuddy
             if (selectString != null && ThrottleUiAction())
             {
                 if (!AddonHelpers.TrySelectStringEntry(selectString, sellEntryText))
-                    Log.Debug("MultiRetainerReprice: sell entry not found in SelectString yet");
+                    Log.Debug("MultiRetainerTour: sell entry not found in SelectString yet");
             }
 
             return TickTaskResult.Continue;
@@ -306,6 +337,7 @@ namespace Marketbuddy
             if (ctx.SkipRemainingSteps)
                 return TickTaskResult.Done;
 
+            var engine = ActiveEngine;
             if (!ctx.BatchStarted)
             {
                 engineBatchAborted = false;
@@ -327,6 +359,15 @@ namespace Marketbuddy
             if (engine.IsRunning)
                 return TickTaskResult.Continue;
 
+            // 🔴 引擎停了就先把它已經做掉的事計進總數，**中止的情況也一樣**。
+            // 舊版只在成功路徑累加，所以「跑到第 3 個僱員撞到僱員背包滿而停手」的
+            // 摘要會把前面兩個僱員真的處理掉的件數講成 0——那正是「撞到上限卻
+            // 印得像沒事」的同一類謊。retainersDone 則刻意不加：這名僱員確實沒跑完。
+            totalRepriced += engine.RepricedCount;
+            totalSkipped += engine.SkippedCount;
+            totalDelisted += engine.DelistedCount;
+            totalFailed += engine.FailedCount;
+
             if (engineBatchAborted)
             {
                 // The engine already reported the reason; stop the whole tour.
@@ -335,10 +376,6 @@ namespace Marketbuddy
             }
 
             retainersDone++;
-            totalRepriced += engine.RepricedCount;
-            totalSkipped += engine.SkippedCount;
-            totalDelisted += engine.DelistedCount;
-            totalFailed += engine.FailedCount;
             return TickTaskResult.Done;
         }
 
@@ -429,8 +466,12 @@ namespace Marketbuddy
         {
             ReleaseSuppressionIfHeld();
             CurrentRetainerName = string.Empty;
-            ChatGui.PrintError(
-                "[Marketbuddy] Tour cancelled: ?? (?? retainer(s) done: ?? repriced, ?? skipped, ?? delisted, ?? failed)"
+            // 🔴 停手原因照實帶出來，而且**永遠**跟著已完成的件數一起講：
+            // 「撞到限制卻印成正常結束」是我們踩過的雷，這裡不會重蹈。
+            ChatGui.PrintError(Mode == TourMode.Delist
+                ? "[Marketbuddy] Delist tour stopped: ?? (?? retainer(s) done: ?? delisted, ?? failed)"
+                    .Loc(reason, retainersDone, totalDelisted, totalFailed)
+                : "[Marketbuddy] Tour cancelled: ?? (?? retainer(s) done: ?? repriced, ?? skipped, ?? delisted, ?? failed)"
                     .Loc(reason, retainersDone, totalRepriced, totalSkipped, totalDelisted, totalFailed));
             if (AutoRetainerBridge.IsBusy)
             {
@@ -443,8 +484,10 @@ namespace Marketbuddy
         {
             ReleaseSuppressionIfHeld();
             CurrentRetainerName = string.Empty;
-            ChatGui.Print(
-                "[Marketbuddy] All retainers done: ?? visited, ?? repriced, ?? skipped, ?? delisted, ?? failed"
+            ChatGui.Print(Mode == TourMode.Delist
+                ? "[Marketbuddy] All retainers delisted: ?? visited, ?? delisted, ?? failed"
+                    .Loc(retainersDone, totalDelisted, totalFailed)
+                : "[Marketbuddy] All retainers done: ?? visited, ?? repriced, ?? skipped, ?? delisted, ?? failed"
                     .Loc(retainersDone, totalRepriced, totalSkipped, totalDelisted, totalFailed));
         }
     }

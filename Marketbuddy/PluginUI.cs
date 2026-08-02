@@ -66,7 +66,7 @@ namespace Marketbuddy
                 !marketbuddy.MarketGuiEventHandler.AddonRetainerList_Frame(out var topLeft, out var size))
                 return;
 
-            var tour = marketbuddy.MultiReprice;
+            var tour = marketbuddy.MultiTour;
 
             ImGui.SetNextWindowPos(new Vector2(
                 topLeft.X + size.X + conf.RetainerPanelOffset.X,
@@ -90,9 +90,14 @@ namespace Marketbuddy
 
             ImGui.Separator();
             if (tour.IsRunning)
+            {
                 DrawTourProgress(tour);
+            }
             else
+            {
                 DrawTourStartButton(tour);
+                DrawDelistTourButton(tour);
+            }
 
             ImGui.End();
         }
@@ -102,26 +107,28 @@ namespace Marketbuddy
         /// 僱員層（第幾個／共幾個／誰）來自巡迴本身，道具層（第幾件／共幾件／哪一件）
         /// 來自巡迴此刻正在驅動的那個引擎。在僱員之間移動時引擎沒在跑，只會有僱員那一行。
         /// </summary>
-        private void DrawTourProgress(MultiRetainerReprice tour)
+        private void DrawTourProgress(MultiRetainerTour tour)
         {
             ImGui.TextUnformatted("Retainer ??/??: ??".Loc(
                 tour.CurrentRetainerNumber, tour.TotalRetainers, tour.CurrentRetainerName));
 
-            var engine = marketbuddy.BatchReprice;
+            // 巡迴此刻驅動的引擎——重掛與下架是兩個不同的物件，不能寫死其中一個。
+            var engine = tour.ActiveEngine;
             if (engine.IsRunning)
             {
                 var currentIndex = Math.Min(engine.ProcessedSlots + 1, engine.TotalSlots);
-                ImGui.TextUnformatted(
-                    "Repricing ??/??: ??".Loc(currentIndex, engine.TotalSlots, engine.CurrentItemName));
+                ImGui.TextUnformatted(tour.Mode == TourMode.Delist
+                    ? "Delisting ??/??: ??".Loc(currentIndex, engine.TotalSlots, engine.CurrentItemName)
+                    : "Repricing ??/??: ??".Loc(currentIndex, engine.TotalSlots, engine.CurrentItemName));
             }
 
             if (ImGui.Button("Cancel".Loc() + "##mbtourcancel"))
                 tour.CancelByButton();
         }
 
-        private void DrawTourStartButton(MultiRetainerReprice tour)
+        private void DrawTourStartButton(MultiRetainerTour tour)
         {
-            var canStart = tour.CanStart(out var reason);
+            var canStart = tour.CanStart(TourMode.Reprice, out var reason);
             // When AutoRetainer is the only blocker, keep the button clickable
             // so pressing it explains the situation instead of doing nothing.
             var disabled = !canStart && !AutoRetainerBridge.IsBusy;
@@ -133,7 +140,7 @@ namespace Marketbuddy
                 ? "Relist all retainers".Loc()
                 : "Relist all retainers (lowest -??)".Loc(GetUndercutText());
             if (ImGui.Button(tourLabel + "##mbtourstart"))
-                tour.Start();
+                tour.Start(TourMode.Reprice);
             if (disabled)
             {
                 ImGui.EndDisabled();
@@ -143,6 +150,71 @@ namespace Marketbuddy
             else if (ImGui.IsItemHovered())
             {
                 ImGui.SetTooltip(PricingRuleText());
+            }
+        }
+
+        /// <summary>下架巡迴的「已武裝」到期時間；<see cref="DateTime.MinValue"/> = 沒武裝。</summary>
+        private DateTime delistArmedUntil = DateTime.MinValue;
+
+        /// <summary>武裝之後多久自動解除。夠久可以看清楚字、夠短不會一直掛著。</summary>
+        private static readonly TimeSpan DelistArmWindow = TimeSpan.FromSeconds(6);
+
+        /// <summary>
+        /// 全僱員下架。**刻意做成兩段式**：第一下只是「武裝」，按鈕會變成紅色的
+        /// 確認鈕並開始倒數，要在倒數內再按一次才真的開始；倒數結束自動解除。
+        ///
+        /// 🔴 為什麼一定要二次確認：這個動作把一整輪上架的成果全部收回來，
+        /// 誤按的代價遠高於誤按重掛。而且它就在重掛按鈕正下方，單擊誤觸的機率不低。
+        /// 兩段式的好處是「一次滑鼠失誤絕對不夠」，又不必額外教使用者按住某個修飾鍵。
+        ///
+        /// 視覺上也刻意跟重掛拉開：分隔線 + 紅字標題 + 紅色按鈕。
+        /// </summary>
+        private void DrawDelistTourButton(MultiRetainerTour tour)
+        {
+            ImGui.Separator();
+
+            var armed = delistArmedUntil > DateTime.UtcNow;
+            if (!armed && delistArmedUntil != DateTime.MinValue)
+                delistArmedUntil = DateTime.MinValue;
+
+            var canStart = tour.CanStart(TourMode.Delist, out var reason);
+            var disabled = !canStart && !AutoRetainerBridge.IsBusy;
+            if (disabled)
+            {
+                delistArmedUntil = DateTime.MinValue;
+                armed = false;
+                ImGui.BeginDisabled();
+            }
+
+            if (armed)
+            {
+                var left = (int)Math.Ceiling((delistArmedUntil - DateTime.UtcNow).TotalSeconds);
+                ImGui.PushStyleColor(ImGuiCol.Button, ImGuiColors.DalamudRed);
+                ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ImGuiColors.DalamudRed);
+                ImGui.PushStyleColor(ImGuiCol.ButtonActive, ImGuiColors.DalamudRed);
+                if (ImGui.Button("Confirm: take EVERYTHING off the market (??)".Loc(left) + "##mbdeliststart"))
+                {
+                    delistArmedUntil = DateTime.MinValue;
+                    tour.Start(TourMode.Delist);
+                }
+
+                ImGui.PopStyleColor(3);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Every listing of every retainer goes back into that retainer's own inventory. Click again to go ahead, or wait for this to time out.".Loc());
+            }
+            else
+            {
+                if (ImGui.Button("Delist all retainers".Loc() + "##mbdelistarm"))
+                    delistArmedUntil = DateTime.UtcNow + DelistArmWindow;
+                if (!disabled && ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Takes every listing of every retainer off the market and back into that retainer's own inventory. Asks for confirmation first.".Loc());
+            }
+
+            if (disabled)
+            {
+                ImGui.EndDisabled();
+                if (!string.IsNullOrEmpty(reason) && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                    ImGui.SetTooltip(reason);
             }
         }
 
@@ -266,7 +338,7 @@ namespace Marketbuddy
 
             // While the all-retainers tour is driving, the tour owns the engine;
             // don't offer a second start button in the sell list.
-            if (marketbuddy.MultiReprice.IsRunning)
+            if (marketbuddy.MultiTour.IsRunning)
                 return;
 
             var canStart = engine.CanStart(out var reason);

@@ -30,7 +30,7 @@ namespace Marketbuddy
     /// hands it a single just-listed slot to price. Cancellable at any time
     /// via the cancel button or ESC; closing the sell list also aborts.
     /// </summary>
-    internal sealed unsafe class BatchReprice : IDisposable
+    internal sealed unsafe class BatchReprice : IRetainerBatchEngine, IDisposable
     {
         // Pacing / safety constants. Requests are throttled and retried with
         // backoff instead of patching the client's "please wait" throttle path.

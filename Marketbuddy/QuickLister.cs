@@ -99,7 +99,7 @@ namespace Marketbuddy
         private readonly Hook<OpenForItemSlotDelegate> hook;
         private readonly MarketGuiEventHandler gui;
         private readonly BatchReprice engine;
-        private readonly MultiRetainerReprice tour;
+        private readonly MultiRetainerTour tour;
         private readonly string putUpForSaleText; // Addon sheet row 99
 
         // Every quick-list still waiting for its menu-jump to open a
@@ -171,7 +171,7 @@ namespace Marketbuddy
                 ReleaseSuppressionIfHeld();
         }
 
-        public QuickLister(MarketGuiEventHandler gui, BatchReprice engine, MultiRetainerReprice tour)
+        public QuickLister(MarketGuiEventHandler gui, BatchReprice engine, MultiRetainerTour tour)
         {
             this.gui = gui;
             this.engine = engine;

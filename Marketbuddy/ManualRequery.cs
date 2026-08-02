@@ -25,7 +25,7 @@ namespace Marketbuddy
     /// No hooks, no memory patches: this is exactly the same mechanism
     /// BatchReprice already uses for headless batch pricing, just watching the
     /// user's own interactive window instead of driving one of our own. It
-    /// steps aside whenever BatchReprice/MultiRetainerReprice own the shared
+    /// steps aside whenever BatchReprice/MultiRetainerTour own the shared
     /// InfoProxyItemSearch request slot, so the two never fight over it.
     /// Backoff is capped and the retry count bounded, so a genuinely rejected
     /// search can never turn into a request flood: if the cap is reached

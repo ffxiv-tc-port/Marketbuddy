@@ -28,7 +28,9 @@ namespace Marketbuddy
 
         internal BatchReprice BatchReprice { get; private set; }
 
-        internal MultiRetainerReprice MultiReprice { get; private set; }
+        internal BatchDelist BatchDelist { get; private set; }
+
+        internal MultiRetainerTour MultiTour { get; private set; }
 
         internal QuickLister? QuickLister { get; private set; }
 
@@ -79,7 +81,9 @@ namespace Marketbuddy
                 BatchReprice = new BatchReprice(MarketGuiEventHandler);
                 MarketGuiEventHandler.BatchEngine = BatchReprice;
 
-                MultiReprice = new MultiRetainerReprice(MarketGuiEventHandler, BatchReprice);
+                BatchDelist = new BatchDelist(MarketGuiEventHandler);
+
+                MultiTour = new MultiRetainerTour(MarketGuiEventHandler, BatchReprice, BatchDelist);
 
                 ManualRequery = new ManualRequery(MarketGuiEventHandler);
 
@@ -89,7 +93,7 @@ namespace Marketbuddy
 
                 try
                 {
-                    QuickLister = new QuickLister(MarketGuiEventHandler, BatchReprice, MultiReprice);
+                    QuickLister = new QuickLister(MarketGuiEventHandler, BatchReprice, MultiTour);
                     MarketGuiEventHandler.QuickLister = QuickLister;
                 }
                 catch (Exception e)
@@ -128,7 +132,8 @@ namespace Marketbuddy
             LiveSellList.Dispose();
             QuickLister?.Dispose();
             ManualRequery.Dispose();
-            MultiReprice.Dispose();
+            MultiTour.Dispose();
+            BatchDelist.Dispose();
             BatchReprice.Dispose();
             MarketGuiEventHandler.Dispose();
             requestResultProbe?.Dispose();
