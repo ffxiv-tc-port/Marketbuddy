@@ -75,13 +75,22 @@ namespace Marketbuddy
                     var disabled = !canStart && !AutoRetainerBridge.IsBusy;
                     if (disabled)
                         ImGui.BeginDisabled();
-                    if (ImGui.Button("Relist all retainers (lowest -??)".Loc(GetUndercutText()) + "##mbtourstart"))
+                    // 降價設成 0 時「（最低價 -0gil）」是純噪音，卻佔掉按鈕一半寬度：
+                    // 括號整個收掉，定價規則改用滑鼠提示交代（提示不佔版面）。
+                    var tourLabel = UndercutIsZero
+                        ? "Relist all retainers".Loc()
+                        : "Relist all retainers (lowest -??)".Loc(GetUndercutText());
+                    if (ImGui.Button(tourLabel + "##mbtourstart"))
                         tour.Start();
                     if (disabled)
                     {
                         ImGui.EndDisabled();
                         if (!string.IsNullOrEmpty(reason) && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
                             ImGui.SetTooltip(reason);
+                    }
+                    else if (ImGui.IsItemHovered())
+                    {
+                        ImGui.SetTooltip(PricingRuleText());
                     }
                 }
             }
@@ -179,13 +188,22 @@ namespace Marketbuddy
             var disabled = !canStart && !AutoRetainerBridge.IsBusy;
             if (disabled)
                 ImGui.BeginDisabled();
-            if (ImGui.Button("Relist all (lowest -??)".Loc(GetUndercutText()) + "##mbbatchstart"))
+            // ⚠️ 舊字面是「全部重掛」，但這顆按鈕的範圍其實只有**這一個僱員**
+            // （全僱員巡迴是僱員選單上的另一顆）。字面改成明確的範圍。
+            var label = UndercutIsZero
+                ? "Relist this retainer".Loc()
+                : "Relist this retainer (lowest -??)".Loc(GetUndercutText());
+            if (ImGui.Button(label + "##mbbatchstart"))
                 engine.Start();
             if (disabled)
             {
                 ImGui.EndDisabled();
                 if (!string.IsNullOrEmpty(reason) && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
                     ImGui.SetTooltip(reason);
+            }
+            else if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(PricingRuleText());
             }
         }
 
@@ -475,6 +493,18 @@ namespace Marketbuddy
                 ImGui.EndCombo();
             }
         }
+
+        /// <summary>
+        /// 使用者沒有設定降價（0 gil 或 0%）。此時「（最低價 -0gil）」不帶任何資訊，
+        /// 只會把按鈕撐寬，所以標題把那段括號整個省掉。
+        /// </summary>
+        private bool UndercutIsZero =>
+            conf.UndercutUsePercent ? conf.UndercutPercent == 0 : conf.UndercutPrice == 0;
+
+        /// <summary>按鈕的滑鼠提示：把從標題省掉的定價規則交代清楚，而且完全不佔版面。</summary>
+        private string PricingRuleText() => UndercutIsZero
+            ? "Prices at the lowest listing (no undercut)".Loc()
+            : "Prices at the lowest listing minus ??".Loc(GetUndercutText());
 
         private string GetUndercutText(bool escape = false)
         {

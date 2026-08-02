@@ -180,11 +180,11 @@ namespace Marketbuddy
 
         private void DrawHeader()
         {
+            // 「（永遠是最新的）」是**說明**不是標題：掛在標題後面會把這個小面板的
+            // 標題撐成兩行，白白吃掉本來要留給清單的垂直空間。移進滑鼠提示。
             ImGui.TextUnformatted("Live listings".Loc());
-            ImGui.SameLine();
-            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
-            ImGui.TextUnformatted("(" + "always current".Loc() + ")");
-            ImGui.PopStyleColor();
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Re-read every frame - always shows the current prices".Loc());
             ImGui.SameLine();
             if (ImGui.SmallButton("x##mblivesellistclose"))
             {
