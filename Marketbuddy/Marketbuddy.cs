@@ -36,7 +36,12 @@ namespace Marketbuddy
 
         internal LiveSellList LiveSellList { get; private set; }
 
-        // Assembly compatible with dev & published versions 
+        /// <summary>
+        /// 純診斷探針（只記錄、零行為變更）。失敗時為 null，其餘功能不受影響。
+        /// </summary>
+        private MarketRequestResultProbe? requestResultProbe;
+
+        // Assembly compatible with dev & published versions
         public string AssemblyLocation { get; set; } = Assembly.GetExecutingAssembly().Location;
         public string Name => "Marketbuddy";
 
@@ -56,6 +61,18 @@ namespace Marketbuddy
                 // engines so nothing that arrives during startup is lost; it
                 // only ever writes to a dictionary and never drives anything.
                 MarketDataCache.Init();
+
+                // 純被動診斷：記錄每一次市場查價結果的 (listingCount, errorCode, itemId)，
+                // 然後原封不動呼叫 Original。用來判定「伺服器拒絕時到底有沒有回封包」。
+                // 掛不上去只影響診斷，所以自己吞掉例外。
+                try
+                {
+                    requestResultProbe = new MarketRequestResultProbe();
+                }
+                catch (Exception e)
+                {
+                    Log.Warning(e, "Market request result probe could not be initialized (diagnostics only)");
+                }
 
                 MarketGuiEventHandler = new MarketGuiEventHandler();
 
@@ -114,6 +131,7 @@ namespace Marketbuddy
             MultiReprice.Dispose();
             BatchReprice.Dispose();
             MarketGuiEventHandler.Dispose();
+            requestResultProbe?.Dispose();
             MarketDataCache.Shutdown();
             // Last: must run after every engine released its reference so a
             // leftover suppression can never survive an unload.
