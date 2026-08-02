@@ -482,14 +482,31 @@ namespace Marketbuddy
             AutoRetainerBridge.ReleaseSuppression();
         }
 
-        /// <summary>現在還有幾名僱員、共幾件掛單沒下架（每次重新數，不留狀態）。</summary>
+        /// <summary>
+        /// 現在還有幾名僱員、共幾件掛單沒下架（每次重新數，不留狀態）。
+        ///
+        /// ⚠️ 其他僱員只能用 <c>MarketItemCount</c>（僱員結構上的計數器）——巡迴本來就是
+        /// 靠它挑目標的，所以這裡沿用同一個來源不會多出新的不一致。但**我們剛剛動過的
+        /// 那名僱員**風險最高（那個計數器已知會落後於容器實況），而她正好是我們此刻
+        /// 站著的人，市場容器就在手邊，所以那一名改用實際容器內容數。
+        /// </summary>
         private static (int Retainers, int Items) CountRemaining()
         {
             var targets = CollectTargets();
+            var activeId = ActiveRetainerId();
             var items = 0;
             foreach (var t in targets)
-                items += t.Listed;
+                items += t.RetainerId == activeId && activeId != 0
+                    ? BatchDelist.CountRemainingListed()
+                    : t.Listed;
             return (targets.Count, items);
+        }
+
+        private static ulong ActiveRetainerId()
+        {
+            var retainerManager = RetainerManager.Instance();
+            var active = retainerManager == null ? null : retainerManager->GetActiveRetainer();
+            return active == null ? 0 : active->RetainerId;
         }
 
         /// <summary>整趟巡迴佔掉玩家背包幾格；量不到就回 null，**不編數字**。</summary>
