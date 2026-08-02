@@ -34,8 +34,26 @@ namespace Marketbuddy
     {
         // Pacing / safety constants. Requests are throttled and retried with
         // backoff instead of patching the client's "please wait" throttle path.
-        private const int ThrottleMs = 500;          // min gap between two market data requests
-        private const int OfferingsTimeoutMs = 5000; // max wait for market data per attempt
+        // 🔑 2026-08-02 實機診斷（MBDIAG，n=39，零重疊）定案了節流的真實形狀：
+        // 送出請求時「距離上一次收到資料」的毫秒數，完全決定這次請求會不會被靜默吞掉。
+        //     ✅ 拿到資料：3107 – 5572 ms（n=20）
+        //     ❌ 靜默逾時：  14 –   69 ms（n=19，連 history 封包都沒有＝根本沒送出去）
+        // 也就是說：客戶端會把「太快的下一次市場請求」直接丟掉，不回錯誤、不發封包。
+        // 舊的 ThrottleMs=500 是從「上一次**送出**」起算的，而且 500ms 遠低於真實門檻，
+        // 所以每一件的第一次嘗試都必然白等滿 OfferingsTimeoutMs，第二次才拿得到
+        // ——每件固定浪費一整個逾時，這就是「比手動還慢」的全部成因。
+        //
+        // 修法兩件：(1) 改成從「上一次**收到資料**」起算；(2) 間隔改成自我校準（見
+        // learnedRequestIntervalMs）。真實門檻只知道落在 69ms 與 3107ms 之間，硬編一個數字
+        // 遲早過期，所以讓它自己往上爬到不再被吞為止。
+        private const int RequestIntervalStartMs = 2500;  // 起始間隔（保守；已知 3107 一定過）
+        private const int RequestIntervalStepMs = 500;    // 每次被吞就往上加
+        private const int RequestIntervalCapMs = 4000;    // 上限（仍優於舊行為的 6000+）
+
+        // 逾時砍到 1500：實測成功的回應在請求後 ~100-290ms 出現 history、~350-650ms 出現
+        // offerings，5000ms 是實際需要的 7 倍以上。砍短之後「猜錯間隔」的代價從 5s 降到 1.5s，
+        // 自我校準才付得起學習成本。
+        private const int OfferingsTimeoutMs = 1500;  // max wait for market data per attempt
         private const int RetryBackoffBaseMs = 500;  // backoff before retry N is min(N * this, RetryBackoffCapMs)...
         private const int RetryBackoffCapMs = 2000;  // ...never escalating past this (stays quick even after several stalls)
         private const int MaxAttempts = 8;           // 1 initial attempt + up to 7 retries per slot
@@ -45,6 +63,23 @@ namespace Marketbuddy
 
         /// <summary>Backoff before retry attempt N: escalates fast, then caps low - never the multi-second climb of a classic exponential backoff.</summary>
         private static int RetryBackoffFor(int attempt) => Math.Min(RetryBackoffBaseMs * attempt, RetryBackoffCapMs);
+
+        /// <summary>
+        /// 自我校準的「兩次市場請求之間、從收到上一份資料起算」的最小間隔。
+        /// 刻意用 static：一次巡迴會跑過多名雇員，學到的值要跨雇員沿用，不然每個雇員都要重學。
+        /// 只往上爬、不往下降 —— 往下降會震盪，而每次猜錯的代價是一個完整逾時。
+        /// </summary>
+        private static int learnedRequestIntervalMs = RequestIntervalStartMs;
+
+        private static void WidenRequestInterval()
+        {
+            if (learnedRequestIntervalMs >= RequestIntervalCapMs)
+                return;
+
+            var before = learnedRequestIntervalMs;
+            learnedRequestIntervalMs = Math.Min(learnedRequestIntervalMs + RequestIntervalStepMs, RequestIntervalCapMs);
+            Log.Information($"{Diag} INTERVAL widened {before} -> {learnedRequestIntervalMs} ms (request was swallowed)");
+        }
 
         private enum SlotPhase
         {
@@ -436,8 +471,13 @@ namespace Marketbuddy
 
                     if (now < job.NotBefore)
                         return TickTaskResult.Continue;
-                    if ((now - lastRequestAt).TotalMilliseconds < ThrottleMs)
+
+                    // 🔑 從「上一次收到資料」起算，不是從「上一次送出」起算——實機診斷證實
+                    // 決定請求會不會被吞掉的是前者（見檔頭 RequestIntervalStartMs 的說明）。
+                    // lastDataReceivedAt 為 MinValue（本次巡迴的第一件）時差值極大，直接放行。
+                    if ((now - lastDataReceivedAt).TotalMilliseconds < learnedRequestIntervalMs)
                         return TickTaskResult.Continue;
+
                     job.Phase = SlotPhase.Request;
                     return TickTaskResult.Continue;
 
@@ -530,6 +570,14 @@ namespace Marketbuddy
                             $"{Diag} TIMEOUT item={job.ItemId} '{job.Name}' attempt={job.Attempt} " +
                             $"historySeen={historySeen} waitedMs={(now - job.WaitStart).TotalMilliseconds:F0}");
                         offeringsPending = false;
+
+                        // history 一片空白＝這次請求根本沒送出去（被客戶端節流吞掉），
+                        // 不是伺服器慢 —— 那代表我們的間隔還不夠長，往上加。
+                        // 反之若 history 有來、只是 offerings 沒到，那是另一回事（真的在等
+                        // 伺服器），不該因此拉長間隔。
+                        if (!historySeen)
+                            WidenRequestInterval();
+
                         if (job.Attempt >= MaxAttempts)
                         {
                             Fail(job, "no market data received (timed out)".Loc());
