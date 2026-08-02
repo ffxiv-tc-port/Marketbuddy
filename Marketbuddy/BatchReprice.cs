@@ -263,7 +263,14 @@ namespace Marketbuddy
             ReleaseSuppressionIfHeld();
         }
 
-        public bool CanStart(out string reason)
+        public bool CanStart(out string reason) => CanStart(out reason, requireListedItems: true);
+
+        /// <param name="requireListedItems">
+        /// 是否要求「這名僱員身上有掛單」。整批重掛必須要求（它要自己去掃有哪些格子），
+        /// 但**已經指名某一格**的呼叫端要傳 false：它手上的資訊比僱員結構上那個
+        /// 會落後的計數器更新也更具體。詳見下面該檢查處的說明。
+        /// </param>
+        public bool CanStart(out string reason, bool requireListedItems)
         {
             reason = string.Empty;
             if (IsRunning)
@@ -305,7 +312,18 @@ namespace Marketbuddy
                 return false;
             }
 
-            if (active->MarketItemCount == 0)
+            // 🔴 `MarketItemCount` 是**僱員結構上的計數器**，不是即時的出售品容器內容，
+            // 它會落後於我們自己剛剛掛上去的東西。實機 log 抓到的時序是決定性的：
+            //   03:26:36.720  engine refused: 這名僱員沒有上架中的物品 (queued=1, head='厚土大斧')
+            //   03:26:36.731  厚土大斧：已上架（暫掛上限價），開始比價定價…
+            // 也就是這個閘門說「沒有東西」的時間點，比我們自己在**市場容器裡實際看到**
+            // 那件道具還早 11 毫秒。結果是剛掛上去的道具卡在 999999999 沒被定價。
+            //
+            // 🔑 呼叫端如果已經指名了某一格（快速上架的單件定價就是），它手上的資訊
+            // 比這個計數器新也比它具體——StartQuickReprice 會直接去讀那一格確認
+            // ItemId != 0，那才是這個引擎真正要操作的東西。這種時候不該讓落後的
+            // 計數器否決它，所以 requireListedItems 給 false。
+            if (requireListedItems && active->MarketItemCount == 0)
             {
                 reason = "this retainer has nothing listed".Loc();
                 return false;
@@ -376,7 +394,9 @@ namespace Marketbuddy
 
         public bool StartQuickReprice(short slotIndex)
         {
-            if (!CanStart(out var reason))
+            // requireListedItems: false —— 我們已經指名了 slotIndex，而且下面就會去讀
+            // 那一格確認它真的有東西。那比僱員結構上會落後的 MarketItemCount 更權威。
+            if (!CanStart(out var reason, requireListedItems: false))
             {
                 LastStartRefusalReason = reason;
                 return false;

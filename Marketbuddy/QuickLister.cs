@@ -40,7 +40,26 @@ namespace Marketbuddy
     {
         private const int PendingTimeoutMs = 5000;       // menu jump -> RetainerSell must open within this
         private const int ListingAckTimeoutMs = 6000;    // confirm -> item appears in a market slot
-        private const int RepriceQueueTimeoutMs = 30000; // engine must pick the slot up within this
+
+        /// <summary>
+        /// 引擎必須在這麼久之內接手這一格。
+        ///
+        /// 🔑 這段時間**只在真的有機會推進時才倒數**。原本它是絕對期限，於是「使用者
+        /// 一邊跑全僱員巡迴、一邊快速上架」時會這樣：
+        ///   03:26:42 RetainerSellList not open → 03:26:46 multi-retainer tour running
+        ///   → 03:26:47 engine already running → 03:27:02 multi-retainer tour running
+        ///   → 03:27:06「仍掛在上限價，請手動定價！」
+        /// 那 30 秒裡它被擋住的原因**全部是我們自己合法佔用引擎**，不是卡住，
+        /// 卻照樣把道具靜默丟掉、永久留在 999999999。
+        /// </summary>
+        private const int RepriceQueueTimeoutMs = 30000;
+
+        /// <summary>
+        /// 不管被什麼擋住都算數的硬上限。軟期限會被暫停，所以需要一個逃生口，
+        /// 免得「真的永遠不會好」的情況變成無限等待。設得比軟期限寬很多，
+        /// 因為正常情況下根本碰不到它（巡迴自己的看門狗是 600 秒）。
+        /// </summary>
+        private const int RepriceQueueHardCapMs = 15 * 60 * 1000;
 
         /// <summary>Key codes offered in the settings combo (VirtualKey values; 0 = disabled).</summary>
         public static readonly int[] SelectableKeyCodes = [0, 0x10 /* SHIFT */, 0x11 /* CTRL */, 0x12 /* ALT */];
@@ -79,13 +98,34 @@ namespace Marketbuddy
             public required string Name;
             public required HashSet<short> PreListingSlots;
             public required DateTime Deadline;
+
+            /// <summary>掛在哪一名僱員身上。市場容器是「目前這名僱員的」，換人之後同一個索引指的是別的東西。</summary>
+            public required ulong RetainerId;
         }
 
         private sealed class PendingReprice
         {
             public required short Slot;
             public required string Name;
+
+            /// <summary>
+            /// 軟期限：**只在真的有機會推進時才倒數**（被我們自己的巡迴／引擎佔用時會往後推）。
+            /// </summary>
             public required DateTime Deadline;
+
+            /// <summary>
+            /// 硬期限：不管被什麼擋住都算數的逃生口，避免軟期限被無限延後變成永遠等待。
+            /// </summary>
+            public required DateTime HardDeadline;
+
+            /// <summary>
+            /// 這名僱員的 ID。🔴 沒有它的話，使用者離開後換到另一名僱員時，
+            /// 這個 Slot 索引指的會是**別人的**市場格子，於是去改到不相干的道具。
+            /// </summary>
+            public required ulong RetainerId;
+
+            /// <summary>最後一次被擋住的原因，放棄時要講給使用者聽。</summary>
+            public string LastBlock = string.Empty;
         }
 
         private sealed class PendingMenuSelect
@@ -346,6 +386,7 @@ namespace Marketbuddy
                 Name = pending.Name,
                 PreListingSlots = preSlots,
                 Deadline = DateTime.UtcNow.AddMilliseconds(ListingAckTimeoutMs),
+                RetainerId = CurrentRetainerId(),
             });
         }
 
@@ -384,9 +425,20 @@ namespace Marketbuddy
                 ? null
                 : inventoryManager->GetInventoryContainer(InventoryType.RetainerMarket);
 
+            var activeRetainer = CurrentRetainerId();
+
             for (var w = watches.Count - 1; w >= 0; w--)
             {
                 var watch = watches[w];
+
+                // 🔴 換僱員之後這個容器是**另一個人的**，同一個索引指的是別的東西。
+                // 比對名稱／ItemId 也不夠：同款道具很可能同時掛在好幾名僱員身上。
+                if (activeRetainer != 0 && watch.RetainerId != activeRetainer)
+                {
+                    watches.RemoveAt(w);
+                    ChatGui.PrintError("[Marketbuddy] ??: you left that retainer before the listing was confirmed - check its price!".Loc(watch.Name));
+                    continue;
+                }
 
                 var matchedSlot = (short)-1;
                 if (container != null)
@@ -413,6 +465,8 @@ namespace Marketbuddy
                         Slot = matchedSlot,
                         Name = watch.Name,
                         Deadline = DateTime.UtcNow.AddMilliseconds(RepriceQueueTimeoutMs),
+                        HardDeadline = DateTime.UtcNow.AddMilliseconds(RepriceQueueHardCapMs),
+                        RetainerId = watch.RetainerId,
                     });
                     continue;
                 }
@@ -423,6 +477,17 @@ namespace Marketbuddy
                     ChatGui.PrintError("[Marketbuddy] ??: could not confirm the listing; if it is up, its price is the cap - check it!".Loc(watch.Name));
                 }
             }
+        }
+
+        /// <summary>
+        /// 目前這名僱員的 ID；不在僱員身上時回 0。
+        /// 佇列裡的市場格索引只在**同一名僱員**身上有意義，所以每個項目都要綁著它。
+        /// </summary>
+        private static ulong CurrentRetainerId()
+        {
+            var retainerManager = RetainerManager.Instance();
+            var active = retainerManager == null ? null : retainerManager->GetActiveRetainer();
+            return active == null ? 0 : active->RetainerId;
         }
 
         /// <summary>上一次記錄過的阻塞原因；只在原因改變時才寫 log，避免每幀洗版。</summary>
@@ -437,17 +502,75 @@ namespace Marketbuddy
             Log.Information($"[Marketbuddy] [MBDIAG] QUICKLIST-BLOCKED {reason}");
         }
 
+        /// <summary>上一次跑 <see cref="PumpRepriceQueue"/> 的時刻，用來算出要把軟期限往後推多久。</summary>
+        private DateTime lastQueuePump = DateTime.MinValue;
+
+        private static TimeSpan Min(TimeSpan a, TimeSpan b) => a < b ? a : b;
+
         private void PumpRepriceQueue()
         {
-            // Expire first so a stuck head never blocks the rest.
+            var now = DateTime.UtcNow;
+            // ⚠️ 這個函式只在佇列非空時才被呼叫，所以 lastQueuePump 可能是「上一批處理完」
+            // 的很久以前——直接拿差值去延後期限，會在第一幀就把軟期限推掉好幾分鐘，
+            // 等於期限形同虛設。夾在一幀的合理上限（遊戲卡頓／alt-tab 也一樣安全）。
+            var elapsed = lastQueuePump == DateTime.MinValue
+                ? TimeSpan.Zero
+                : Min(now - lastQueuePump, TimeSpan.FromSeconds(1));
+            lastQueuePump = now;
+
+            // 🔴 為什麼要先判斷「被誰擋住」再決定期限要不要倒數：
+            // 被**我們自己的**巡迴／引擎佔用時，這一格並沒有卡住，只是還沒輪到它。
+            // 讓期限在那段時間繼續倒數，等於「使用者一邊巡迴一邊快速上架就會有道具
+            // 被靜默丟掉、永久停在 999999999」——實機 log 抓到的正是這條路徑。
+            var blocked =
+                engine.IsRunning ? "engine already running"
+                : tour.IsRunning ? "multi-retainer tour running"
+                : IPCManager.IsLocked ? "IPC locked by another plugin"
+                : !gui.IsRetainerSellListOpen ? "RetainerSellList not open"
+                : string.Empty;
+
+            // 前三個是「我們（或別的外掛）合法佔著引擎，等一下就會輪到」——暫停倒數。
+            // 「出售品視窗沒開」不算：那代表使用者已經走開，這一格在這個僱員身上，
+            // 不會自己好起來，該讓它照常到期並告訴使用者。
+            var pauseCountdown = blocked.Length > 0 && blocked != "RetainerSellList not open";
+
+            var activeRetainer = CurrentRetainerId();
+
             for (var i = repriceQueue.Count - 1; i >= 0; i--)
             {
-                if (DateTime.UtcNow <= repriceQueue[i].Deadline)
+                var entry = repriceQueue[i];
+                if (blocked.Length > 0)
+                    entry.LastBlock = blocked;
+
+                // 🔴 使用者換到別的僱員了：這個 Slot 索引在新僱員的市場容器裡指的是
+                // 不相干的道具，繼續留著遲早會改到別人的東西。立刻放棄並說清楚。
+                if (activeRetainer != 0 && entry.RetainerId != activeRetainer)
+                {
+                    repriceQueue.RemoveAt(i);
+                    claimedSlots.Remove(entry.Slot);
+                    ChatGui.PrintError("[Marketbuddy] ??: still listed at the price cap (??) - you moved to another retainer, so reprice it manually!"
+                        .Loc(entry.Name, Configuration.MAX_PRICE));
                     continue;
-                var expired = repriceQueue[i];
+                }
+
+                if (pauseCountdown)
+                {
+                    // 還沒輪到它，不算它的時間。硬期限照走。
+                    entry.Deadline += elapsed;
+                }
+
+                if (now <= entry.Deadline && now <= entry.HardDeadline)
+                    continue;
+
                 repriceQueue.RemoveAt(i);
-                claimedSlots.Remove(expired.Slot);
-                ChatGui.PrintError("[Marketbuddy] ??: still listed at the price cap (??) - reprice it manually!".Loc(expired.Name, Configuration.MAX_PRICE));
+                claimedSlots.Remove(entry.Slot);
+                // 🔑 放棄時**要講為什麼**。原本只說「請手動定價」，使用者看不出是
+                // 撞到什麼——而那個原因我們其實一直都知道。
+                ChatGui.PrintError(entry.LastBlock.Length > 0
+                    ? "[Marketbuddy] ??: still listed at the price cap (??) - gave up after being blocked by: ?? - reprice it manually!"
+                        .Loc(entry.Name, Configuration.MAX_PRICE, entry.LastBlock)
+                    : "[Marketbuddy] ??: still listed at the price cap (??) - reprice it manually!"
+                        .Loc(entry.Name, Configuration.MAX_PRICE));
             }
 
             if (repriceQueue.Count == 0)
@@ -459,16 +582,10 @@ namespace Marketbuddy
             // 🔴 這五個條件原本全部靜默 return，所以「排進佇列卻沒人接手、30 秒後噴
             // 『請手動定價』」在 log 裡完全沒有線索（2026-08-02 實機遇到，只能靠推理）。
             // 佇列非空卻動不了時就把原因記下來——只在原因「改變」時記一次，不會洗版。
-            var blocked =
-                engine.IsRunning ? "engine already running"
-                : tour.IsRunning ? "multi-retainer tour running"
-                : IPCManager.IsLocked ? "IPC locked by another plugin"
-                : !gui.IsRetainerSellListOpen ? "RetainerSellList not open"
-                : string.Empty;
-
             if (blocked.Length > 0)
             {
-                NoteBlockReason($"{blocked} (queued={repriceQueue.Count}, head='{repriceQueue[0].Name}')");
+                NoteBlockReason($"{blocked} (queued={repriceQueue.Count}, head='{repriceQueue[0].Name}'" +
+                                (pauseCountdown ? ", countdown paused" : "") + ")");
                 return;
             }
 
