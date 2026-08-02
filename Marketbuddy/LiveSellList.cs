@@ -153,15 +153,31 @@ namespace Marketbuddy
             }
         }
 
-        public void Draw()
+        /// <summary>
+        /// 這個面板貼在原生出售品視窗的右邊，而重掛面板（同一欄、在它上面）高度是會變的，
+        /// 所以起點不能寫死：<paramref name="stackUnderY"/> 是重掛面板**這一幀量到的下緣**，
+        /// 由 <see cref="PluginUI.Draw"/> 在畫完它之後立刻傳進來。傳 null 代表重掛面板
+        /// 這一幀沒出現，此時退回原本的「貼齊原生視窗右上角」。
+        /// </summary>
+        /// <param name="stackUnderY">重掛面板下緣的螢幕 Y 座標，或 null。</param>
+        public void Draw(float? stackUnderY = null)
         {
             if (!conf.LiveSellListOverlay || !haveAnchor)
                 return;
 
-            ImGui.SetNextWindowPos(anchor);
+            const float stackGap = 4f;
+            var position = anchor;
+            if (stackUnderY is { } top)
+                position.Y = top + stackGap;
+
+            // 高度上限扣掉被上面那塊吃掉的垂直空間，這樣整欄加起來還是大致貼齊原生視窗；
+            // 200 px 的地板保留不動，否則重掛面板很高時這裡會被壓到看不見東西。
+            var availableHeight = nativeHeight - (position.Y - anchor.Y);
+
+            ImGui.SetNextWindowPos(position);
             ImGui.SetNextWindowSizeConstraints(
                 new Vector2(220, 80),
-                new Vector2(float.MaxValue, Math.Max(200f, nativeHeight)));
+                new Vector2(float.MaxValue, Math.Max(200f, availableHeight)));
 
             if (!ImGui.Begin("Marketbuddy_livesellist",
                     ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove |

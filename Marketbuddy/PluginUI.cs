@@ -34,12 +34,21 @@ namespace Marketbuddy
         {
         }
 
+        /// <summary>
+        /// 兩塊側邊面板之間的垂直間距。單純是視覺留白——**不是**排版邏輯的一部分：
+        /// 即時掛單面板的位置是從重掛面板**實際量到的下緣**算出來的，不是猜的高度，
+        /// 所以重掛面板長高長矮（堆疊列開關、佇列列出現、跑起來變成進度列）都不會重疊。
+        /// </summary>
+        private const float SidePanelGap = 4f;
+
         public void Draw()
         {
             DrawSettingsWindow();
-            DrawRepriceWindow();
+            // 順序即排版：重掛面板先畫，畫完把它的下緣交給即時掛單面板當作起點。
+            // 兩者在同一個 ImGui frame 內先後執行，所以這個值永遠是「這一幀的」，不會慢一拍。
+            var repriceBottom = DrawRepriceWindow();
             DrawRetainerListOverlay();
-            marketbuddy.LiveSellList.Draw();
+            marketbuddy.LiveSellList.Draw(repriceBottom);
         }
 
         private void DrawRetainerListOverlay()
@@ -107,23 +116,30 @@ namespace Marketbuddy
         /// 而且 <c>ItemSpacing</c> 被壓成 1 px、視窗無背景，所以「哪個輸入框對應哪個標籤」
         /// 完全看不出來。這裡改成一列一件事、每個輸入框緊跟著自己的單位標籤。
         ///
+        /// 2026-08-03 第二次調整：位置由「原生視窗左下角下方」改成**右上角**，
+        /// 也就是即時掛單面板原本的位置，即時掛單改接在它下面（同一欄、重掛在上）。
+        /// 兩者共用 <see cref="Configuration.LiveSellListOffset"/> 當作整欄的位移，
+        /// 所以拖滑桿是兩塊一起動；重掛面板高度變化時，下面那塊是照**量到的下緣**
+        /// 重新定位的，不會重疊。
+        ///
         /// ⚠️ **行為零變更**：控制項、它們讀寫的設定欄位、以及各自的顯示條件
         /// （堆疊列吃 <c>AdjustMaxStackSizeInSellList</c>、按鈕吃 <c>BatchRepriceEnabled</c>、
         /// 佇列列吃待處理數）全部原封不動，只換了容器與排版。
         /// </summary>
-        private void DrawRepriceWindow()
+        /// <returns>面板下緣的螢幕 Y 座標；面板這一幀沒有畫出來時回傳 null。</returns>
+        private float? DrawRepriceWindow()
         {
             var showStack = conf.AdjustMaxStackSizeInSellList;
             var showBatch = conf.BatchRepriceEnabled;
             var quickListPending = marketbuddy.QuickLister?.PendingCount ?? 0;
             if ((!showStack && !showBatch && quickListPending == 0) ||
                 !marketbuddy.MarketGuiEventHandler.AddonRetainerSellList_Frame(out var topLeft, out var size))
-                return;
+                return null;
 
-            // 貼在原生視窗的**左下角**下方。即時掛單面板貼右邊，兩者不會打架。
+            // 貼在原生視窗的**右上角**——這一欄的最上面。即時掛單面板接在下面。
             ImGui.SetNextWindowPos(new Vector2(
-                topLeft.X + conf.RepriceWindowOffset.X,
-                topLeft.Y + size.Y + conf.RepriceWindowOffset.Y));
+                topLeft.X + size.X + conf.LiveSellListOffset.X,
+                topLeft.Y + conf.LiveSellListOffset.Y));
 
             if (!ImGui.Begin("Marketbuddy_reprice",
                     ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove |
@@ -131,7 +147,7 @@ namespace Marketbuddy
                     ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoSavedSettings))
             {
                 ImGui.End();
-                return;
+                return null;
             }
 
             ImGui.TextUnformatted("Relisting".Loc());
@@ -147,34 +163,7 @@ namespace Marketbuddy
             if (showStack)
             {
                 ImGui.Separator();
-
-                // 一列一件事。輸入框的單位標籤（「個」）由 InputInt 自己畫在右邊，
-                // 所以數字跟它的單位永遠黏在一起，不會像舊版那樣隔著一個 Dummy。
-                if (ImGui.Checkbox("Limit stack size to".Loc() + " ", ref conf.UseMaxStackSize))
-                    conf.Save();
-                ImGui.SameLine();
-                ImGui.SetNextItemWidth(70);
-                if (ImGui.InputInt("items".Loc(), ref conf.MaximumStackSize, 0))
-                    MaximumStackSizeChanged();
-
-                // 降價獨立成一列：標籤在前，接著金額，再接著單位選單（gil / %）。
-                ImGui.TextUnformatted("undercut".Loc());
-                ImGui.SameLine();
-                ImGui.SetNextItemWidth(90);
-                if (conf.UndercutUsePercent)
-                {
-                    if (ImGui.InputInt("##percundercut", ref conf.UndercutPercent, 0))
-                        UndercutPriceChanged();
-                }
-                else
-                {
-                    if (ImGui.InputInt("##gilundercut", ref conf.UndercutPrice, 0))
-                        UndercutPriceChanged();
-                }
-
-                ImGui.SameLine();
-                ImGui.SetNextItemWidth(70);
-                DrawUndercutTypeSelector();
+                DrawSharedPricingRows();
             }
 
             if (showBatch)
@@ -183,7 +172,44 @@ namespace Marketbuddy
                 DrawBatchRepriceRow();
             }
 
+            var bottom = ImGui.GetWindowPos().Y + ImGui.GetWindowSize().Y;
             ImGui.End();
+            return bottom;
+        }
+
+        /// <summary>
+        /// 堆疊上限 + 降價設定。**刻意抽成共用**：出售品視窗旁的重掛面板與僱員選單旁的
+        /// 巡迴面板讀寫的是同一組設定欄位，抽出來就不可能長成互相打架的兩套設定。
+        /// 一列一件事，輸入框的單位標籤（「個」）由 InputInt 自己畫在右邊，
+        /// 所以數字跟它的單位永遠黏在一起。
+        /// </summary>
+        private void DrawSharedPricingRows()
+        {
+            if (ImGui.Checkbox("Limit stack size to".Loc() + " ", ref conf.UseMaxStackSize))
+                conf.Save();
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(70);
+            if (ImGui.InputInt("items".Loc(), ref conf.MaximumStackSize, 0))
+                MaximumStackSizeChanged();
+
+            // 降價獨立成一列：標籤在前，接著金額，再接著單位選單（gil / %）。
+            ImGui.TextUnformatted("undercut".Loc());
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(90);
+            if (conf.UndercutUsePercent)
+            {
+                if (ImGui.InputInt("##percundercut", ref conf.UndercutPercent, 0))
+                    UndercutPriceChanged();
+            }
+            else
+            {
+                if (ImGui.InputInt("##gilundercut", ref conf.UndercutPrice, 0))
+                    UndercutPriceChanged();
+            }
+
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(70);
+            DrawUndercutTypeSelector();
         }
 
         private void DrawBatchRepriceRow()
@@ -357,18 +383,6 @@ namespace Marketbuddy
                     ref conf.AdjustMaxStackSizeInSellList))
                 conf.Save();
 
-            // 重掛面板現在是獨立視窗（貼在出售品視窗下方），所以位置設定跟著改綁
-            // RepriceWindowOffset，而且只要面板會出現就該調得到——它不再只屬於堆疊列。
-            // 範圍也放開成可負值：舊版下限寫死 1，往左／往上微調不了。
-            if (conf.AdjustMaxStackSizeInSellList || conf.BatchRepriceEnabled)
-            {
-                DrawNestIndicator(2);
-                ImGui.DragFloat2("Position (relative to the sell list's bottom left)".Loc(),
-                    ref conf.RepriceWindowOffset, 1f, -4000f, 4000f, "%.0f");
-                if (ImGui.IsItemDeactivatedAfterEdit())
-                    conf.Save();
-            }
-
             ImGui.Spacing();
             if (ImGui.Checkbox("Show a one-click relist button in the retainer sell list".Loc(),
                     ref conf.BatchRepriceEnabled))
@@ -461,13 +475,23 @@ namespace Marketbuddy
                     .Loc());
             ImGui.PopStyleColor();
 
-            if (conf.LiveSellListOverlay)
+            // 重掛面板與即時掛單面板現在是**同一欄**（重掛在上、即時掛單接在下面），
+            // 所以位置只留一個滑桿，拖它就是整欄一起動。
+            // 範圍是可負值：舊版下限寫死 1，往左／往上微調不了。
+            if (conf.LiveSellListOverlay || conf.AdjustMaxStackSizeInSellList || conf.BatchRepriceEnabled)
             {
-                DrawNestIndicator(2);
-                ImGui.DragFloat2("Position (relative to the sell list's top right)".Loc(),
+                ImGui.Spacing();
+                ImGui.DragFloat2("Side panel position (relative to the sell list's top right)".Loc(),
                     ref conf.LiveSellListOffset, 1f, -4000f, 4000f, "%.0f");
                 if (ImGui.IsItemDeactivatedAfterEdit())
                     conf.Save();
+
+                DrawNestIndicator(1);
+                ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+                ImGui.TextWrapped(
+                    "Moves both side panels at once: the relisting controls sit at the top right of the game's sell list and the live listing table is stacked directly underneath them."
+                        .Loc());
+                ImGui.PopStyleColor();
             }
 
             ImGui.Spacing();
