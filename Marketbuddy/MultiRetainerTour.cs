@@ -41,7 +41,11 @@ namespace Marketbuddy
         private const int NavStepWatchdogSeconds = 20;
         private const int BatchWatchdogSeconds = 600;
 
-        private sealed class RetainerTarget
+        /// <summary>
+        /// 一名僱員。<c>internal</c> 是為了讓設定視窗的「跳過哪些僱員」清單能沿用
+        /// <see cref="EnumerateRetainers"/> 這同一份來源，而不是另外寫一份枚舉。
+        /// </summary>
+        internal sealed class RetainerTarget
         {
             public required uint SortedIndex;
             public required ulong RetainerId;
@@ -168,9 +172,14 @@ namespace Marketbuddy
                 return false;
             }
 
-            if (CollectTargets().Count == 0)
+            var applySkipList = mode == TourMode.Delist;
+            if (CollectTargets(applySkipList).Count == 0)
             {
-                reason = "no retainer has market listings".Loc();
+                // 🔑 「大家都沒東西掛」跟「有東西掛但全被你的跳過名單擋掉了」是**兩件事**，
+                // 講成同一句會讓使用者去找一個根本不存在的問題。名單擋掉的時候要指名是名單。
+                reason = applySkipList && CollectTargets(false).Count > 0
+                    ? "every retainer with listings is on your skip list".Loc()
+                    : "no retainer has market listings".Loc();
                 return false;
             }
 
@@ -201,7 +210,10 @@ namespace Marketbuddy
                 return;
             }
 
-            var targets = CollectTargets();
+            var isDelist = mode == TourMode.Delist;
+            var targets = CollectTargets(isDelist);
+            // 被使用者的跳過名單擋掉的僱員數（重掛巡迴一律 0，名單不作用在它身上）。
+            var skippedRetainers = isDelist ? CollectTargets(false).Count - targets.Count : 0;
             Mode = mode;
             TotalRetainers = targets.Count;
             CurrentRetainerNumber = 0;
@@ -246,16 +258,32 @@ namespace Marketbuddy
             ChatGui.Print(mode == TourMode.Delist
                 ? "[Marketbuddy] Delisting all retainers: ?? to visit...".Loc(targets.Count)
                 : "[Marketbuddy] Relisting all retainers: ?? to visit...".Loc(targets.Count));
+
+            // ⚠️ 名單擋掉人的時候要當場說幾個，而且是在**開跑訊息旁邊**：
+            // 「怎麼少跑了一個僱員」是這個功能最可能被誤認成 bug 的地方。
+            // 名單空著（預設）時這一行不會出現。
+            if (skippedRetainers > 0)
+                ChatGui.Print("[Marketbuddy] ?? retainer(s) skipped: on your skip list.".Loc(skippedRetainers));
         }
 
         public void CancelByButton() => Abort("cancelled by user".Loc());
 
-        private static List<RetainerTarget> CollectTargets()
+        /// <summary>
+        /// 這個角色目前所有可用的僱員（**不看有沒有掛單**）。
+        /// 巡迴的目標清單與設定視窗的「跳過哪些僱員」都從這一份長出來，所以兩邊
+        /// 看到的僱員集合不可能分岔。
+        ///
+        /// ⚠️ 只在 <c>IsReady</c> 時回傳資料：設定視窗隨時可以開（包括還沒登入時），
+        /// 沒有這個閘門就會去問一份還沒載入的僱員表。既有呼叫端（<see cref="CanStart"/>）
+        /// 本來就已經在外面檢查過 <c>IsReady</c>，所以這一行對它們是 no-op。
+        /// 🔴 回傳的是抄好的值，**不留任何原生指標**。
+        /// </summary>
+        internal static List<RetainerTarget> EnumerateRetainers()
         {
-            var targets = new List<RetainerTarget>();
+            var list = new List<RetainerTarget>();
             var retainerManager = RetainerManager.Instance();
-            if (retainerManager == null)
-                return targets;
+            if (retainerManager == null || !retainerManager->IsReady)
+                return list;
 
             var count = retainerManager->GetRetainerCount();
             for (var i = 0u; i < count; i++)
@@ -263,15 +291,47 @@ namespace Marketbuddy
                 var retainer = retainerManager->GetRetainerBySortedIndex(i);
                 if (retainer == null || retainer->RetainerId == 0 || !retainer->Available)
                     continue;
-                if (retainer->MarketItemCount == 0)
-                    continue;
-                targets.Add(new RetainerTarget
+                list.Add(new RetainerTarget
                 {
                     SortedIndex = i,
                     RetainerId = retainer->RetainerId,
                     Name = retainer->NameString,
                     Listed = retainer->MarketItemCount,
                 });
+            }
+
+            return list;
+        }
+
+        /// <summary>
+        /// 這名僱員在不在「下架巡迴要跳過」的名單裡。
+        /// 名單是空的（預設）時 <c>Count &gt; 0</c> 直接短路，連查都不查。
+        /// </summary>
+        internal static bool IsSkippedByUser(ulong retainerId)
+        {
+            var skip = Configuration.GetOrLoad().DelistTourSkipRetainers;
+            return skip.Count > 0 && skip.Contains(retainerId);
+        }
+
+        /// <summary>
+        /// 這一趟要拜訪的僱員：有掛單的，扣掉使用者指名跳過的。
+        /// </summary>
+        /// <param name="applySkipList">
+        /// 套不套使用者的「跳過名單」。
+        /// 🔴 **只有下架巡迴傳 true。** 重掛巡迴一律傳 false——被保護的僱員手上正是
+        /// 那些高價品，重掛也跳過的話它們就再也不會跟著市場調價，等於為了保護反而
+        /// 讓它們永遠掛在過時的價格上。
+        /// </param>
+        private static List<RetainerTarget> CollectTargets(bool applySkipList)
+        {
+            var targets = new List<RetainerTarget>();
+            foreach (var retainer in EnumerateRetainers())
+            {
+                if (retainer.Listed == 0)
+                    continue;
+                if (applySkipList && IsSkippedByUser(retainer.RetainerId))
+                    continue;
+                targets.Add(retainer);
             }
 
             return targets;
@@ -518,14 +578,21 @@ namespace Marketbuddy
         /// 那名僱員**風險最高（那個計數器已知會落後於容器實況），而她正好是我們此刻
         /// 站著的人，市場容器就在手邊，所以那一名改用實際容器內容數。
         /// </summary>
-        private static (int Retainers, int Items) CountRemaining()
+        /// <param name="applySkipList">
+        /// 跟巡迴本身用同一套規則。這個數字後面接的是「再按一次就接著跑」，所以
+        /// 被跳過名單擋掉的僱員必須一起排除——否則那句話承諾的是一個永遠達不到的 0。
+        /// ⚠️ 單價門檻只在**我們此刻站著的那一名**僱員身上算得出來（其他人的價格看不到），
+        /// 所以其餘僱員仍然只能用 <c>MarketItemCount</c>，那是既有的已知取捨。
+        /// </param>
+        private static (int Retainers, int Items) CountRemaining(bool applySkipList)
         {
-            var targets = CollectTargets();
+            var targets = CollectTargets(applySkipList);
             var activeId = ActiveRetainerId();
+            var aboveUnitPrice = Math.Max(0, Configuration.GetOrLoad().DelistAboveUnitPrice);
             var items = 0;
             foreach (var t in targets)
                 items += t.RetainerId == activeId && activeId != 0
-                    ? BatchDelist.CountRemainingListed()
+                    ? BatchDelist.CountRemainingListed(aboveUnitPrice)
                     : t.Listed;
             return (targets.Count, items);
         }
@@ -563,7 +630,7 @@ namespace Marketbuddy
             // ⚠️ 要講對是哪個容器滿了——使用者要去清的地方不一樣。
             if (tourStoppedForSpace)
             {
-                var (retainersLeft, itemsLeft) = CountRemaining();
+                var (retainersLeft, itemsLeft) = CountRemaining(Mode == TourMode.Delist);
                 ChatGui.Print((tourToRetainerInventory
                         ? "[Marketbuddy] A retainer's inventory is full - stopped here, this is not an error. ?? item(s) delisted so far; ?? item(s) across ?? retainer(s) still listed. Make room in that retainer's inventory and press the button again to carry on where it left off."
                         : "[Marketbuddy] Bags are full - stopped here, this is not an error. ?? item(s) delisted so far; ?? item(s) across ?? retainer(s) still listed. Clear space and press the button again to carry on where it left off.")
@@ -609,6 +676,12 @@ namespace Marketbuddy
                     .Loc(retainersDone, totalDelisted, totalFailed)
                 : "[Marketbuddy] All retainers delisted: ?? visited, ?? delisted, ?? failed (?? bag slot(s) used)"
                     .Loc(retainersDone, totalDelisted, totalFailed, used.Value));
+
+            // ⚠️ 單價門檻在整趟裡總共留下幾件。totalSkipped 一路是各僱員 BatchDelist
+            // 累加上來的（門檻停用時每一名都是 0），所以門檻沒開時這一行不會出現。
+            if (totalSkipped > 0)
+                ChatGui.Print("[Marketbuddy] ?? listing(s) kept across the tour: unit price not above ?? gil."
+                    .Loc(totalSkipped, Configuration.GetOrLoad().DelistAboveUnitPrice.ToString("N0")));
         }
     }
 }

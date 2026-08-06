@@ -72,6 +72,13 @@ namespace Marketbuddy
     /// 續跑不需要任何狀態：巡迴每次都重新挑「還有掛單的僱員」，這裡每一件也都重新找
     /// 「目前第一個有東西的格子」，所以清出空間再按一次，自然就從剩下的地方接著跑。
     ///
+    /// 🔑 **單價門檻（<see cref="Configuration.DelistAboveUnitPrice"/>）預設 0 ＝ 停用 ＝
+    /// 全部下架，也就是這個引擎一直以來的行為。** 設成 &gt;0 時只下架**單價**高於它的掛單，
+    /// 其餘原封不動留在市場上。停用時 <see cref="PassesPriceFilter"/> 第一行就短路，
+    /// 連查價都不查，所以預設路徑的原生呼叫次數與加這個功能之前完全相同。
+    /// ⚠️ 門檻比的是每一件的掛售價不是整堆總價（論證見設定欄位的說明）。
+    /// ⚠️ 查不到價時該格**留著不動**——不確定的時候少做比多做安全。
+    ///
     /// 🔴 嚴格手動：只有使用者按下按鈕（且通過二次確認）才會跑。
     /// 沒有任何事件驅動的接手鏈，關掉視窗／按 ESC／IPC 鎖定／AutoRetainer 開始運作
     /// 都會立刻停手。停手原因一律照實回報，不會把「撞到限制」講成「正常結束」，
@@ -200,6 +207,20 @@ namespace Marketbuddy
         private bool toRetainerInventory;
 
         /// <summary>
+        /// 這一輪的單價門檻快照：只下架**單價 &gt; 這個值**的掛單；0 = 全部都下架。
+        ///
+        /// 🔑 跟 <see cref="toRetainerInventory"/> 同樣的理由做成快照：佇列長度、開跑訊息、
+        /// 「保留了幾件」的統計與每一格的判定必須是同一套規則。使用者中途把門檻拉高，
+        /// 不該讓同一批東西前半段照舊門檻、後半段照新門檻。
+        ///
+        /// ⚠️ 0 是**停用**不是「門檻等於 0」：掛售價最低就是 1 gil，門檻 0 若照
+        /// 「&gt; 0」解讀其實也等於全部通過，兩種解讀在這裡剛好一致；但仍然刻意在
+        /// <see cref="PassesPriceFilter"/> 一開頭就短路掉，這樣停用時**連查價都不查**，
+        /// 呼叫次數與現行行為完全相同。
+        /// </summary>
+        private int aboveUnitPrice;
+
+        /// <summary>
         /// 開跑當下**目的地容器**的空格數，用來在收工時算出「這一輪佔掉幾格」。
         /// 目的地是背包就數背包、是僱員就數僱員的物品欄頁。
         /// </summary>
@@ -313,16 +334,34 @@ namespace Marketbuddy
             if (inventoryManager == null || retainerManager == null)
                 return;
 
-            var listed = CountListedSlots(inventoryManager);
+            var listed = CountListedSlots(inventoryManager, 0);
             if (listed == 0)
             {
                 ChatGui.PrintError("[Marketbuddy] Cannot start: ??".Loc("this retainer has nothing listed".Loc()));
                 return;
             }
 
-            TotalSlots = listed;
+            // 🔑 門檻在這裡定案，整輪不再改（理由見 aboveUnitPrice 的說明）。
+            // 門檻 0（預設）時 eligible 直接沿用 listed，**連第二次掃描都不做**——
+            // 停用時的執行路徑與加這個功能之前逐字相同。
+            aboveUnitPrice = Math.Max(0, conf.DelistAboveUnitPrice);
+            var eligible = aboveUnitPrice <= 0 ? listed : CountListedSlots(inventoryManager, aboveUnitPrice);
+            if (eligible == 0)
+            {
+                // 🔑 有掛單、但沒有一件超過門檻。這**不是錯誤**，是門檻正常運作，
+                // 所以用一般訊息不用紅字——巡迴會照樣往下一名僱員走，紅字會讓
+                // 「設了門檻」這件正常的事每經過一名僱員就叫一次。
+                ChatGui.Print(
+                    "[Marketbuddy] Nothing above ?? gil per unit here - ?? listing(s) left alone."
+                        .Loc(aboveUnitPrice.ToString("N0"), listed));
+                return;
+            }
+
+            TotalSlots = eligible;
             ProcessedSlots = 0;
-            SkippedCount = 0;
+            // 因門檻而保留的件數。門檻 0 時 eligible == listed，所以這裡是 0，
+            // 與加這個功能之前（永遠 0）相同。
+            SkippedCount = listed - eligible;
             DelistedCount = 0;
             FailedCount = 0;
             StoppedForSpace = false;
@@ -349,7 +388,7 @@ namespace Marketbuddy
             AutoRetainerBridge.AcquireSuppression("batch delist");
             suppressionHeld = true;
 
-            for (var i = 0; i < listed; i++)
+            for (var i = 0; i < eligible; i++)
             {
                 var job = new DelistJob();
                 queue.Enqueue($"delist #{i + 1}", TimeSpan.FromSeconds(SlotWatchdogSeconds), () => TickJob(job));
@@ -360,7 +399,14 @@ namespace Marketbuddy
             ChatGui.Print((toRetainerInventory
                     ? "[Marketbuddy] Delisting ?? item(s) into the retainer's own inventory (retainer: ??, ?? retainer slot(s) free)..."
                     : "[Marketbuddy] Delisting ?? item(s) into your bags (retainer: ??, ?? bag slot(s) free)...")
-                .Loc(listed, retainerName, freeDestinationSlotsAtStart));
+                .Loc(eligible, retainerName, freeDestinationSlotsAtStart));
+
+            // ⚠️ 門檻擋下東西時**一定要當場說**，而且要說單價門檻是多少。
+            // 少了這一句，使用者按了「全部下架」卻發現東西還在，只會以為外掛壞了。
+            // 門檻停用時 SkippedCount 是 0，這一行不會出現。
+            if (SkippedCount > 0)
+                ChatGui.Print("[Marketbuddy] ?? listing(s) kept: unit price not above ?? gil."
+                    .Loc(SkippedCount, aboveUnitPrice.ToString("N0")));
         }
 
         public void CancelByButton() => queue.Abort("cancelled by user".Loc());
@@ -424,11 +470,11 @@ namespace Marketbuddy
                     if (inventoryManager == null)
                         return TickTaskResult.Continue; // 看門狗兜底
 
-                    var slot = FindFirstListedSlot(inventoryManager, out var slotIndex);
+                    var slot = FindFirstListedSlot(inventoryManager, aboveUnitPrice, out var slotIndex);
                     if (slot == null)
                     {
-                        // 已經沒有掛單了：比開始時預期的少（別人買走、或本來就估多了）。
-                        // 這不是失敗，直接收工。
+                        // 已經沒有**該下架**的掛單了：比開始時預期的少（別人買走、或本來就估多了；
+                        // 有門檻時也可能是剩下的都在門檻以下）。這不是失敗，直接收工。
                         return TickTaskResult.Done;
                     }
 
@@ -556,11 +602,18 @@ namespace Marketbuddy
             _ => "the delist was rejected (code ??)".Loc(result),
         };
 
-        /// <summary>這名僱員目前還剩幾件掛單（每次都重新數，不留狀態）。</summary>
-        internal static int CountRemainingListed()
+        /// <summary>
+        /// 這名僱員目前還剩幾件**這一輪會處理的**掛單（每次都重新數，不留狀態）。
+        ///
+        /// ⚠️ <paramref name="aboveUnitPrice"/> 要跟著門檻走，不能永遠數全部：
+        /// 這個數字出現在「清出空間再按一次就接著跑」那句話裡，所以它必須是「還剩幾件
+        /// **會被下架**」而不是「還剩幾件掛著」。被門檻留下來的那些再按幾次都不會動，
+        /// 把它們算進去等於叫使用者去追一個永遠追不完的數字。門檻 0 時兩者相同。
+        /// </summary>
+        internal static int CountRemainingListed(int aboveUnitPrice)
         {
             var inventoryManager = InventoryManager.Instance();
-            return inventoryManager == null ? 0 : CountListedSlots(inventoryManager);
+            return inventoryManager == null ? 0 : CountListedSlots(inventoryManager, aboveUnitPrice);
         }
 
         /// <summary>
@@ -609,8 +662,35 @@ namespace Marketbuddy
             return free;
         }
 
-        /// <summary>目前市場容器裡第一個有東西的格子（每次都重新找，見 <see cref="DelistJob"/> 的說明）。</summary>
-        private static InventoryItem* FindFirstListedSlot(InventoryManager* inventoryManager, out short slotIndex)
+        /// <summary>
+        /// 這一格的掛單過不過得了單價門檻。
+        ///
+        /// 🔑 <paramref name="aboveUnitPrice"/> &lt;= 0（預設）時**立刻回 true 且完全不查價**，
+        /// 所以停用門檻時連原生呼叫次數都跟以前一樣。
+        ///
+        /// 🔑 門檻比的是 <c>GetRetainerMarketPrice()</c>，那是**每一件的掛售價**不是整堆總價
+        /// （論證見 <see cref="Configuration.DelistAboveUnitPrice"/>）。嚴格大於，
+        /// 剛好等於門檻的留著——UI 上寫的是「高於」。
+        ///
+        /// ⚠️ 查不到價（回 0）時回 false ＝ **留著不動**。這是刻意挑的失敗方向：
+        /// 少下架一件，使用者再按一次就好；錯下架一件，他得重新上架，而且中間那段時間
+        /// 東西不在市場上賣。「不確定就不要動」在這裡是唯一安全的預設。
+        /// </summary>
+        private static bool PassesPriceFilter(InventoryManager* inventoryManager, int slotIndex, int aboveUnitPrice)
+        {
+            if (aboveUnitPrice <= 0)
+                return true;
+            return inventoryManager->GetRetainerMarketPrice((short)slotIndex) > (ulong)aboveUnitPrice;
+        }
+
+        /// <summary>
+        /// 目前市場容器裡第一個**該下架**的格子（每次都重新找，見 <see cref="DelistJob"/> 的說明）。
+        ///
+        /// 🔴 有門檻時**必須跳過**不合格的格子繼續往後找，不能只看第一個有東西的格子：
+        /// 被門檻留下來的那一格會一直待在那裡，只看第一格的話整輪會卡在它身上重試到看門狗。
+        /// </summary>
+        private static InventoryItem* FindFirstListedSlot(InventoryManager* inventoryManager, int aboveUnitPrice,
+            out short slotIndex)
         {
             slotIndex = -1;
             var container = inventoryManager->GetInventoryContainer(InventoryType.RetainerMarket);
@@ -623,6 +703,8 @@ namespace Marketbuddy
                 var slot = inventoryManager->GetInventorySlot(InventoryType.RetainerMarket, i);
                 if (slot == null || slot->ItemId == 0)
                     continue;
+                if (!PassesPriceFilter(inventoryManager, i, aboveUnitPrice))
+                    continue;
                 slotIndex = (short)i;
                 return slot;
             }
@@ -630,7 +712,11 @@ namespace Marketbuddy
             return null;
         }
 
-        private static int CountListedSlots(InventoryManager* inventoryManager)
+        /// <summary>
+        /// 市場容器裡有幾件掛單。<paramref name="aboveUnitPrice"/> 傳 0 = 全部都數
+        /// （＝這個函式一直以來的行為），傳 &gt;0 則只數單價高於它的。
+        /// </summary>
+        private static int CountListedSlots(InventoryManager* inventoryManager, int aboveUnitPrice)
         {
             var container = inventoryManager->GetInventoryContainer(InventoryType.RetainerMarket);
             if (container == null || !container->IsLoaded)
@@ -641,7 +727,7 @@ namespace Marketbuddy
             for (var i = 0; i < slotCount; i++)
             {
                 var slot = inventoryManager->GetInventorySlot(InventoryType.RetainerMarket, i);
-                if (slot != null && slot->ItemId != 0)
+                if (slot != null && slot->ItemId != 0 && PassesPriceFilter(inventoryManager, i, aboveUnitPrice))
                     count++;
             }
 
@@ -678,7 +764,7 @@ namespace Marketbuddy
                 ChatGui.Print((toRetainerInventory
                         ? "[Marketbuddy] This retainer's inventory is full - stopped here, this is not an error. ?? delisted, ?? still listed on this retainer. Make room in that retainer's inventory and press the button again to carry on."
                         : "[Marketbuddy] Bags are full - stopped here, this is not an error. ?? delisted, ?? still listed on this retainer. Free up space and press the button again to carry on.")
-                    .Loc(DelistedCount, CountRemainingListed()));
+                    .Loc(DelistedCount, CountRemainingListed(aboveUnitPrice)));
             }
             else
             {
@@ -713,6 +799,12 @@ namespace Marketbuddy
                         ? "[Marketbuddy] Delist finished: ?? delisted, ?? failed (?? retainer inventory slot(s) used)"
                         : "[Marketbuddy] Delist finished: ?? delisted, ?? failed (?? bag slot(s) used)")
                     .Loc(DelistedCount, FailedCount, used.Value));
+
+            // ⚠️ 收工時再講一次「留了幾件」：使用者回頭看僱員身上還有東西時，
+            // 要能在同一段訊息裡看到那是門檻擋的、不是漏掉的。門檻停用時不會出現。
+            if (SkippedCount > 0)
+                ChatGui.Print("[Marketbuddy] ?? listing(s) kept: unit price not above ?? gil."
+                    .Loc(SkippedCount, aboveUnitPrice.ToString("N0")));
         }
     }
 }

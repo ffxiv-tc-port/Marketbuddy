@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Numerics;
 using Dalamud.Configuration;
 using static Marketbuddy.Common.Dalamud;
@@ -43,6 +44,48 @@ namespace Marketbuddy
         public int MarketTaxPercent = 5;
         public bool DelistToRetainerInventory = false;
         public int QuickListKeyCode = 0;
+
+        /// <summary>
+        /// 「全部下架」時**只**下架單價高於這個值的掛單；<b>0 = 停用</b>，也就是維持
+        /// 一直以來的行為（全部下架）。預設 0，既有使用者不會被動改到任何東西。
+        ///
+        /// 🔑 **這是單價（每一件的掛售價），不是整堆的總價。**
+        /// 依據：批次重掛寫進容器的是 <c>listing.PricePerUnit</c>（<see cref="MarketDataCache"/>
+        /// 收到的市場報價本來就是每件單價），寫入走 <c>SetRetainerMarketPrice()</c>，
+        /// 而 <c>GetRetainerMarketPrice()</c> 讀回來的值 <see cref="BatchReprice"/> 是拿去
+        /// 跟同一個 newPrice 做等值比較的（「already at ?? gil」那條捷徑）——如果讀回來的是
+        /// 總價，凡是數量 &gt; 1 的堆疊那個比較就永遠不會相等，那條捷徑等於死碼。
+        /// 即時掛單面板也是拿它當「單價」欄、另外乘上數量才得到「總價」欄。
+        /// 三處互相印證，所以這個門檻的單位是**每件 gil**。
+        ///
+        /// ⚠️ 因此一堆 5 件、每件 1,000 gil 的掛單算 1,000 而不是 5,000。
+        /// UI 上必須把「單價」講明白，否則使用者會照總價去設門檻。
+        ///
+        /// 這個門檻作用在 <see cref="BatchDelist"/>——也就是「本僱員全下架」與
+        /// 「全僱員下架」兩顆按鈕共用的那一個引擎。**刻意不作用在**改價流程裡的自動下架
+        /// （<see cref="BatchDelistBelowVendor"/> 與 <see cref="BatchMinPrice"/>）：那兩項的
+        /// 用途正好相反，是「太便宜就撤掉」，套上「只下架貴的」會直接把它們抵銷掉。
+        /// </summary>
+        public int DelistAboveUnitPrice = 0;
+
+        /// <summary>
+        /// 「全僱員下架」巡迴要**整個跳過**的僱員（語意：這些僱員留著賣高價品）。
+        ///
+        /// 🔑 存的是 <c>RetainerId</c> 不是名字：名字會被改、跨角色還可能重複，
+        /// 拿名字當識別會在改名那一刻靜默失效（而且失效方向是「照樣下架」＝最糟）。
+        ///
+        /// ⚠️ **只作用在下架巡迴，不作用在重掛巡迴。** 重掛也跳過的話，被保護的僱員
+        /// 手上那些高價品就再也不會跟著市場調價，等於為了保護它們反而讓它們永遠掛在
+        /// 過時的價格上——那是意外傷害，不是使用者要的。
+        ///
+        /// ⚠️ 也不作用在「本僱員全下架」那顆按鈕：那是使用者站在該僱員面前、
+        /// 針對這一名僱員下的明確指令，用一份「巡迴要跳過誰」的名單去推翻它會很難理解。
+        ///
+        /// ⚠️ 僱員屬於角色，所以多角色玩家的這份名單會混著好幾個角色的 id；
+        /// 在 A 角色的設定畫面裡列不出 B 角色的僱員名字。UI 必須把「有幾筆列不出來」
+        /// 講出來，不能假裝名單只有看得到的那幾筆。
+        /// </summary>
+        public List<ulong> DelistTourSkipRetainers = [];
 
         /// <summary>
         /// 市場資料快取的新鮮度上限（秒）。0 = 停用，每一格都重新向伺服器查一次。
@@ -124,6 +167,11 @@ namespace Marketbuddy
                     conf.UndercutPrice = 0;
                 if (conf.BatchMinPrice < 0)
                     conf.BatchMinPrice = 0;
+                if (conf.DelistAboveUnitPrice < 0)
+                    conf.DelistAboveUnitPrice = 0;
+                // 舊設定檔沒有這個鍵時欄位初始值會留著；只有檔案裡明寫 null 才會變成 null。
+                // 這一行是為了後者——少了它，之後每一個 Contains/Count 都會 NRE。
+                conf.DelistTourSkipRetainers ??= [];
                 conf.MarketTaxPercent = Math.Clamp(conf.MarketTaxPercent, 0, 25);
                 conf.MarketDataCacheSeconds = Math.Clamp(conf.MarketDataCacheSeconds, 0, 3600);
             }
