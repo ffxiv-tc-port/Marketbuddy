@@ -273,26 +273,28 @@ namespace Marketbuddy
             if (retainerSell->UldManager.NodeListCount != 23)
                 throw new MarketException("Unexpected fields in addon RetainerSell");
 
-            var priceComponentNumericInput =
-                (AtkComponentNumericInput*)retainerSell->UldManager.NodeList[15]->GetComponent();
-            var quantityComponentNumericInput =
-                (AtkComponentNumericInput*)retainerSell->UldManager.NodeList[11]->GetComponent();
+            var priceComponentNumericInput = GetNumericInput(retainerSell, 15);
+            var quantityComponentNumericInput = GetNumericInput(retainerSell, 11);
             DebugMessage($"componentNumericInput: {new IntPtr(priceComponentNumericInput).ToString("X")}");
             DebugMessage($"componentNumericInput: {new IntPtr(quantityComponentNumericInput).ToString("X")}");
 
-            if (conf.AutoInputNewPrice)
+            if (conf.AutoInputNewPrice && priceComponentNumericInput != null)
             {
                 priceComponentNumericInput->SetValue(newPrice);
 
-                if (conf.UseMaxStackSize)
+                if (conf.UseMaxStackSize && quantityComponentNumericInput != null)
                 {
-                    var quantityValueString = Commons.Utf8StringToString(
-                        ((AtkComponentNumericInputCustom*)quantityComponentNumericInput)->AtkTextNode->NodeText);
-                    DebugMessage($"qty: {quantityValueString}");
-                    if (int.TryParse(quantityValueString, out var quantityValue))
+                    var quantityTextNode =
+                        ((AtkComponentNumericInputCustom*)quantityComponentNumericInput)->AtkTextNode;
+                    if (quantityTextNode != null)
                     {
-                        if (quantityValue > conf.MaximumStackSize)
-                            quantityComponentNumericInput->SetValue(conf.MaximumStackSize);
+                        var quantityValueString = Commons.Utf8StringToString(quantityTextNode->NodeText);
+                        DebugMessage($"qty: {quantityValueString}");
+                        if (int.TryParse(quantityValueString, out var quantityValue))
+                        {
+                            if (quantityValue > conf.MaximumStackSize)
+                                quantityComponentNumericInput->SetValue(conf.MaximumStackSize);
+                        }
                     }
                 }
             }
@@ -306,16 +308,85 @@ namespace Marketbuddy
 
             // close ItemSearchResult
             // Component::GUI::AtkComponentWindow.ReceiveEvent this=0x1AC801863B0 evt=EventType.CHANGE               a3=2   a4=0x1AC66640090 (src=0x1AC801863B0; tgt=0x1AC98B47EA0) a5=0x4AAAEFE388
-            var addonItemSearchResult = Commons.GetUnitBase("ItemSearchResult");
-            if (addonItemSearchResult != null)
-                Commons.SendClick(new IntPtr(addonItemSearchResult->WindowNode->Component), EventType.CHANGE, 2,
-                    addonItemSearchResult->WindowNode->Component->UldManager
-                        .NodeList[7]->GetComponent()->OwnerNode);
+            CloseItemSearchResultWindow();
 
             // click confirm on RetainerSell
             // Client::UI::AddonRetainerSell.ReceiveEvent this=0x214B4D360E0 evt=EventType.CHANGE               a3=21  a4=0x214B920D2E0 (src=0x214B4D360E0; tgt=0x21460686550) a5=0xBB316FE6C8
             var addonRetainerSell = (AddonRetainerSell*)retainerSell;
             Commons.SendClick(new IntPtr(addonRetainerSell), EventType.CHANGE, 21, addonRetainerSell->Confirm);
+        }
+
+        /// <summary>
+        /// 取出 RetainerSell 底下第 nodeIndex 個節點所掛的數值輸入元件,取不到就回 null。
+        ///
+        /// 呼叫端已經用 NodeListCount == 23 擋掉版面不符的情況,但那只保證索引在範圍內 ——
+        /// NodeList[n] 本身仍可能是 null,而 AtkResNode.GetComponent() 是 [MemberFunction]
+        /// 原生呼叫,對 null 節點呼叫就是攔不到的 AVE。這裡把「節點存在」與「索引在範圍內」
+        /// 兩件事都驗過再呼叫。
+        /// </summary>
+        private static unsafe AtkComponentNumericInput* GetNumericInput(AtkUnitBase* addon, int nodeIndex)
+        {
+            if (addon == null)
+                return null;
+
+            ref var uld = ref addon->UldManager;
+            if (uld.NodeList == null || nodeIndex < 0 || nodeIndex >= uld.NodeListCount)
+                return null;
+
+            var node = uld.NodeList[nodeIndex];
+            if (node == null || (int)node->Type < 1000)
+                return null;
+
+            return (AtkComponentNumericInput*)((AtkComponentNode*)node)->Component;
+        }
+
+        /// <summary>
+        /// Closes the "compare prices" window by replaying the window-close event.
+        ///
+        /// 原本這裡是一條零檢查的六層裸鏈:
+        ///   addon->WindowNode->Component->UldManager.NodeList[7]->GetComponent()->OwnerNode
+        /// WindowNode / Component / NodeList[7] / GetComponent() 任何一層是 null 都會解參考,
+        /// 而 GetComponent() 本身是 [MemberFunction] 原生呼叫、對 null 節點呼叫即 AVE;
+        /// AVE 在 .NET Core 屬於 corrupted-state exception,try/catch 完全攔不到。
+        /// NodeList 又是原生指標陣列,沒有 Length 可以靠 —— 索引 7 一定要先比對 NodeListCount,
+        /// 只驗 != null 是半套(越界讀到的是垃圾不是 null)。
+        /// 失敗時的行為是「不送這個關閉事件」,視窗留著,不會崩。
+        /// </summary>
+        private unsafe void CloseItemSearchResultWindow()
+        {
+            var addon = Commons.GetUnitBase("ItemSearchResult");
+            if (addon == null)
+                return;
+
+            var windowNode = addon->WindowNode;
+            if (windowNode == null)
+                return;
+
+            var windowComponent = windowNode->Component;
+            if (windowComponent == null)
+                return;
+
+            ref var uld = ref windowComponent->UldManager;
+            if (uld.LoadedState != AtkLoadState.Loaded || uld.NodeList == null || uld.NodeListCount <= 7)
+            {
+                DebugMessage("CloseItemSearchResultWindow: window component uld not usable");
+                return;
+            }
+
+            var closeButtonNode = uld.NodeList[7];
+            // AtkResNode 的大小是 0xB0,而 AtkComponentNode.Component 位在 0xB0 ——
+            // 對非 component 節點取 Component 就是讀出界。CS 對 component 節點的 Type 一律 >= 1000。
+            if (closeButtonNode == null || (int)closeButtonNode->Type < 1000)
+            {
+                DebugMessage("CloseItemSearchResultWindow: node 7 is not a component node");
+                return;
+            }
+
+            var closeButtonComponent = ((AtkComponentNode*)closeButtonNode)->Component;
+            if (closeButtonComponent == null)
+                return;
+
+            Commons.SendClick(new IntPtr(windowComponent), EventType.CHANGE, 2, closeButtonComponent->OwnerNode);
         }
 
         /// <summary>
@@ -394,10 +465,8 @@ namespace Marketbuddy
                 return false;
             }
 
-            var priceComponentNumericInput =
-                (AtkComponentNumericInput*)retainerSell->UldManager.NodeList[15]->GetComponent();
-            var quantityComponentNumericInput =
-                (AtkComponentNumericInput*)retainerSell->UldManager.NodeList[11]->GetComponent();
+            var priceComponentNumericInput = GetNumericInput(retainerSell, 15);
+            var quantityComponentNumericInput = GetNumericInput(retainerSell, 11);
             if (priceComponentNumericInput == null)
                 return false;
 
@@ -405,10 +474,13 @@ namespace Marketbuddy
 
             if (conf.UseMaxStackSize && quantityComponentNumericInput != null)
             {
-                var quantityValueString = Commons.Utf8StringToString(
-                    ((AtkComponentNumericInputCustom*)quantityComponentNumericInput)->AtkTextNode->NodeText);
-                if (int.TryParse(quantityValueString, out var quantityValue) && quantityValue > conf.MaximumStackSize)
-                    quantityComponentNumericInput->SetValue(conf.MaximumStackSize);
+                var quantityTextNode = ((AtkComponentNumericInputCustom*)quantityComponentNumericInput)->AtkTextNode;
+                if (quantityTextNode != null)
+                {
+                    var quantityValueString = Commons.Utf8StringToString(quantityTextNode->NodeText);
+                    if (int.TryParse(quantityValueString, out var quantityValue) && quantityValue > conf.MaximumStackSize)
+                        quantityComponentNumericInput->SetValue(conf.MaximumStackSize);
+                }
             }
 
             var addonRetainerSell = (AddonRetainerSell*)retainerSell;
@@ -435,12 +507,15 @@ namespace Marketbuddy
             if (isMarketOpen) return 0;
             DebugMessage("2");
 
-            if (uldManager.NodeListCount < 14) return 0;
+            // NodeListCount 是上界的真值來源,但 NodeList 本身也可能還沒配置 ——
+            // 兩個都要驗,只驗其中一個是半套。
+            if (uldManager.NodeListCount < 14 || uldManager.NodeList == null) return 0;
             DebugMessage("3");
 
             var singlePriceNode = (AtkTextNode*)uldManager.NodeList[10];
 
-            if (singlePriceNode == null)
+            // AtkTextNode.NodeText 位在 AtkResNode(0xB0)之後,對非文字節點讀它就是讀出界。
+            if (singlePriceNode == null || singlePriceNode->AtkResNode.Type != NodeType.Text)
             {
                 DebugMessage($"singlePriceNode == null {singlePriceNode == null}");
                 return 0;
