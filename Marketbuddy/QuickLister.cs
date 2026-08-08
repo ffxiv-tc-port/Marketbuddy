@@ -242,7 +242,7 @@ namespace Marketbuddy
 
         private void OpenForItemSlotDetour(AgentInventoryContext* agent, InventoryType inventoryType, int slot, int a4, uint addonId)
         {
-            hook.Original(agent, inventoryType, slot, a4, addonId);
+            hook.OriginalDisposeSafe(agent, inventoryType, slot, a4, addonId);
             try
             {
                 HandleContextMenuOpened(agent, inventoryType, slot);

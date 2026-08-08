@@ -266,7 +266,7 @@ namespace Marketbuddy
                 Log.Warning(e, $"{Diag} MKTRESULT probe logging failed");
             }
 
-            return hook!.Original(self, listingCount, errorCode);
+            return hook!.OriginalDisposeSafe(self, listingCount, errorCode);
         }
     }
 }
