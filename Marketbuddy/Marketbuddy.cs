@@ -43,6 +43,11 @@ namespace Marketbuddy
         /// </summary>
         private MarketRequestResultProbe? requestResultProbe;
 
+        /// <summary>
+        /// ReleaseAll() 的冪等旗標。初始化失敗路徑與 Dalamud 的 Dispose() 都會呼叫它。
+        /// </summary>
+        private bool released;
+
         // Assembly compatible with dev & published versions
         public string AssemblyLocation { get; set; } = Assembly.GetExecutingAssembly().Location;
         public string Name => "Marketbuddy";
@@ -119,29 +124,76 @@ namespace Marketbuddy
             {
                 if (e is not OperationCanceledException)
                     Log.Error(e, "Error loading plugin");
+
+                // 🔴 初始化到一半失敗時,前面已經建好的元件必須全部釋放。
+                // QuickLister 與 MarketRequestResultProbe 各自持有一個已 Enable 的 Hook,
+                // 而且是直接用 IGameInteropProvider.HookFromAddress 建的,沒有進 Commons 的
+                // HookList,所以只有它們自己的 Dispose() 會拆。
+                // 這個 catch 把例外吞掉 ⇒ Dalamud 認為外掛「載入成功」,卸載時仍會呼叫 Dispose();
+                // 但舊的 Dispose() 一開頭就無防護地存取 PluginInterface / PluginUi 等欄位,
+                // 初始化半途失敗時那些欄位是 null,第一個 NullReferenceException 就會讓後面的
+                // QuickLister?.Dispose() 與 requestResultProbe?.Dispose() 永遠跑不到,
+                // detour 於是活過外掛卸載 —— 下一次遊戲呼叫該函式就跳進已卸載的組件。
+                ReleaseAll();
             }
         }
 
-        public void Dispose()
+        public void Dispose() => ReleaseAll();
+
+        /// <summary>
+        /// 釋放所有已建立的資源。每一步各自獨立防護,任何一步失敗都不會擋住後面的步驟
+        /// (關鍵是持有 hook 的 QuickLister / requestResultProbe 與 Commons.DisposeHooks 一定要跑到)。
+        /// 具冪等性:初始化失敗路徑與 Dalamud 的 Dispose() 都會呼叫。
+        /// 步驟順序刻意與原本的 Dispose() 逐行一致,沒有調換。
+        /// </summary>
+        private void ReleaseAll()
         {
-            IPCManager.Shutdown();
-            PluginInterface.UiBuilder.Draw -= DrawUi;
-            PluginInterface.UiBuilder.OpenConfigUi -= DrawConfigUi;
-            Common.Dalamud.CommandManager.RemoveHandler(commandName);
-            PluginUi.Dispose();
-            LiveSellList.Dispose();
-            QuickLister?.Dispose();
-            ManualRequery.Dispose();
-            MultiTour.Dispose();
-            BatchDelist.Dispose();
-            BatchReprice.Dispose();
-            MarketGuiEventHandler.Dispose();
-            requestResultProbe?.Dispose();
-            MarketDataCache.Shutdown();
+            if (released)
+                return;
+            released = true;
+
+            Safe(() => IPCManager.Shutdown());
+            Safe(() => PluginInterface.UiBuilder.Draw -= DrawUi);
+            Safe(() => PluginInterface.UiBuilder.OpenConfigUi -= DrawConfigUi);
+            Safe(() => Common.Dalamud.CommandManager.RemoveHandler(commandName));
+            Safe(() => PluginUi?.Dispose());
+            Safe(() => LiveSellList?.Dispose());
+            Safe(() => QuickLister?.Dispose());
+            Safe(() => ManualRequery?.Dispose());
+            Safe(() => MultiTour?.Dispose());
+            Safe(() => BatchDelist?.Dispose());
+            Safe(() => BatchReprice?.Dispose());
+            Safe(() => MarketGuiEventHandler?.Dispose());
+            Safe(() => requestResultProbe?.Dispose());
+            Safe(() => MarketDataCache.Shutdown());
             // Last: must run after every engine released its reference so a
             // leftover suppression can never survive an unload.
-            AutoRetainerBridge.Shutdown();
-            Commons.Dispose();
+            Safe(() => AutoRetainerBridge.Shutdown());
+            // 收尾:任何經由 Commons.Hook() 註冊的 hook 都在這裡拆掉。
+            Safe(() => Commons.Dispose());
+        }
+
+        /// <summary>
+        /// 執行單一釋放步驟;失敗只記錄不外傳,確保後續步驟(尤其是拆 hook)一定跑得到。
+        /// DalamudInitialize 失敗時連 Log 都可能還是 null,所以記錄本身也要防護。
+        /// </summary>
+        private static void Safe(Action step)
+        {
+            try
+            {
+                step();
+            }
+            catch (Exception e)
+            {
+                try
+                {
+                    Log?.Error(e, "Marketbuddy: 卸載步驟失敗,略過並繼續執行其餘步驟。");
+                }
+                catch
+                {
+                    // 記錄失敗絕不能中斷卸載流程。
+                }
+            }
         }
 
         private void OnCommand(string command, string args)
