@@ -96,10 +96,18 @@ namespace Marketbuddy.Common
         /// <summary>Advances a Talk dialogue (same event sequence as ECommons AddonMaster.Talk.Click, proven on TC via AutoRetainer).</summary>
         public static void ClickTalk(AtkUnitBase* talk)
         {
+            // 🔴 AtkStage.Instance() 是 [StaticAddress(..., isPointer: true)]：產生器讀「指標的位址」
+            //    再解參考一層，遊戲尚未建立該單例時回 null（非 isPointer 的才保證不回 null）。
+            //    `&stage->AtkEventTarget` 在 null 上算出來的是 0（AtkEventTarget 在 +0x0），
+            //    把 0 當事件目標交給原生 ReceiveEvent，後果是攔不到的 AVE。
+            //    取不到就不點：呼叫端（MultiRetainerTour）本來就會在下一輪重試。
+            var stage = AtkStage.Instance();
+            if (stage == null) return;
+
             var evt = stackalloc AtkEvent[1];
             evt[0] = default;
             evt[0].Listener = (AtkEventListener*)talk;
-            evt[0].Target = &AtkStage.Instance()->AtkEventTarget;
+            evt[0].Target = &stage->AtkEventTarget;
             evt[0].State.StateFlags = (AtkEventStateFlags)132;
 
             var data = stackalloc AtkEventData[1];
