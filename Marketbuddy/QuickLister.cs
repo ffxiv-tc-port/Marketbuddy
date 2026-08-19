@@ -257,7 +257,14 @@ namespace Marketbuddy
         {
             if (conf.QuickListKeyCode == 0 || putUpForSaleText.Length == 0)
                 return;
-            if (CSFramework.Instance()->WindowInactive)
+            // 🔴 CSFramework.Instance() 是 [StaticAddress(..., isPointer: true)]:產生器讀
+            //    「指標的位址」再解參考一層,所以它會回 null(不帶 isPointer 的那種才保證
+            //    非 null),特徵碼失配時則會擲。裸解參考 null 原生指標是
+            //    AccessViolationException,在 .NET Core 屬 corrupted-state exception,
+            //    try/catch 攔不到 ⇒ 只能事前判空。這裡是 hook detour 內的處理常式,
+            //    取不到就當成「不快速上架」(fail-closed),使用者按鍵時無事發生而不是崩潰。
+            var csFramework = CSFramework.Instance();
+            if (csFramework == null || csFramework->WindowInactive)
                 return;
             if (!Keys[(VirtualKey)conf.QuickListKeyCode])
                 return;
@@ -291,7 +298,16 @@ namespace Marketbuddy
             var contextAddonId = agent->AgentInterface.GetAddonId();
             if (contextAddonId == 0)
                 return;
-            var addon = AtkStage.Instance()->RaptureAtkUnitManager->GetAddonById((ushort)contextAddonId);
+            // 🔴 底下的 addon == null 是半套判空:AtkStage.Instance() 是
+            //    [StaticAddress(..., isPointer: true)],會回 null;RaptureAtkUnitManager
+            //    是 AtkStage +0x20 的裸指標欄位,也可能是 null。兩層都沒檢查的話,
+            //    真正的爆點在 GetAddonById 之前就已經發生了。
+            //    裸解參考 null 原生指標是 AccessViolationException,在 .NET Core 屬
+            //    corrupted-state exception,try/catch 攔不到 ⇒ 只能事前逐層判空。
+            var stage = AtkStage.Instance();
+            if (stage == null || stage->RaptureAtkUnitManager == null)
+                return;
+            var addon = stage->RaptureAtkUnitManager->GetAddonById((ushort)contextAddonId);
             if (addon == null)
                 return;
 

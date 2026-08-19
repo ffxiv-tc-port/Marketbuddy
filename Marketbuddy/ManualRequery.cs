@@ -86,7 +86,13 @@ namespace Marketbuddy
                 return;
             }
 
-            if (CSFramework.Instance()->WindowInactive)
+            // 🔴 CSFramework.Instance() 是 [StaticAddress(..., isPointer: true)]:產生器讀
+            //    「指標的位址」再解參考一層,所以它會回 null(不帶 isPointer 的那種才保證
+            //    非 null)。裸解參考 null 原生指標是 AccessViolationException,在 .NET Core
+            //    屬 corrupted-state exception,try/catch 攔不到 ⇒ 只能事前判空。
+            //    這裡每幀執行,取不到就當成「視窗未啟用」直接 return(fail-closed),不寫 log。
+            var csFramework = CSFramework.Instance();
+            if (csFramework == null || csFramework->WindowInactive)
                 return;
 
             var proxy = GetItemSearchProxy();
