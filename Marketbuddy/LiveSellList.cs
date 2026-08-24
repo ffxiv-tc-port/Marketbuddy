@@ -76,6 +76,10 @@ namespace Marketbuddy
         private bool containerReady;
         private ulong snapshotRetainerId;
 
+        /// <summary>「這是哪一位僱員的掛單」——名稱＋鈴清單上的序號（2026-08-24 使用者需求）。
+        /// 在 framework 執行緒隨快照一起算好，Draw 只讀字串。</summary>
+        private string retainerLabel = string.Empty;
+
         private Configuration conf => Configuration.GetOrLoad();
 
         public LiveSellList(MarketGuiEventHandler gui, BatchReprice engine)
@@ -128,6 +132,24 @@ namespace Marketbuddy
         {
             rows.Clear();
             snapshotRetainerId = BatchReprice.ActiveRetainerId();
+            retainerLabel = string.Empty;
+
+            // 名稱＋序號：序號用鈴清單的排序（GetRetainerBySortedIndex），與玩家看到的順序一致。
+            // 面板只在出售品視窗開著時存在，此時 LastSelectedRetainerId 就是眼前這一位，沒有陳舊問題。
+            var retainerManager = FFXIVClientStructs.FFXIV.Client.Game.RetainerManager.Instance();
+            if (snapshotRetainerId != 0 && retainerManager != null && retainerManager->IsReady)
+            {
+                var count = retainerManager->GetRetainerCount();
+                for (var i = 0u; i < count; i++)
+                {
+                    var retainer = retainerManager->GetRetainerBySortedIndex(i);
+                    if (retainer != null && retainer->RetainerId == snapshotRetainerId)
+                    {
+                        retainerLabel = "?? (No.??)".Loc(retainer->NameString, i + 1);
+                        break;
+                    }
+                }
+            }
 
             var inventoryManager = InventoryManager.Instance();
             var container = inventoryManager == null
@@ -210,6 +232,11 @@ namespace Marketbuddy
             ImGui.TextUnformatted("Live listings".Loc());
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("Re-read every frame - always shows the current prices".Loc());
+            if (retainerLabel.Length > 0)
+            {
+                ImGui.SameLine();
+                ImGui.TextColored(ImGuiColors.DalamudOrange, retainerLabel);
+            }
             ImGui.SameLine();
             if (ImGui.SmallButton("x##mblivesellistclose"))
             {
