@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Numerics;
 using Dalamud.Interface;
 using Dalamud.Interface.Colors;
@@ -34,62 +35,666 @@ namespace Marketbuddy
         {
         }
 
+        /// <summary>
+        /// 兩塊側邊面板之間的垂直間距。單純是視覺留白——**不是**排版邏輯的一部分：
+        /// 即時掛單面板的位置是從重掛面板**實際量到的下緣**算出來的，不是猜的高度，
+        /// 所以重掛面板長高長矮（堆疊列開關、佇列列出現、跑起來變成進度列）都不會重疊。
+        /// </summary>
+        private const float SidePanelGap = 4f;
+
         public void Draw()
         {
             DrawSettingsWindow();
-            DrawOverlayWindow();
+            // 順序即排版：重掛面板先畫，畫完把它的下緣交給即時掛單面板當作起點。
+            // 兩者在同一個 ImGui frame 內先後執行，所以這個值永遠是「這一幀的」，不會慢一拍。
+            var repriceBottom = DrawRepriceWindow();
+            DrawRetainerListOverlay();
+            marketbuddy.LiveSellList.Draw(repriceBottom);
         }
 
-        private void DrawOverlayWindow()
+        /// <summary>
+        /// 僱員選單旁的「巡迴」面板。2026-08-03 由**一顆浮在僱員選單標題列上的裸按鈕**
+        /// （無背景、無標題、ItemSpacing 被壓成 1 px）改成獨立面板，形式比照出售品視窗旁
+        /// 那一欄。理由：那顆按鈕會用到的堆疊上限／降價設定全部藏在另一個視窗裡，
+        /// 使用者在僱員選單前看不到自己按下去會發生什麼事，跑起來也沒有任何進度。
+        ///
+        /// 設定列是 <see cref="DrawSharedPricingRows"/>——與出售品視窗那一欄**同一份**
+        /// config 欄位，不是第二套設定。
+        /// </summary>
+        private void DrawRetainerListOverlay()
         {
-            if (!conf.AdjustMaxStackSizeInSellList ||
-                !marketbuddy.MarketGuiEventHandler.AddonRetainerSellList_Position(out Vector2 position)) return;
+            if (!conf.BatchRepriceEnabled ||
+                !marketbuddy.MarketGuiEventHandler.AddonRetainerList_Frame(out var topLeft, out var size))
+                return;
 
-            var windowVisible = true;
-            ImGui.SetNextWindowPos(position);
+            var tour = marketbuddy.MultiTour;
 
-            var hSpace = new Vector2(1, 0);
-            ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
-            ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, hSpace);
-            ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, hSpace);
-            ImGui.PushStyleVar(ImGuiStyleVar.ItemInnerSpacing, hSpace);
-            ImGui.PushStyleVar(ImGuiStyleVar.WindowMinSize, Vector2.One);
-            if (ImGui.Begin("Marketbuddy_stacklimit", ref windowVisible,
-                    ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoScrollWithMouse |
-                    ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoBackground))
+            ImGui.SetNextWindowPos(new Vector2(
+                topLeft.X + size.X + conf.RetainerPanelOffset.X,
+                topLeft.Y + conf.RetainerPanelOffset.Y));
+
+            if (!ImGui.Begin("Marketbuddy_retainerlist",
+                    ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove |
+                    ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.AlwaysAutoResize |
+                    ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoSavedSettings))
             {
-                if (ImGui.Checkbox("Limit stack size to".Loc() + " ", ref conf.UseMaxStackSize))
-                    conf.Save();
-
-                ImGui.SameLine();
-                ImGui.SetNextItemWidth(30);
-                if (ImGui.InputInt("items".Loc(), ref conf.MaximumStackSize, 0))
-                    MaximumStackSizeChanged();
-
-                ImGui.SameLine();
-                ImGui.Dummy(new(20, 1));
-
-                ImGui.SameLine();
-                ImGui.SetNextItemWidth(30);
-                if (conf.UndercutUsePercent)
-                {
-                    if (ImGui.InputInt("##percundercut", ref conf.UndercutPercent, 0))
-                        UndercutPriceChanged();
-                }
-                else
-                {
-                    if (ImGui.InputInt("##gilundercut", ref conf.UndercutPrice, 0))
-                        UndercutPriceChanged();
-                }
-                ImGui.SameLine();
-                ImGui.SetNextItemWidth(40);
-                DrawUndercutTypeSelector();
-                ImGui.SameLine();
-                ImGui.Text("undercut".Loc());
+                ImGui.End();
+                return;
             }
 
-            ImGui.PopStyleVar(5);
+            ImGui.TextUnformatted("All retainers".Loc());
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Show or hide these controls in /mbuddy".Loc());
+
+            ImGui.Separator();
+            DrawSharedPricingRows();
+
+            ImGui.Separator();
+            if (tour.IsRunning)
+            {
+                DrawTourProgress(tour);
+            }
+            else
+            {
+                DrawTourStartButton(tour);
+                DrawDelistTourButton(tour);
+            }
+
             ImGui.End();
+        }
+
+        /// <summary>
+        /// 巡迴進行中的進度。兩層都要顯示，因為它們回答不同的問題：
+        /// 僱員層（第幾個／共幾個／誰）來自巡迴本身，道具層（第幾件／共幾件／哪一件）
+        /// 來自巡迴此刻正在驅動的那個引擎。在僱員之間移動時引擎沒在跑，只會有僱員那一行。
+        /// </summary>
+        private void DrawTourProgress(MultiRetainerTour tour)
+        {
+            ImGui.TextUnformatted("Retainer ??/??: ??".Loc(
+                tour.CurrentRetainerNumber, tour.TotalRetainers, tour.CurrentRetainerName));
+
+            // 巡迴此刻驅動的引擎——重掛與下架是兩個不同的物件，不能寫死其中一個。
+            var engine = tour.ActiveEngine;
+            if (engine.IsRunning)
+            {
+                var currentIndex = Math.Min(engine.ProcessedSlots + 1, engine.TotalSlots);
+                ImGui.TextUnformatted(tour.Mode == TourMode.Delist
+                    ? "Delisting ??/??: ??".Loc(currentIndex, engine.TotalSlots, engine.CurrentItemName)
+                    : "Repricing ??/??: ??".Loc(currentIndex, engine.TotalSlots, engine.CurrentItemName));
+            }
+
+            if (ImGui.Button("Cancel".Loc() + "##mbtourcancel"))
+                tour.CancelByButton();
+        }
+
+        private void DrawTourStartButton(MultiRetainerTour tour)
+        {
+            var canStart = tour.CanStart(TourMode.Reprice, out var reason);
+            // When AutoRetainer is the only blocker, keep the button clickable
+            // so pressing it explains the situation instead of doing nothing.
+            var disabled = !canStart && !AutoRetainerBridge.IsBusy;
+            if (disabled)
+                ImGui.BeginDisabled();
+            // 降價設成 0 時「（最低價 -0gil）」是純噪音，卻佔掉按鈕一半寬度：
+            // 括號整個收掉，定價規則改用滑鼠提示交代（提示不佔版面）。
+            var tourLabel = UndercutIsZero
+                ? "Relist all retainers".Loc()
+                : "Relist all retainers (lowest -??)".Loc(GetUndercutText());
+            if (ImGui.Button(tourLabel + "##mbtourstart"))
+                tour.Start(TourMode.Reprice);
+            if (disabled)
+            {
+                ImGui.EndDisabled();
+                if (!string.IsNullOrEmpty(reason) && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                    ImGui.SetTooltip(reason);
+            }
+            else if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(PricingRuleText());
+            }
+        }
+
+        /// <summary>單價門檻有沒有開著（0 = 停用 = 全部下架，也就是一直以來的行為）。</summary>
+        private bool DelistPriceFilterActive => conf.DelistAboveUnitPrice > 0;
+
+        /// <summary>使用者的「跳過這些僱員」名單有沒有東西。</summary>
+        private bool DelistSkipListActive => conf.DelistTourSkipRetainers.Count > 0;
+
+        /// <summary>
+        /// 下架按鈕上方那一行「這一次不會全部下架」的告示。
+        ///
+        /// 🔑 這是**列上**的資訊不是滑鼠提示：使用者正要按一顆紅色的「全部下架」，
+        /// 如果實際上會留下東西，那件事必須在他按下去之前就看得見，不能藏在 tooltip 裡
+        /// （tooltip 藏的是「為什麼」，不是「有沒有」）。
+        /// 兩個門檻都沒開時整行不畫——按鈕自己已經寫著會全部下架，再加一行「沒有篩選」
+        /// 只是噪音。
+        /// </summary>
+        /// <param name="includeSkipList">
+        /// 僱員名單只對巡迴有意義；出售品視窗那顆「本僱員全下架」傳 false。
+        /// </param>
+        private void DrawDelistFilterSummary(bool includeSkipList)
+        {
+            var priceOn = DelistPriceFilterActive;
+            var skipOn = includeSkipList && DelistSkipListActive;
+            if (!priceOn && !skipOn)
+                return;
+
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudYellow);
+            if (priceOn)
+            {
+                ImGui.TextUnformatted("Only unit prices above ?? gil".Loc(conf.DelistAboveUnitPrice.ToString("N0")));
+                ImGui.PopStyleColor();
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(DelistPriceFilterTooltip());
+                if (skipOn)
+                    ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudYellow);
+            }
+
+            if (skipOn)
+            {
+                ImGui.TextUnformatted("Skipping ?? retainer(s)".Loc(conf.DelistTourSkipRetainers.Count));
+                ImGui.PopStyleColor();
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(SkippedRetainerNames());
+            }
+        }
+
+        /// <summary>
+        /// 單價門檻的說明。⚠️ 一定要講明白比的是**單價**：一堆 5 件、每件 1,000 gil
+        /// 的掛單算 1,000 不是 5,000，照總價去設門檻會整批留錯東西。
+        /// </summary>
+        private string DelistPriceFilterTooltip() =>
+            "Listings priced at or below this stay on the market. The threshold is the price per item, not the price of the whole stack: a stack of 5 at 1,000 gil each counts as 1,000, not 5,000. Set it back to 0 in /mbuddy to delist everything again."
+                .Loc();
+
+        /// <summary>
+        /// 跳過名單的名字。⚠️ 名單存的是僱員 id，而僱員屬於角色——別的角色的僱員在這裡
+        /// **查不到名字**，那種情況要照實說「查不到」，不是把它從清單裡藏掉。
+        /// </summary>
+        private string SkippedRetainerNames()
+        {
+            var known = MultiRetainerTour.EnumerateRetainers();
+            var lines = new List<string>();
+            var unknown = 0;
+            foreach (var id in conf.DelistTourSkipRetainers)
+            {
+                var name = string.Empty;
+                foreach (var r in known)
+                {
+                    if (r.RetainerId != id)
+                        continue;
+                    name = r.Name;
+                    break;
+                }
+
+                if (name.Length == 0)
+                    unknown++;
+                else
+                    lines.Add(name);
+            }
+
+            if (unknown > 0)
+                lines.Add("?? not on this character".Loc(unknown));
+            return "These retainers are left alone by the delist tour:".Loc() + "\n" + string.Join("\n", lines);
+        }
+
+        /// <summary>下架巡迴的「已武裝」到期時間；<see cref="DateTime.MinValue"/> = 沒武裝。</summary>
+        private DateTime delistArmedUntil = DateTime.MinValue;
+
+        /// <summary>武裝之後多久自動解除。夠久可以看清楚字、夠短不會一直掛著。</summary>
+        private static readonly TimeSpan DelistArmWindow = TimeSpan.FromSeconds(6);
+
+        /// <summary>
+        /// 全僱員下架。目的地同樣聽設定「下架收回至」，預設玩家背包。
+        /// **刻意做成兩段式**：第一下只是「武裝」，按鈕會變成紅色的
+        /// 確認鈕並開始倒數，要在倒數內再按一次才真的開始；倒數結束自動解除。
+        ///
+        /// 🔴 為什麼一定要二次確認：這個動作把一整輪上架的成果全部收回來，
+        /// 誤按的代價遠高於誤按重掛。而且它就在重掛按鈕正下方，單擊誤觸的機率不低。
+        /// 兩段式的好處是「一次滑鼠失誤絕對不夠」，又不必額外教使用者按住某個修飾鍵。
+        ///
+        /// 視覺上也刻意跟重掛拉開：分隔線 + 紅字標題 + 紅色按鈕。
+        /// </summary>
+        private void DrawDelistTourButton(MultiRetainerTour tour)
+        {
+            ImGui.Separator();
+
+            var armed = delistArmedUntil > DateTime.UtcNow;
+            if (!armed && delistArmedUntil != DateTime.MinValue)
+                delistArmedUntil = DateTime.MinValue;
+
+            var canStart = tour.CanStart(TourMode.Delist, out var reason);
+            var disabled = !canStart && !AutoRetainerBridge.IsBusy;
+            if (disabled)
+            {
+                delistArmedUntil = DateTime.MinValue;
+                armed = false;
+                ImGui.BeginDisabled();
+            }
+
+            // 🔴 篩選狀態畫在按鈕**上面**，不是藏在提示裡：按下去會發生什麼事，
+            // 必須在按下去之前就看得見。
+            var filtered = DelistPriceFilterActive || DelistSkipListActive;
+            DrawDelistFilterSummary(true);
+
+            if (armed)
+            {
+                var left = (int)Math.Ceiling((delistArmedUntil - DateTime.UtcNow).TotalSeconds);
+                ImGui.PushStyleColor(ImGuiCol.Button, ImGuiColors.DalamudRed);
+                ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ImGuiColors.DalamudRed);
+                ImGui.PushStyleColor(ImGuiCol.ButtonActive, ImGuiColors.DalamudRed);
+                // 🔴 有篩選時**不能**再寫「EVERYTHING」——那會變成一句謊話，
+                // 而且是印在最後一道確認上的謊話。沒有篩選時字句與以前逐字相同。
+                if (ImGui.Button((filtered
+                        ? "Confirm: take the filtered listings off the market (??)"
+                        : "Confirm: take EVERYTHING off the market (??)").Loc(left) + "##mbdeliststart"))
+                {
+                    delistArmedUntil = DateTime.MinValue;
+                    tour.Start(TourMode.Delist);
+                }
+
+                ImGui.PopStyleColor(3);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip((conf.DelistToRetainerInventory
+                        ? "Every listing of every retainer goes back into that retainer's own inventory. Click again to go ahead, or wait for this to time out."
+                        : "Every listing of every retainer goes back into your own bags. Click again to go ahead, or wait for this to time out.").Loc());
+            }
+            else
+            {
+                if (ImGui.Button("Delist all retainers".Loc() + "##mbdelistarm"))
+                    delistArmedUntil = DateTime.UtcNow + DelistArmWindow;
+                if (!disabled && ImGui.IsItemHovered())
+                    ImGui.SetTooltip((conf.DelistToRetainerInventory
+                        ? "Takes every listing of every retainer off the market and back into that retainer's own inventory (\"Delist destination\" in the settings). Stops when a retainer's inventory fills up. Asks for confirmation first."
+                        : "Takes every listing of every retainer off the market and back into your own bags, so identical items from different retainers stack together. Stops when your bags fill up - just clear space and press it again. Asks for confirmation first.").Loc());
+            }
+
+            if (disabled)
+            {
+                ImGui.EndDisabled();
+                if (!string.IsNullOrEmpty(reason) && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                    ImGui.SetTooltip(reason);
+            }
+        }
+
+        /// <summary>
+        /// 重掛面板。2026-08-03 由「釘在出售品視窗標題列上的一條浮動列」改成**獨立視窗**，
+        /// 形式比照 <see cref="LiveSellList"/>（使用者確認那個面板的手感是對的）。
+        ///
+        /// 舊版把勾選框、兩個數字輸入框、單位選單與按鈕全部 <c>SameLine()</c> 擠在一行，
+        /// 而且 <c>ItemSpacing</c> 被壓成 1 px、視窗無背景，所以「哪個輸入框對應哪個標籤」
+        /// 完全看不出來。這裡改成一列一件事、每個輸入框緊跟著自己的單位標籤。
+        ///
+        /// 2026-08-03 第二次調整：位置由「原生視窗左下角下方」改成**右上角**，
+        /// 也就是即時掛單面板原本的位置，即時掛單改接在它下面（同一欄、重掛在上）。
+        /// 兩者共用 <see cref="Configuration.LiveSellListOffset"/> 當作整欄的位移，
+        /// 所以拖滑桿是兩塊一起動；重掛面板高度變化時，下面那塊是照**量到的下緣**
+        /// 重新定位的，不會重疊。
+        ///
+        /// ⚠️ **行為零變更**：控制項、它們讀寫的設定欄位、以及各自的顯示條件
+        /// （堆疊列吃 <c>AdjustMaxStackSizeInSellList</c>、按鈕吃 <c>BatchRepriceEnabled</c>、
+        /// 佇列列吃待處理數）全部原封不動，只換了容器與排版。
+        /// </summary>
+        /// <returns>面板下緣的螢幕 Y 座標；面板這一幀沒有畫出來時回傳 null。</returns>
+        private float? DrawRepriceWindow()
+        {
+            var showStack = conf.AdjustMaxStackSizeInSellList;
+            var showBatch = conf.BatchRepriceEnabled;
+            var quickListPending = marketbuddy.QuickLister?.PendingCount ?? 0;
+            if ((!showStack && !showBatch && quickListPending == 0) ||
+                !marketbuddy.MarketGuiEventHandler.AddonRetainerSellList_Frame(out var topLeft, out var size))
+                return null;
+
+            // 貼在原生視窗的**右上角**——這一欄的最上面。即時掛單面板接在下面。
+            ImGui.SetNextWindowPos(new Vector2(
+                topLeft.X + size.X + conf.LiveSellListOffset.X,
+                topLeft.Y + conf.LiveSellListOffset.Y));
+
+            if (!ImGui.Begin("Marketbuddy_reprice",
+                    ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove |
+                    ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.AlwaysAutoResize |
+                    ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoSavedSettings))
+            {
+                ImGui.End();
+                return null;
+            }
+
+            ImGui.TextUnformatted("Relisting".Loc());
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Show or hide these controls in /mbuddy".Loc());
+
+            if (quickListPending > 0)
+            {
+                ImGui.Separator();
+                ImGui.TextUnformatted("Quick-list queue: ?? pending".Loc(quickListPending));
+            }
+
+            if (showStack)
+            {
+                ImGui.Separator();
+                DrawSharedPricingRows();
+            }
+
+            if (showBatch)
+            {
+                ImGui.Separator();
+                DrawBatchRepriceRow();
+                DrawSingleRetainerDelistRow();
+            }
+
+            var bottom = ImGui.GetWindowPos().Y + ImGui.GetWindowSize().Y;
+            ImGui.End();
+            return bottom;
+        }
+
+        /// <summary>
+        /// 堆疊上限 + 降價設定。**刻意抽成共用**：出售品視窗旁的重掛面板與僱員選單旁的
+        /// 巡迴面板讀寫的是同一組設定欄位，抽出來就不可能長成互相打架的兩套設定。
+        /// 一列一件事，輸入框的單位標籤（「個」）由 InputInt 自己畫在右邊，
+        /// 所以數字跟它的單位永遠黏在一起。
+        /// </summary>
+        private void DrawSharedPricingRows()
+        {
+            if (ImGui.Checkbox("Limit stack size to".Loc() + " ", ref conf.UseMaxStackSize))
+                conf.Save();
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(70);
+            if (ImGui.InputInt("items".Loc(), ref conf.MaximumStackSize, 0))
+                MaximumStackSizeChanged();
+
+            // 降價獨立成一列：標籤在前，接著金額，再接著單位選單（gil / %）。
+            ImGui.TextUnformatted("undercut".Loc());
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(90);
+            if (conf.UndercutUsePercent)
+            {
+                if (ImGui.InputInt("##percundercut", ref conf.UndercutPercent, 0))
+                    UndercutPriceChanged();
+            }
+            else
+            {
+                if (ImGui.InputInt("##gilundercut", ref conf.UndercutPrice, 0))
+                    UndercutPriceChanged();
+            }
+
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(70);
+            DrawUndercutTypeSelector();
+        }
+
+        private void DrawBatchRepriceRow()
+        {
+            var engine = marketbuddy.BatchReprice;
+            if (engine.IsRunning)
+            {
+                var currentIndex = Math.Min(engine.ProcessedSlots + 1, engine.TotalSlots);
+                ImGui.TextUnformatted(
+                    "Repricing ??/??: ??".Loc(currentIndex, engine.TotalSlots, engine.CurrentItemName));
+                ImGui.SameLine();
+                if (ImGui.Button("Cancel".Loc() + "##mbbatchcancel"))
+                    engine.CancelByButton();
+                return;
+            }
+
+            // While the all-retainers tour is driving, the tour owns the engine;
+            // don't offer a second start button in the sell list.
+            if (marketbuddy.MultiTour.IsRunning)
+                return;
+
+            var canStart = engine.CanStart(out var reason);
+            // When AutoRetainer is the only blocker, keep the button clickable
+            // so pressing it explains the situation instead of doing nothing.
+            var disabled = !canStart && !AutoRetainerBridge.IsBusy;
+            if (disabled)
+                ImGui.BeginDisabled();
+            // ⚠️ 舊字面是「全部重掛」，但這顆按鈕的範圍其實只有**這一個僱員**
+            // （全僱員巡迴是僱員選單上的另一顆）。字面改成明確的範圍。
+            var label = UndercutIsZero
+                ? "Relist this retainer".Loc()
+                : "Relist this retainer (lowest -??)".Loc(GetUndercutText());
+            if (ImGui.Button(label + "##mbbatchstart"))
+                engine.Start();
+            if (disabled)
+            {
+                ImGui.EndDisabled();
+                if (!string.IsNullOrEmpty(reason) && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                    ImGui.SetTooltip(reason);
+            }
+            else if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(PricingRuleText());
+            }
+        }
+
+        /// <summary>本僱員全下架的「已武裝」到期時間；<see cref="DateTime.MinValue"/> = 沒武裝。</summary>
+        private DateTime sellListDelistArmedUntil = DateTime.MinValue;
+
+        /// <summary>
+        /// 「本僱員全下架」——把這一名僱員的掛單全部下架收回。
+        /// 目的地聽設定「下架收回至」（<see cref="Configuration.DelistToRetainerInventory"/>），
+        /// 預設是玩家背包（跨僱員合併堆疊用）；提示文字會跟著目的地換句話說。
+        ///
+        /// 🔑 這顆按鈕**沒有自己的執行邏輯**：它直接驅動 <see cref="BatchDelist"/>，
+        /// 也就是全僱員巡迴在每一名僱員身上跑的那同一個引擎。所以二次確認、等那一格
+        /// 真的空掉才算數、背包滿了乾淨停手並照實回報——全部自動一致，不會分岔成兩套。
+        /// 全僱員版本就是「巡迴 + 對每個僱員跑這一個引擎」。
+        ///
+        /// 🔴 二次確認**沒有因為只有一名僱員就放寬**：它一樣是把一整批上架成果收回來，
+        /// 而且就在重掛按鈕正下方，手滑的代價一樣高。形式比照僱員選單那顆。
+        /// </summary>
+        private void DrawSingleRetainerDelistRow()
+        {
+            var engine = marketbuddy.BatchDelist;
+            if (engine.IsRunning)
+            {
+                ImGui.Separator();
+                var currentIndex = Math.Min(engine.ProcessedSlots + 1, engine.TotalSlots);
+                ImGui.TextUnformatted(
+                    "Delisting ??/??: ??".Loc(currentIndex, engine.TotalSlots, engine.CurrentItemName));
+                ImGui.SameLine();
+                if (ImGui.Button("Cancel".Loc() + "##mbselldelistcancel"))
+                    engine.CancelByButton();
+                return;
+            }
+
+            // 巡迴在跑的時候引擎歸巡迴所有，不要在這裡再開第二個入口。
+            // （重掛那一列也是同樣的處理。）
+            if (marketbuddy.MultiTour.IsRunning || marketbuddy.BatchReprice.IsRunning)
+                return;
+
+            ImGui.Separator();
+
+            var armed = sellListDelistArmedUntil > DateTime.UtcNow;
+            if (!armed && sellListDelistArmedUntil != DateTime.MinValue)
+                sellListDelistArmedUntil = DateTime.MinValue;
+
+            var canStart = engine.CanStart(out var reason);
+            var disabled = !canStart && !AutoRetainerBridge.IsBusy;
+            if (disabled)
+            {
+                sellListDelistArmedUntil = DateTime.MinValue;
+                armed = false;
+                ImGui.BeginDisabled();
+            }
+
+            // 單價門檻作用在引擎上，所以這顆按鈕也照它走——那件事要在這裡講，
+            // 不能讓使用者按完才發現只下架了一半。
+            // ⚠️ 僱員跳過名單**不**作用在這顆按鈕（它是針對眼前這一名僱員的明確指令），
+            // 所以這裡傳 false，不會顯示名單。
+            DrawDelistFilterSummary(false);
+
+            if (armed)
+            {
+                var left = (int)Math.Ceiling((sellListDelistArmedUntil - DateTime.UtcNow).TotalSeconds);
+                ImGui.PushStyleColor(ImGuiCol.Button, ImGuiColors.DalamudRed);
+                ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ImGuiColors.DalamudRed);
+                ImGui.PushStyleColor(ImGuiCol.ButtonActive, ImGuiColors.DalamudRed);
+                if (ImGui.Button((DelistPriceFilterActive
+                        ? "Confirm: take the filtered listings off the market (??)"
+                        : "Confirm: take this retainer's listings off the market (??)").Loc(left) + "##mbselldeliststart"))
+                {
+                    sellListDelistArmedUntil = DateTime.MinValue;
+                    engine.Start();
+                }
+
+                ImGui.PopStyleColor(3);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip((conf.DelistToRetainerInventory
+                        ? "Every listing of this retainer goes back into the retainer's own inventory. Click again to go ahead, or wait for this to time out."
+                        : "Every listing of this retainer goes back into your own bags. Click again to go ahead, or wait for this to time out.").Loc());
+            }
+            else
+            {
+                if (ImGui.Button("Delist this retainer".Loc() + "##mbselldelistarm"))
+                    sellListDelistArmedUntil = DateTime.UtcNow + DelistArmWindow;
+                if (!disabled && ImGui.IsItemHovered())
+                    ImGui.SetTooltip((conf.DelistToRetainerInventory
+                        ? "Takes every listing of this retainer off the market and back into the retainer's own inventory (\"Delist destination\" in the settings). Asks for confirmation first."
+                        : "Takes every listing of this retainer off the market and back into your own bags, so identical items from different retainers stack together. Asks for confirmation first.").Loc());
+            }
+
+            if (disabled)
+            {
+                ImGui.EndDisabled();
+                if (!string.IsNullOrEmpty(reason) && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                    ImGui.SetTooltip(reason);
+            }
+        }
+
+        /// <summary>
+        /// 兩個「不要全部下架」的篩選：單價門檻與僱員跳過名單。
+        ///
+        /// 🔴 刻意畫在「下架收回至」正下方、同樣的最外層縮排：三項一起構成「按下下架
+        /// 按鈕會發生什麼事」，拆散在不同段落會讓人以為它們管的範圍不一樣。
+        ///
+        /// 兩項預設都是關的（門檻 0、名單空），關著的時候整個下架流程與加它們之前
+        /// 逐字相同。
+        /// </summary>
+        private void DrawDelistFilterSettings()
+        {
+            ImGui.Spacing();
+            ImGui.TextUnformatted("Only delist listings priced above".Loc());
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(110);
+            if (ImGui.InputInt("gil per item".Loc() + "##mbdelistaboveprice", ref conf.DelistAboveUnitPrice, 0))
+            {
+                conf.DelistAboveUnitPrice =
+                    Math.Clamp(conf.DelistAboveUnitPrice, 0, Configuration.MAX_PRICE);
+                conf.Save();
+            }
+
+            // 🔴 「現在是停用的」這件事本身要在**列上**看得見，不能只靠「值是 0」讓人自己推。
+            // 停用是預設狀態，而預設狀態下按鈕會把東西全部收回來——那是要當場講清楚的事。
+            DrawNestIndicator(1);
+            if (DelistPriceFilterActive)
+            {
+                ImGui.TextUnformatted("Listings at ?? gil per item or below stay on the market"
+                    .Loc(conf.DelistAboveUnitPrice.ToString("N0")));
+            }
+            else
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+                ImGui.TextUnformatted("Off - every listing gets delisted".Loc());
+                ImGui.PopStyleColor();
+            }
+
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(DelistPriceFilterTooltip());
+
+            DrawNestIndicator(1);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "The threshold is the price per item, the same number the sell list shows in its unit price column - not the price of the whole stack. It applies to both manual delist buttons (\"Delist this retainer\" and \"Delist all retainers\"). It deliberately does NOT touch the two automatic delists above, which exist to take cheap listings off the board: those two do the opposite job, so filtering them by \"only the expensive ones\" would just cancel them out. If a price cannot be read for some reason, that listing is left alone."
+                    .Loc());
+            ImGui.PopStyleColor();
+
+            // 🔴 僱員清單是這個設定視窗裡唯一**會長高**的區塊（最多九名僱員），而視窗是
+            // AlwaysAutoResize + NoScrollbar：長過螢幕就沒有捲軸可以救。所以收進摺疊標題裡。
+            // ⚠️ 但「有幾名被跳過」必須留在**摺起來也看得見**的那一行上——把狀態藏進
+            // 要展開才看得到的地方，等於使用者永遠不知道自己設過這個東西。
+            ImGui.Spacing();
+            var skipCount = conf.DelistTourSkipRetainers.Count;
+            if (!ImGui.CollapsingHeader((skipCount == 0
+                    ? "Retainers the delist tour leaves alone: none".Loc()
+                    : "Retainers the delist tour leaves alone: ?? skipped".Loc(skipCount)) + "##mbskipretainers"))
+                return;
+
+            DrawNestIndicator(1);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "Ticked retainers are never visited by \"Delist all retainers\" - keep the ones you want selling high-value goods here. This only affects the delist tour: relisting still visits them, otherwise their prices would slowly go stale, and \"Delist this retainer\" still works when you are standing at that retainer, because that is an explicit instruction about that one retainer."
+                    .Loc());
+            ImGui.PopStyleColor();
+
+            var retainers = MultiRetainerTour.EnumerateRetainers();
+            if (retainers.Count == 0)
+            {
+                // ⚠️ 「列不出來」跟「名單是空的」是兩件事，必須分開講：
+                // 名單其實有東西卻畫成一片空白，會讓使用者以為設定掉了。
+                DrawNestIndicator(1);
+                ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+                ImGui.TextUnformatted(conf.DelistTourSkipRetainers.Count == 0
+                    ? "Open the retainer list once and your retainers appear here".Loc()
+                    : "?? retainer(s) on the list - open the retainer list to see which"
+                        .Loc(conf.DelistTourSkipRetainers.Count));
+                ImGui.PopStyleColor();
+                return;
+            }
+
+            foreach (var retainer in retainers)
+            {
+                DrawNestIndicator(1);
+                var skip = conf.DelistTourSkipRetainers.Contains(retainer.RetainerId);
+                if (ImGui.Checkbox($"{retainer.Name}##mbskipret{retainer.RetainerId}", ref skip))
+                {
+                    if (skip)
+                    {
+                        if (!conf.DelistTourSkipRetainers.Contains(retainer.RetainerId))
+                            conf.DelistTourSkipRetainers.Add(retainer.RetainerId);
+                    }
+                    else
+                    {
+                        conf.DelistTourSkipRetainers.Remove(retainer.RetainerId);
+                    }
+
+                    conf.Save();
+                }
+
+                ImGui.SameLine();
+                ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+                ImGui.TextUnformatted("(?? listed)".Loc(retainer.Listed));
+                ImGui.PopStyleColor();
+            }
+
+            // ⚠️ 名單裡屬於**別的角色**的 id 在這裡查不到名字。把它們默默不畫，
+            // 使用者就會以為名單只有上面那幾筆；「有幾筆看不到」必須寫在列上。
+            var unknown = 0;
+            foreach (var id in conf.DelistTourSkipRetainers)
+            {
+                var found = false;
+                foreach (var retainer in retainers)
+                {
+                    if (retainer.RetainerId != id)
+                        continue;
+                    found = true;
+                    break;
+                }
+
+                if (!found)
+                    unknown++;
+            }
+
+            if (unknown > 0)
+            {
+                DrawNestIndicator(1);
+                ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+                ImGui.TextUnformatted("?? more on the list are not this character's retainers".Loc(unknown));
+                ImGui.PopStyleColor();
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(
+                        "The list stores retainer IDs rather than names, so it survives renames and works per character. Another character's retainer names cannot be looked up from here, but they are still skipped when you play that character."
+                            .Loc());
+            }
         }
 
         public void DrawSettingsWindow()
@@ -118,6 +723,18 @@ namespace Marketbuddy
                 ImGui.PopStyleColor();
             }
 
+            if (ImGui.Checkbox("Auto-retry a market search that looks throttled/stuck".Loc(), ref conf.AutoRequeryOnThrottle))
+                conf.Save();
+
+            DrawNestIndicator(1);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "Applies to any market price list window - the market board search and the retainer sell \"compare prices\" popup alike. No packets, hooks or memory edits: if the server keeps rejecting the query, this simply gives up after a few tries and the window is left as-is."
+                    .Loc());
+            ImGui.PopStyleColor();
+
+
+            ImGui.Spacing();
             if (ImGui.Checkbox("Open current prices list when adjusting a price".Loc(), ref conf.AutoOpenComparePrices))
                 conf.Save();
 
@@ -207,15 +824,177 @@ namespace Marketbuddy
                     ref conf.AdjustMaxStackSizeInSellList))
                 conf.Save();
 
-            if (conf.AdjustMaxStackSizeInSellList)
+            ImGui.Spacing();
+            if (ImGui.Checkbox("Show a one-click relist button in the retainer sell list".Loc(),
+                    ref conf.BatchRepriceEnabled))
+                conf.Save();
+
+            DrawNestIndicator(1);
+            if (ImGui.Checkbox("HQ items only undercut other HQ listings".Loc(), ref conf.BatchCompareHqOnly))
+                conf.Save();
+
+            DrawNestIndicator(1);
+            if (ImGui.Checkbox("Delist items whose market net (after tax) is below the NPC vendor price".Loc(),
+                    ref conf.BatchDelistBelowVendor))
+                conf.Save();
+
+            DrawNestIndicator(2);
+            ImGui.SetNextItemWidth(45);
+            if (ImGui.InputInt("% market tax (fallback when live rates are unknown)".Loc(),
+                    ref conf.MarketTaxPercent, 0))
             {
-                DrawNestIndicator(2);
-                if (ImGui.DragFloat2("Position (relative to top left)".Loc(), ref conf.AdjustMaxStackSizeInSellListOffset,
-                        1f, 1, float.MaxValue, "%.0f"))
+                conf.MarketTaxPercent = Math.Clamp(conf.MarketTaxPercent, 0, 25);
+                conf.Save();
+            }
+
+            DrawNestIndicator(1);
+            ImGui.TextUnformatted("Delist items whose target price is below".Loc());
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(90);
+            if (ImGui.InputInt("gil (0 = off)".Loc() + "##mbbatchminprice", ref conf.BatchMinPrice, 0))
+            {
+                if (conf.BatchMinPrice < 0)
+                    conf.BatchMinPrice = 0;
+                conf.Save();
+            }
+
+            DrawNestIndicator(1);
+            ImGui.TextUnformatted("Reuse market data seen in the last".Loc());
+            ImGui.SameLine();
+            // 步進 60（一分鐘）／快速步進 300（五分鐘）：跑一輪多角色時常用的值是
+            // 1800（30 分），用預設的無步進版本只能手動輸入，按不出來。
+            ImGui.SetNextItemWidth(160);
+            if (ImGui.InputInt("seconds (0 = always ask the server)".Loc() + "##mbcachettl",
+                    ref conf.MarketDataCacheSeconds, 60, 300))
+            {
+                conf.MarketDataCacheSeconds = Math.Clamp(conf.MarketDataCacheSeconds, 0, 3600);
+                conf.Save();
+            }
+
+            DrawNestIndicator(2);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "Market board answers are delivered to every plugin at once, so anything you (or another plugin) looked up recently is already here and can be reused without asking the server again - that is the single biggest speed-up available without touching the game. Nothing is ever triggered by receiving data; it is only remembered. Listings belong to a world, not to a character, so the cache now survives character switches and is only dropped when you change world - raise this if you work through several characters in one sitting. It never stores \"nobody is selling this\" unless this plugin confirmed it itself."
+                    .Loc());
+            ImGui.PopStyleColor();
+
+            DrawNestIndicator(1);
+            if (ImGui.Button("Clear price cache (?? items)".Loc(MarketDataCache.FreshCount(conf.MarketDataCacheSeconds)) +
+                             "##mbclearcache"))
+                MarketDataCache.Clear();
+
+            // 🔴 這一項刻意畫在**最外層**、不掛在重掛那一組底下。
+            // 它管的範圍比「批次重掛」大：改價流程裡的自動下架**以及**兩顆手動下架按鈕
+            // （出售品視窗的「本僱員全下架」、僱員選單的「全僱員下架」）通通聽它。
+            // 縮排在重掛底下會讓人以為關掉重掛就與它無關，但按鈕照樣會照它走。
+            ImGui.Spacing();
+            ImGui.TextUnformatted("Delist destination".Loc());
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(160);
+            if (ImGui.BeginCombo("##mbdelistdest",
+                    conf.DelistToRetainerInventory ? "Retainer inventory".Loc() : "Player inventory".Loc()))
+            {
+                if (ImGui.Selectable("Player inventory".Loc(), !conf.DelistToRetainerInventory))
+                {
+                    conf.DelistToRetainerInventory = false;
+                    conf.Save();
+                }
+
+                if (ImGui.Selectable("Retainer inventory".Loc(), conf.DelistToRetainerInventory))
+                {
+                    conf.DelistToRetainerInventory = true;
+                    conf.Save();
+                }
+
+                ImGui.EndCombo();
+            }
+
+            DrawNestIndicator(1);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "Where delisted items go - this applies to every delist this plugin does: the automatic ones during relisting (the two settings above) and both manual buttons, \"Delist this retainer\" in the sell list and \"Delist all retainers\" in the retainer menu. Player inventory is the default because it is the only choice that merges stacks: identical items spread across several retainers only combine when they all land in the same container, and each retainer's inventory is separate from every other one's. Your bags are smaller than what nine retainers can list, so a full-inventory stop is normal - clear space and press the button again to carry on."
+                    .Loc());
+            ImGui.PopStyleColor();
+
+            DrawDelistFilterSettings();
+
+            ImGui.Spacing();
+            if (ImGui.Checkbox("Show a live sell list next to the game's one".Loc(), ref conf.LiveSellListOverlay))
+                conf.Save();
+
+            DrawNestIndicator(1);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "Batch repricing writes prices straight into the retainer's market container without opening any game window - which is exactly why it is fast, but it also means the game's sell list never redraws and keeps showing the prices it had when you opened it (a just-listed item stays at 999,999,999 on screen even though the server already has the right price). This panel is drawn by the plugin and re-read every frame, so it is always current. It only reads: no game windows are touched and nothing is clicked for you."
+                    .Loc());
+            ImGui.PopStyleColor();
+
+            // 重掛面板與即時掛單面板現在是**同一欄**（重掛在上、即時掛單接在下面），
+            // 所以位置只留一個滑桿，拖它就是整欄一起動。
+            // 範圍是可負值：舊版下限寫死 1，往左／往上微調不了。
+            if (conf.LiveSellListOverlay || conf.AdjustMaxStackSizeInSellList || conf.BatchRepriceEnabled)
+            {
+                ImGui.Spacing();
+                ImGui.DragFloat2("Side panel position (relative to the sell list's top right)".Loc(),
+                    ref conf.LiveSellListOffset, 1f, -4000f, 4000f, "%.0f");
+                if (ImGui.IsItemDeactivatedAfterEdit())
+                    conf.Save();
+
+                DrawNestIndicator(1);
+                ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+                ImGui.TextWrapped(
+                    "Moves both side panels at once: the relisting controls sit at the top right of the game's sell list and the live listing table is stacked directly underneath them."
+                        .Loc());
+                ImGui.PopStyleColor();
+            }
+
+            if (conf.BatchRepriceEnabled)
+            {
+                ImGui.Spacing();
+                ImGui.DragFloat2("All-retainers panel position (relative to the retainer list's top right)".Loc(),
+                    ref conf.RetainerPanelOffset, 1f, -4000f, 4000f, "%.0f");
+                if (ImGui.IsItemDeactivatedAfterEdit())
                     conf.Save();
             }
 
+            ImGui.Spacing();
+            ImGui.TextUnformatted("Quick listing: hold this key and right-click an item to put it up for sale".Loc());
+            DrawNestIndicator(1);
+            ImGui.SetNextItemWidth(100);
+            if (ImGui.BeginCombo("##mbquicklistkey", QuickListKeyLabel(conf.QuickListKeyCode)))
+            {
+                foreach (var code in QuickLister.SelectableKeyCodes)
+                {
+                    if (ImGui.Selectable(QuickListKeyLabel(code), conf.QuickListKeyCode == code))
+                    {
+                        conf.QuickListKeyCode = code;
+                        conf.Save();
+                    }
+                }
+
+                ImGui.EndCombo();
+            }
+
+            DrawNestIndicator(1);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "Pick a key that is not used elsewhere: CTRL already pastes the clipboard price when the sale window opens, and avoid AutoRetainer's own quick-sale key if you have one bound."
+                    .Loc());
+            ImGui.PopStyleColor();
+
             ImGui.End();
+        }
+
+        private static string QuickListKeyLabel(int keyCode)
+        {
+            return keyCode switch
+            {
+                0 => "None".Loc(),
+                0x10 => "SHIFT",
+                0x11 => "CTRL",
+                0x12 => "ALT",
+                _ => $"0x{keyCode:X}",
+            };
         }
 
         private void DrawUndercutTypeSelector()
@@ -227,6 +1006,18 @@ namespace Marketbuddy
                 ImGui.EndCombo();
             }
         }
+
+        /// <summary>
+        /// 使用者沒有設定降價（0 gil 或 0%）。此時「（最低價 -0gil）」不帶任何資訊，
+        /// 只會把按鈕撐寬，所以標題把那段括號整個省掉。
+        /// </summary>
+        private bool UndercutIsZero =>
+            conf.UndercutUsePercent ? conf.UndercutPercent == 0 : conf.UndercutPrice == 0;
+
+        /// <summary>按鈕的滑鼠提示：把從標題省掉的定價規則交代清楚，而且完全不佔版面。</summary>
+        private string PricingRuleText() => UndercutIsZero
+            ? "Prices at the lowest listing (no undercut)".Loc()
+            : "Prices at the lowest listing minus ??".Loc(GetUndercutText());
 
         private string GetUndercutText(bool escape = false)
         {
