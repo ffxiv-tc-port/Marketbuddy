@@ -125,12 +125,16 @@ namespace Marketbuddy
             queue.Completed += OnQueueCompleted;
             repriceEngine.BatchAborted += OnEngineBatchAborted;
             delistEngine.BatchAborted += OnEngineBatchAborted;
+            // 純通知用的抑制閘：巡迴會逐個僱員各跑一次重掛引擎，不擋的話九個僱員就會叫
+            // 九次「塔塔露誇獎」。整輪的那一聲由本類別的 OnQueueCompleted 負責。
+            repriceEngine.ExternalDriverActive = () => IsRunning;
             Framework.Update += OnFrameworkUpdate;
         }
 
         public void Dispose()
         {
             Framework.Update -= OnFrameworkUpdate;
+            repriceEngine.ExternalDriverActive = null;
             delistEngine.BatchAborted -= OnEngineBatchAborted;
             repriceEngine.BatchAborted -= OnEngineBatchAborted;
             queue.Aborted -= OnQueueAborted;
@@ -660,6 +664,11 @@ namespace Marketbuddy
             {
                 ChatGui.Print("[Marketbuddy] All retainers done: ?? visited, ?? repriced, ?? skipped, ?? delisted, ?? failed"
                     .Loc(retainersDone, totalRepriced, totalSkipped, totalDelisted, totalFailed));
+
+                // 純通知，零行為：整輪重掛跑完才響這一聲（途中每個僱員各自的批次收尾被
+                // BatchReprice.ExternalDriverActive 擋掉了）。下架巡迴不響——那不是「重掛跑完」。
+                // 🔴 這裡在 Framework.Update → queue.Update() 的鏈上（OnFrameworkUpdate），是主執行緒。
+                TataruPraiseIPC.TryPraise("全僱員重掛巡迴完成");
                 return;
             }
 

@@ -202,6 +202,35 @@ namespace Marketbuddy
         /// <summary>Fired when a batch is cancelled or aborted, with the reason.</summary>
         public event System.Action<string>? BatchAborted;
 
+        /// <summary>
+        /// 「現在是不是有別人（＝<see cref="MultiRetainerTour"/>）在驅動這具引擎」的查詢器。
+        /// </summary>
+        /// <remarks>
+        /// 🔴 只給<b>收尾通知</b>用，不影響任何重掛行為。巡迴會逐個僱員各跑一次這具引擎，
+        /// 每一次都會走到 <see cref="OnQueueCompleted"/>；沒有這道閘，九個僱員就會響九次。
+        /// <para>
+        /// 📌 用委派而不是旗標，是因為「巡迴還在跑嗎」的真值只有巡迴自己知道，
+        /// 而且問的時機必須是<b>引擎收尾的那一刻</b>。巡迴在建構式裡註冊、Dispose 時撤掉；
+        /// 沒有巡迴（null）就當成沒人驅動。
+        /// </para>
+        /// <para>
+        /// ⚠️ 順序是安全的：本引擎的 <c>Framework.Update</c> 訂閱早於巡迴的，
+        /// 所以同一 tick 內本引擎先收尾、巡迴才有機會改變自己的狀態；
+        /// 而且巡迴在跑完最後一個僱員的批次時，佇列裡還有「離開僱員」等步驟，
+        /// <c>IsRunning</c> 此刻必為 true。
+        /// </para>
+        /// </remarks>
+        internal Func<bool>? ExternalDriverActive;
+
+        /// <summary>
+        /// 這一輪是不是 <see cref="StartQuickReprice"/> 開的（快速上架後替<b>單一格</b>定價）。
+        /// </summary>
+        /// <remarks>
+        /// 📌 只給收尾通知用。快速上架是「每上架一件就跑一次」的高頻背景動作，
+        /// 把它當成「重掛跑完」會變成每件商品響一次。
+        /// </remarks>
+        private bool quickRepriceBatch;
+
         public bool IsRunning => queue.IsRunning;
         public int TotalSlots { get; private set; }
         public int ProcessedSlots { get; private set; }
@@ -419,6 +448,8 @@ namespace Marketbuddy
             var job = CreateSlotJob(slot);
             job.QuickListed = true;
             BeginBatch([job]);
+            // BeginBatch 先把它清成 false，所以這一行要在後面。只影響收尾通知，不影響定價流程。
+            quickRepriceBatch = true;
             return true;
         }
 
@@ -464,6 +495,8 @@ namespace Marketbuddy
                 }
             }
 
+            // 預設是「一般重掛」；快速上架那條路徑在 BeginBatch 回來之後自己標回 true。
+            quickRepriceBatch = false;
             TotalSlots = jobs.Count;
             ProcessedSlots = 0;
             RepricedCount = 0;
@@ -1183,6 +1216,15 @@ namespace Marketbuddy
             ChatGui.Print("[Marketbuddy] Relist finished: ?? repriced, ?? skipped, ?? delisted, ?? failed"
                 .Loc(RepricedCount, SkippedCount, DelistedCount, FailedCount));
             HintAboutStaleSellList();
+
+            // 純通知，零行為：請「塔塔露誇獎」念一句「重掛跑完了」。
+            // ⚠️ 兩道閘都是為了「不要洗版」：
+            //   ① 巡迴在驅動時不響——那由巡迴自己在整輪收尾時響一次（MultiRetainerTour.OnQueueCompleted）。
+            //   ② 快速上架的單件定價不響——那是每上架一件跑一次的高頻動作。
+            // 🔴 這裡在 Framework.Update → queue.Update() 的鏈上（OnFrameworkUpdate），是主執行緒。
+            if (ExternalDriverActive?.Invoke() != true && !quickRepriceBatch)
+                TataruPraiseIPC.TryPraise("單僱員重掛完成");
+
             BatchFinished?.Invoke();
         }
 

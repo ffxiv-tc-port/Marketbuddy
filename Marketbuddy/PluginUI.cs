@@ -883,6 +883,19 @@ namespace Marketbuddy
                              "##mbclearcache"))
                 MarketDataCache.Clear();
 
+            // 純通知，掛在重掛那一組底下：只有重掛收尾會叫它，下架不會。
+            DrawNestIndicator(1);
+            if (ImGui.Checkbox("Ask TataruPraise to say a line when relisting finishes".Loc(),
+                    ref conf.TataruPraiseOnRelistDone))
+                conf.Save();
+
+            DrawNestIndicator(2);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "Needs the TataruPraise plugin; without it this does nothing at all. It only sends a notification - nothing is triggered, nothing about relisting changes. It speaks once per finished run: once when the all-retainer relist tour ends, and once when a single retainer's relist ends on its own. Each retainer inside a tour stays quiet, and so does the automatic pricing of a just quick-listed item."
+                    .Loc());
+            ImGui.PopStyleColor();
+
             // 🔴 這一項刻意畫在**最外層**、不掛在重掛那一組底下。
             // 它管的範圍比「批次重掛」大：改價流程裡的自動下架**以及**兩顆手動下架按鈕
             // （出售品視窗的「本僱員全下架」、僱員選單的「全僱員下架」）通通聽它。
