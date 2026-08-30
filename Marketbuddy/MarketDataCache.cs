@@ -174,7 +174,9 @@ namespace Marketbuddy
             if (ownerWorldId == 0)
                 return;
             Cache[itemId] = new Entry { At = DateTime.UtcNow, RequestId = int.MinValue, Listings = [] };
-            Log.Information($"{Diag} CACHE-STORE item={itemId} n=0 source=confirmed-empty total={Cache.Count}");
+            // 每一筆查價都會走到這裡，屬於細節而非摘要 -> Debug。
+            // 一次查價的 Information 級摘要由 BatchReprice 的 QUERY 那一行負責。
+            Log.Debug($"{Diag} CACHE-STORE item={itemId} n=0 source=confirmed-empty total={Cache.Count}");
         }
 
         private static void OnFrameworkUpdate(IFramework framework)
@@ -264,7 +266,8 @@ namespace Marketbuddy
                 At = DateTime.UtcNow, RequestId = offerings.RequestId, Listings = captured,
             };
 
-            Log.Information(
+            // 被動處理器：遊戲裡任何一次掛單查詢都會來一次，是 log 的大宗 -> Debug。
+            Log.Debug(
                 $"{Diag} CACHE-STORE item={itemId} n={captured.Count} reqId={offerings.RequestId} total={Cache.Count}");
         }
     }

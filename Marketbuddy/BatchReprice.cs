@@ -605,10 +605,11 @@ namespace Marketbuddy
                             ? -1
                             : (now - batchStartedAt).TotalMilliseconds;
                         var scope = batchAgeMs < 0 || cacheAgeMs > batchAgeMs ? "cross-batch" : "within-batch";
-                        Log.Information(
+                        Log.Debug(
                             $"{Diag} CACHE-HIT item={job.ItemId} '{job.Name}' n={cachedListings.Count} " +
                             $"ageMs={cacheAgeMs:F0} scope={scope} batchAgeMs={batchAgeMs:F0} attempt={job.Attempt} " +
                             $"(no request sent; ttl={conf.MarketDataCacheSeconds}s)");
+                        LogQuerySummary(job, $"cache({scope})", cachedListings.Count, now);
                         captured.Clear();
                         captured.AddRange(cachedListings);
                         job.FromCache = true;
@@ -697,7 +698,8 @@ namespace Marketbuddy
 
                     var sent = proxy->RequestData();
                     var cachedAgeMs = MarketDataCache.AgeMsOf(job.ItemId);
-                    Log.Information(
+                    // 每一次送出都有一筆，是 log 的大宗 -> Debug。摘要由 QUERY 那一行負責。
+                    Log.Debug(
                         $"{Diag} REQUEST item={job.ItemId} '{job.Name}' attempt={job.Attempt} " +
                         $"RequestData={sent} sendGapMs={job.SendGapMs:F0} gate={MarketRequestGate.IntervalMs} " +
                         $"msSinceLastData={MsSince(lastDataReceivedAt):F0} " +
@@ -733,7 +735,9 @@ namespace Marketbuddy
                         // listingCount 是跨所有分頁的**總**筆數；為 0 時客戶端不會送續頁請求，
                         // 所以 offerings 封包永遠不會來（反編譯證實，見探針的類別註解）。
                         job.ProbeEmpty = !verdict.Refused && verdict.ListingCount == 0;
-                        Log.Information(
+                        // 探針對每一次查價都會給一筆答覆 -> Debug；被拒絕的情形由下面的
+                        // REFUSED 那一行以 Information 保留（那是異常，不是常態）。
+                        Log.Debug(
                             $"{Diag} VERDICT item={job.ItemId} '{job.Name}' attempt={job.Attempt} " +
                             $"refused={verdict.Refused} errorCode=0x{verdict.ErrorCode:X} " +
                             $"listingCount={verdict.ListingCount} " +
@@ -742,10 +746,11 @@ namespace Marketbuddy
 
                     if (offeringsReceived)
                     {
-                        Log.Information(
+                        Log.Debug(
                             $"{Diag} SLOT-DONE item={job.ItemId} '{job.Name}' via=offerings " +
                             $"attempts={job.Attempt} waitMs={(now - job.WaitStart).TotalMilliseconds:F0} " +
                             $"totalMs={(now - job.StartedAt).TotalMilliseconds:F0}");
+                        LogQuerySummary(job, "offerings", captured.Count, now);
                         MarketRequestGate.NoteAccepted();
                         // 掛單資料已經由 MarketDataCache 的被動處理器存起來了，這裡不必再存。
                         job.Phase = SlotPhase.Apply;
@@ -788,10 +793,12 @@ namespace Marketbuddy
                     //     查詢蓋掉時的退路，行為與 .18 之前完全相同。
                     if (job.ProbeEmpty || (historySeen && (now - historySeenAt).TotalMilliseconds >= EmptyResultGraceMs))
                     {
-                        Log.Information(
+                        Log.Debug(
                             $"{Diag} SLOT-DONE item={job.ItemId} '{job.Name}' " +
                             $"via={(job.ProbeEmpty ? "verdict(empty)" : "history-grace(empty)")} " +
                             $"attempts={job.Attempt} totalMs={(now - job.StartedAt).TotalMilliseconds:F0}");
+                        LogQuerySummary(
+                            job, job.ProbeEmpty ? "empty(verdict)" : "empty(history-grace)", 0, now);
                         offeringsPending = false;
                         // 伺服器確實回答了這次查詢，所以就算沒有 offerings 分頁，
                         // 對節流而言這仍然算一次乾淨的請求。
@@ -983,7 +990,10 @@ namespace Marketbuddy
             // 快取是 MarketDataCache 自己那個獨立的訂閱做的事——包括下面每一條 dropped
             // 分支所丟掉的封包，它們一樣都已經被存起來了，只是不會在這裡被採用。
             var listings = offerings.ItemListings;
-            Log.Information(
+            // 這個處理器對「遊戲裡任何一次掛單查詢」都會被呼叫，不只我們自己送的那些，
+            // 所以這一整組是實機 log 的大宗 -> 全部 Debug。一次查價的 Information 級
+            // 摘要只有 QUERY 那一行。
+            Log.Debug(
                 $"{Diag} OFFERINGS reqId={offerings.RequestId} count={listings.Count} " +
                 $"firstItem={(listings.Count > 0 ? listings[0].ItemId : 0)} " +
                 $"pendingItem={pendingItemId} pending={offeringsPending} " +
@@ -991,7 +1001,7 @@ namespace Marketbuddy
 
             if (!offeringsPending)
             {
-                Log.Information($"{Diag} OFFERINGS dropped: no request pending");
+                Log.Debug($"{Diag} OFFERINGS dropped: no request pending");
                 return;
             }
 
@@ -1000,14 +1010,14 @@ namespace Marketbuddy
                 // Later pages of a batch we already consumed share its RequestId.
                 if (offerings.RequestId == lastAcceptedRequestId)
                 {
-                    Log.Information($"{Diag} OFFERINGS dropped: RequestId == lastAcceptedRequestId ({offerings.RequestId})");
+                    Log.Debug($"{Diag} OFFERINGS dropped: RequestId == lastAcceptedRequestId ({offerings.RequestId})");
                     return;
                 }
 
                 // Stale response for a previously requested item: ignore.
                 if (listings[0].ItemId != pendingItemId)
                 {
-                    Log.Information($"{Diag} OFFERINGS dropped: itemId mismatch (got {listings[0].ItemId}, want {pendingItemId})");
+                    Log.Debug($"{Diag} OFFERINGS dropped: itemId mismatch (got {listings[0].ItemId}, want {pendingItemId})");
                     return;
                 }
             }
@@ -1027,12 +1037,13 @@ namespace Marketbuddy
             offeringsPending = false;
             offeringsReceived = true;
             lastDataReceivedAt = DateTime.UtcNow;
-            Log.Information($"{Diag} OFFERINGS accepted: {captured.Count} listings for item {pendingItemId}");
+            Log.Debug($"{Diag} OFFERINGS accepted: {captured.Count} listings for item {pendingItemId}");
         }
 
         private void OnHistoryReceived(IMarketBoardHistory history)
         {
-            Log.Information(
+            // 同上：遊戲裡每一次掛單查詢都會來一筆 -> Debug。
+            Log.Debug(
                 $"{Diag} HISTORY item={history.ItemId} pendingItem={pendingItemId} " +
                 $"pending={offeringsPending} alreadySeen={historySeen}");
 
@@ -1312,6 +1323,27 @@ namespace Marketbuddy
             ProcessedSlots++;
             SkippedCount++;
             ChatGui.Print(chatMessage);
+        }
+
+        /// <summary>
+        /// 一次查價 = 一行 Information。原本 REQUEST / MKTRESULT / OFFERINGS /
+        /// CACHE-STORE / HISTORY 各印一行，實機一輪累積約 16k 行 Information，
+        /// 把使用者 log 裡別的東西擠掉。那些細節現在全部降到 Debug，需要時把
+        /// LogLevel 調到 Debug 就整組回來，判讀邏輯完全沒變。
+        /// 這一行必須留在 Information：使用者跑 LogLevel 2，Debug/Verbose 收不到，
+        /// 沒有它就完全看不見查價發生過。
+        /// </summary>
+        /// <param name="via">答案是怎麼來的：cache / offerings / empty(...)。</param>
+        /// <param name="n">採用的掛單筆數。</param>
+        private void LogQuerySummary(SlotJob job, string via, int n, DateTime now)
+        {
+            // StartedAt 只有真的送出過請求才會設；快取直接命中時沒有「耗時」可言。
+            var totalMs = job.StartedAt == DateTime.MinValue
+                ? 0d
+                : (now - job.StartedAt).TotalMilliseconds;
+            Log.Information(
+                $"{Diag} QUERY item={job.ItemId} '{job.Name}' via={via} n={n} " +
+                $"attempts={job.Attempt} totalMs={totalMs:F0}");
         }
 
         private void Fail(SlotJob job, string reason)

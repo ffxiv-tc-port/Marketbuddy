@@ -255,7 +255,10 @@ namespace Marketbuddy
                 }
                 else
                 {
-                    Log.Information(
+                    // 正常答覆每一次查價都有一筆，是 log 的大宗 -> Debug。
+                    // 上面的 MKTRESULT-ERR 維持 Information：errorCode >= 0x70000000 時
+                    // 遊戲不會印任何聊天訊息，那一行是使用者唯一的線索。
+                    Log.Debug(
                         $"{Diag} MKTRESULT #{seq} listingCount={listingCount} " +
                         $"errorCode=0 itemId={itemId}");
                 }
