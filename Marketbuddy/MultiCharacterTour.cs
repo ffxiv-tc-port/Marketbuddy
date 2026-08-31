@@ -598,7 +598,10 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
     private void TickStartingTour()
     {
         // 這個角色一件都沒掛：不是失敗，是「沒事可做」。
-        if (MultiRetainerTour.CountRetainersWithListings() == 0)
+        // 🔴 僱員資料還沒 ready 的時候計數也是 0，跟「真的沒東西」同形——先確認讀得到，
+        //    否則僱員選單剛開起來的那幾幀會被判成「沒事可做」而整個跳過。
+        //    讀不到就什麼都不做，這一階段的看門狗會處理真的一直讀不到的情況。
+        if (MultiRetainerTour.IsRetainerDataReady() && MultiRetainerTour.CountRetainersWithListings() == 0)
         {
             legOutcome = LegOutcome.Done;
             legReason = string.Empty;

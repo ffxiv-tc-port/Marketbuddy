@@ -367,6 +367,18 @@ namespace Marketbuddy
         /// </summary>
         internal static int CountRetainersWithListings() => CollectTargets(false).Count;
 
+        /// <summary>
+        /// 僱員資料讀得到了沒有。
+        /// 🔴 <see cref="EnumerateRetainers"/> 在還沒 ready 的時候回**空清單**，跟「真的一件都沒掛」
+        /// 完全同形。僱員選單剛開起來的那幾幀正是這種狀態，所以任何拿 0 當結論的呼叫端
+        /// 都必須先過這一關，否則會把「還沒載入」講成「沒東西要做」。
+        /// </summary>
+        internal static bool IsRetainerDataReady()
+        {
+            var retainerManager = RetainerManager.Instance();
+            return retainerManager != null && retainerManager->IsReady;
+        }
+
         private static string GetAddonSheetText(uint rowId)
         {
             // ⚠️ 全名：Lumina 的 Addon 表與 System.Action 在這個檔裡跟 using 撞名。
