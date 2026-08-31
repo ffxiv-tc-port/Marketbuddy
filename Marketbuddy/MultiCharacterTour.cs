@@ -1,3 +1,4 @@
+using Dalamud.Bindings.ImGui;
 using System;
 using System.Collections.Generic;
 using System.Numerics;
@@ -184,6 +185,7 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
 
         IPCManager.SubscribeCharacterAdditionalTask(onCharacterAdditionalTask);
         IPCManager.SubscribeCharacterReadyForPostprocess(onCharacterReadyForPostprocess);
+        IPCManager.SubscribeMainControlsDraw(DrawArMainControlsButton);
 
         Framework.Update += OnFrameworkUpdate;
     }
@@ -198,6 +200,7 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
         Framework.Update -= OnFrameworkUpdate;
         IPCManager.UnsubscribeCharacterAdditionalTask(onCharacterAdditionalTask);
         IPCManager.UnsubscribeCharacterReadyForPostprocess(onCharacterReadyForPostprocess);
+        IPCManager.UnsubscribeMainControlsDraw(DrawArMainControlsButton);
         tour.TourCompleted -= OnTourCompleted;
         tour.TourAborted -= OnTourAborted;
         tour.ExternalDriverActive = null;
@@ -704,6 +707,50 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
         // tour.ExternalDriverActive 擋掉了（使用者明確要求「途中不要響」）。
         // 🔴 這裡在 Framework.Update 的鏈上，是主執行緒。
         TataruPraiseIPC.TryPraise("多角色重掛全完成");
+    }
+
+    /// <summary>
+    /// 畫在 AutoRetainer 主視窗控制列（「重設計數器」那一列尾端）與僱員清單懸浮窗的
+    /// 「武裝一輪」按鈕（2026-08-31 使用者要求）。AR 每幀 SendMessage 呼叫進來。
+    /// 🔴 例外絕不能洩出去：這是 AR 的 Draw 鏈，Dalamud 對 Window.Draw 擲兩次例外會
+    /// 永久關掉人家的主視窗。第一次失敗印一行 Information，之後靜默。
+    /// </summary>
+    private bool arDrawFaultReported;
+
+    private void DrawArMainControlsButton()
+    {
+        try
+        {
+            if (!Configuration.GetOrLoad().MultiCharTourEnabled)
+                return;
+
+            ImGui.SameLine();
+            if (!IsArmed)
+            {
+                if (ImGui.Button("Arm for one round".Loc() + "##mbmcarm_armain"))
+                {
+                    if (!TryArm(out var reason))
+                        ChatGui.Print("[Marketbuddy] " + "Cannot arm: ??".Loc(reason));
+                }
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Marketbuddy multi-character relist: arm one round. Tataru praises only when every character is done.".Loc());
+            }
+            else
+            {
+                if (ImGui.Button("Stop round ??/??".Loc(RoundCompleted, RoundTargets) + "##mbmcstop_armain"))
+                    Stop("stopped by user".Loc());
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Multi-character relisting armed. Click to stop this round.".Loc());
+            }
+        }
+        catch (Exception e)
+        {
+            if (!arDrawFaultReported)
+            {
+                arDrawFaultReported = true;
+                Log.Information($"[MultiCharacterTour] AR 控制列按鈕繪製失敗（只報這一次）：{e.Message}");
+            }
+        }
     }
 
     /// <summary>

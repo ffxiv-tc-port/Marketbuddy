@@ -85,6 +85,8 @@ namespace Marketbuddy
         internal const string TagFinishCharacterPostprocessRequest = "AutoRetainer.FinishCharacterPostprocessRequest";
         internal const string TagGetRegisteredCids = "AutoRetainer.GetRegisteredCIDs";
         internal const string TagGetOfflineCharacterData = "AutoRetainer.GetOfflineCharacterData";
+        /// <summary>AR 主視窗控制列(與僱員清單懸浮窗)的第三方繪製擴充點,每幀 SendMessage。</summary>
+        internal const string TagOnMainControlsDraw = "AutoRetainer.OnMainControlsDraw";
 
         /// <summary>
         /// AutoRetainer <c>OfflineCharacterData</c> 的鏡像型別。
@@ -210,6 +212,22 @@ namespace Marketbuddy
             catch (Exception e)
             {
                 Svc.Log.Warning(e, "IPCManager: 取消訂閱 OnCharacterReadyForPostprocess 失敗");
+            }
+        }
+
+        /// <summary>訂閱 AR 主控制列繪製擴充點(回呼在 AR 的 ImGui Draw 裡被每幀呼叫)。</summary>
+        internal static void SubscribeMainControlsDraw(Action handler)
+            => Svc.PluginInterface.GetIpcSubscriber<object>(TagOnMainControlsDraw).Subscribe(handler);
+
+        internal static void UnsubscribeMainControlsDraw(Action handler)
+        {
+            try
+            {
+                Svc.PluginInterface.GetIpcSubscriber<object>(TagOnMainControlsDraw).Unsubscribe(handler);
+            }
+            catch (Exception e)
+            {
+                Svc.Log.Warning(e, "IPCManager: 取消訂閱 OnMainControlsDraw 失敗");
             }
         }
 
