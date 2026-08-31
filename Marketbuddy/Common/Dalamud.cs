@@ -31,6 +31,9 @@ namespace Marketbuddy.Common
         [PluginService] public static IMarketBoard MarketBoard { get; private set; } = null!;
         [PluginService] public static IPlayerState PlayerState { get; private set; } = null!;
         [PluginService] public static IDataManager DataManager { get; private set; } = null!;
+        // 多角色重掛要在自己身邊找傳喚鈴（見 MultiCharacterTour）。
+        // 🔴 只在同一幀內取用，絕不跨幀保存 IGameObject 或它的 Address。
+        [PluginService] public static IObjectTable Objects { get; private set; } = null!;
         [PluginService] public static IPluginLog Log { get; private set; } = null!;
         [PluginService] public static IGameInteropProvider Hook { get; private set; } = null!;
         [PluginService] public static IAddonLifecycle AddonLifecycle { get; private set; } = null!;

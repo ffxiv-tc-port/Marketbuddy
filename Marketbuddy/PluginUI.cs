@@ -18,6 +18,13 @@ namespace Marketbuddy
 
         private bool _settingsVisible;
 
+        /// <summary>
+        /// 多角色重掛「武裝」失敗的原因。
+        /// 🔑 顯示在按鈕旁邊而不是丟到聊天視窗：使用者是在這個視窗裡按的按鈕，
+        /// 答案要出現在他正在看的地方。
+        /// </summary>
+        private string multiCharArmError = string.Empty;
+
         // passing in the image here just for simplicity
         public PluginUI(Marketbuddy plugin)
         {
@@ -100,7 +107,42 @@ namespace Marketbuddy
                 DrawDelistTourButton(tour);
             }
 
+            DrawMultiCharacterStatusLine();
+
             ImGui.End();
+        }
+
+        /// <summary>
+        /// 僱員選單旁那一欄的多角色狀態列。只在**已武裝**時出現。
+        /// 🔑 這一輪跑到哪裡是「隨時掃視」的資訊，所以畫在列上；
+        /// 「還有誰沒跑」是「起疑才查」的，放滑鼠提示。
+        /// 🔴 停止鈕跟狀態列放在一起：正在被自動操作的畫面上，
+        /// 「怎麼叫它停」必須看得見，不能只藏在 /mbuddy 裡。
+        /// </summary>
+        private void DrawMultiCharacterStatusLine()
+        {
+            if (!conf.MultiCharTourEnabled)
+                return;
+            var multi = marketbuddy.MultiCharTour;
+            if (!multi.IsArmed)
+                return;
+
+            ImGui.Separator();
+            ImGui.TextUnformatted("Multi-character round: ??/?? character(s)"
+                .Loc(multi.RoundCompleted, multi.RoundTargets));
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(MultiCharacterRemainingText(multi));
+
+            if (ImGui.Button("Stop multi-character relisting".Loc() + "##mbmcstoppanel"))
+                multi.Stop("stopped by user".Loc());
+        }
+
+        private static string MultiCharacterRemainingText(MultiCharacterTour multi)
+        {
+            var names = string.Join(", ", multi.RemainingNames());
+            return names.Length == 0
+                ? "Nothing left to visit this round.".Loc()
+                : "Still to visit: ??".Loc(names);
         }
 
         /// <summary>
@@ -896,6 +938,8 @@ namespace Marketbuddy
                     .Loc());
             ImGui.PopStyleColor();
 
+            DrawMultiCharacterSettings();
+
             // 🔴 這一項刻意畫在**最外層**、不掛在重掛那一組底下。
             // 它管的範圍比「批次重掛」大：改價流程裡的自動下架**以及**兩顆手動下架按鈕
             // （出售品視窗的「本僱員全下架」、僱員選單的「全僱員下架」）通通聽它。
@@ -996,6 +1040,60 @@ namespace Marketbuddy
             ImGui.PopStyleColor();
 
             ImGui.End();
+        }
+
+        /// <summary>
+        /// 多角色重掛的設定與操作。
+        /// 🔴 依市場紅線：預設關閉、手動武裝、隨時可停、重啟不殘留、一輪跑完自己解除。
+        /// </summary>
+        private void DrawMultiCharacterSettings()
+        {
+            ImGui.Spacing();
+            if (ImGui.Checkbox("Relist across characters together with AutoRetainer's multi mode".Loc(),
+                    ref conf.MultiCharTourEnabled))
+                conf.Save();
+
+            DrawNestIndicator(1);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "Needs AutoRetainer. Each time AutoRetainer has finished a character and is about to log out to the next one, it hands over and this plugin runs one all-retainer relist tour, then hands control straight back. You have to arm it by hand for each round: arming is never saved, so restarting the game or reloading the plugin always leaves it off, and it disarms itself as soon as every character in the round is done. Nothing walks your character anywhere - a character that is not standing within reach of a summoning bell is simply skipped."
+                    .Loc());
+            ImGui.PopStyleColor();
+
+            if (!conf.MultiCharTourEnabled)
+                return;
+
+            var multi = marketbuddy.MultiCharTour;
+            DrawNestIndicator(1);
+            if (multi.IsArmed)
+            {
+                ImGui.TextUnformatted("Round: ??/?? character(s) done, ?? item(s) repriced"
+                    .Loc(multi.RoundCompleted, multi.RoundTargets, multi.RoundRepriced));
+
+                DrawNestIndicator(1);
+                var current = multi.CurrentCharacterName;
+                ImGui.TextUnformatted(current.Length > 0
+                    ? "Now: ??".Loc(current)
+                    : "Waiting for AutoRetainer to hand over.".Loc());
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(MultiCharacterRemainingText(multi));
+
+                DrawNestIndicator(1);
+                if (ImGui.Button("Stop multi-character relisting".Loc() + "##mbmcstopconfig"))
+                    multi.Stop("stopped by user".Loc());
+                return;
+            }
+
+            if (ImGui.Button("Arm for one round".Loc() + "##mbmcarm"))
+                multiCharArmError = multi.TryArm(out var reason) ? string.Empty : reason;
+
+            if (multiCharArmError.Length > 0)
+            {
+                DrawNestIndicator(1);
+                ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudRed);
+                ImGui.TextWrapped("Cannot arm: ??".Loc(multiCharArmError));
+                ImGui.PopStyleColor();
+            }
         }
 
         private static string QuickListKeyLabel(int keyCode)

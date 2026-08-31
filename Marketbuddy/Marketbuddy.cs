@@ -32,6 +32,9 @@ namespace Marketbuddy
 
         internal MultiRetainerTour MultiTour { get; private set; }
 
+        /// <summary>與 AutoRetainer 多開模式協作的多角色重掛驅動器。</summary>
+        internal MultiCharacterTour MultiCharTour { get; private set; }
+
         internal QuickLister? QuickLister { get; private set; }
 
         internal ManualRequery ManualRequery { get; private set; }
@@ -89,6 +92,10 @@ namespace Marketbuddy
                 BatchDelist = new BatchDelist(MarketGuiEventHandler);
 
                 MultiTour = new MultiRetainerTour(MarketGuiEventHandler, BatchReprice, BatchDelist);
+
+                // 多角色重掛：只是訂閱 AutoRetainer 的事件並等待；預設沒有武裝，
+                // 使用者不去按那顆按鈕的話這個物件什麼都不會做。
+                MultiCharTour = new MultiCharacterTour(MarketGuiEventHandler, MultiTour);
 
                 ManualRequery = new ManualRequery(MarketGuiEventHandler);
 
@@ -160,6 +167,9 @@ namespace Marketbuddy
             Safe(() => LiveSellList?.Dispose());
             Safe(() => QuickLister?.Dispose());
             Safe(() => ManualRequery?.Dispose());
+            // 🔴 必須排在 MultiTour 之前：它會取消進行中的巡迴，而且要在那之後
+            //    才把 AutoRetainer 的控制權還回去（AR 端的等待沒有時限）。
+            Safe(() => MultiCharTour?.Dispose());
             Safe(() => MultiTour?.Dispose());
             Safe(() => BatchDelist?.Dispose());
             Safe(() => BatchReprice?.Dispose());

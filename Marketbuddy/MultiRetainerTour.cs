@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using Dalamud.Game.ClientState.Keys;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
-using Lumina.Excel.Sheets;
 using Marketbuddy.Common;
 using static Marketbuddy.Common.Dalamud;
 
@@ -102,6 +101,26 @@ namespace Marketbuddy
         private int totalRepriced, totalSkipped, totalDelisted, totalFailed, retainersDone;
 
         public bool IsRunning => queue.IsRunning;
+
+        /// <summary>
+        /// 這一趟巡迴是被<b>外部驅動器</b>（<see cref="MultiCharacterTour"/> 的多角色輪）
+        /// 帶起來的嗎。true 時本層的「巡迴跑完了」那一聲塔塔露<b>不響</b>——
+        /// 使用者明確要求多角色輪只在**全部角色都跑完**時響一聲。
+        /// </summary>
+        /// <remarks>
+        /// 形狀刻意與 <see cref="BatchReprice.ExternalDriverActive"/> 相同：純通知閘門，
+        /// 不改任何巡迴行為，null（沒有外部驅動器）時一切照舊。
+        /// </remarks>
+        internal Func<bool>? ExternalDriverActive;
+
+        /// <summary>巡迴正常跑完（<see cref="OnQueueCompleted"/> 的尾巴）。</summary>
+        public event Action? TourCompleted;
+
+        /// <summary>巡迴中止，附原因（<see cref="OnQueueAborted"/> 的尾巴）。</summary>
+        public event Action<string>? TourAborted;
+
+        /// <summary>這一趟總共重掛幾件（給多角色輪累加整輪總數用）。</summary>
+        public int TotalRepriced => totalRepriced;
 
         /// <summary>目前（或最近一次）跑的是哪一種巡迴。UI 靠它決定要畫哪一種進度。</summary>
         public TourMode Mode { get; private set; } = TourMode.Reprice;
@@ -341,9 +360,17 @@ namespace Marketbuddy
             return targets;
         }
 
+        /// <summary>
+        /// 現在有幾名僱員身上有掛單（不套用任何跳過名單）。
+        /// 🔑 給多角色輪判斷「這個角色是不是根本沒東西要重掛」用：那是<b>完成</b>不是失敗，
+        /// 而 <see cref="CanStart"/> 只給得出一句已經在地化的原因字串，比對字串會很脆。
+        /// </summary>
+        internal static int CountRetainersWithListings() => CollectTargets(false).Count;
+
         private static string GetAddonSheetText(uint rowId)
         {
-            var sheet = DataManager.GetExcelSheet<Addon>();
+            // ⚠️ 全名：Lumina 的 Addon 表與 System.Action 在這個檔裡跟 using 撞名。
+            var sheet = DataManager.GetExcelSheet<Lumina.Excel.Sheets.Addon>();
             if (sheet != null && sheet.TryGetRow(rowId, out var row))
                 return row.Text.ExtractText();
             return string.Empty;
@@ -639,6 +666,7 @@ namespace Marketbuddy
                         ? "[Marketbuddy] A retainer's inventory is full - stopped here, this is not an error. ?? item(s) delisted so far; ?? item(s) across ?? retainer(s) still listed. Make room in that retainer's inventory and press the button again to carry on where it left off."
                         : "[Marketbuddy] Bags are full - stopped here, this is not an error. ?? item(s) delisted so far; ?? item(s) across ?? retainer(s) still listed. Clear space and press the button again to carry on where it left off.")
                     .Loc(totalDelisted, itemsLeft, retainersLeft));
+                TourAborted?.Invoke(reason);
                 return;
             }
 
@@ -654,6 +682,8 @@ namespace Marketbuddy
                 AutoRetainerBridge.ArmAvailabilityNotice();
                 ChatGui.Print("[Marketbuddy] Wait for AutoRetainer to finish, then press the button again.".Loc());
             }
+
+            TourAborted?.Invoke(reason);
         }
 
         private void OnQueueCompleted()
@@ -667,8 +697,12 @@ namespace Marketbuddy
 
                 // 純通知，零行為：整輪重掛跑完才響這一聲（途中每個僱員各自的批次收尾被
                 // BatchReprice.ExternalDriverActive 擋掉了）。下架巡迴不響——那不是「重掛跑完」。
+                // ⚠️ 再上面還有一層：多角色輪在驅動時這一聲也不響，改由它在**全部角色跑完**
+                //    的時候響一次（使用者明確要求途中每一角完成都不要響）。
                 // 🔴 這裡在 Framework.Update → queue.Update() 的鏈上（OnFrameworkUpdate），是主執行緒。
-                TataruPraiseIPC.TryPraise("全僱員重掛巡迴完成");
+                if (ExternalDriverActive?.Invoke() != true)
+                    TataruPraiseIPC.TryPraise("全僱員重掛巡迴完成");
+                TourCompleted?.Invoke();
                 return;
             }
 
@@ -691,6 +725,8 @@ namespace Marketbuddy
             if (totalSkipped > 0)
                 ChatGui.Print("[Marketbuddy] ?? listing(s) kept across the tour: unit price not above ?? gil."
                     .Loc(totalSkipped, Configuration.GetOrLoad().DelistAboveUnitPrice.ToString("N0")));
+
+            TourCompleted?.Invoke();
         }
     }
 }

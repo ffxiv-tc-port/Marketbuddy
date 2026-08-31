@@ -146,6 +146,17 @@ namespace Marketbuddy
         /// 巡迴途中每個僱員各自的批次收尾<b>不</b>響，快速上架的單件定價也不響——那些會變成洗版。
         /// </para>
         /// </remarks>
+        /// <summary>
+        /// 多角色重掛：與 AutoRetainer 的多開模式協作，在 AR 每處理完一個角色、
+        /// 準備登出換下一角之前，接手跑一輪全僱員重掛巡迴。
+        /// </summary>
+        /// <remarks>
+        /// 🔴 這個開關只決定「要不要顯示這個功能的操作介面」。真正會動起來還需要使用者
+        /// <b>手動武裝</b>，而武裝狀態<b>不存檔</b>：重開遊戲／重載外掛一律回到解除狀態，
+        /// 而且一輪跑完就自己解除。預設關閉。
+        /// </remarks>
+        public bool MultiCharTourEnabled = false;
+
         public bool TataruPraiseOnRelistDone = true;
 
         public int Version { get; set; } = 0;
