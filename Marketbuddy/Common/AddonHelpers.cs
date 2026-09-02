@@ -68,9 +68,20 @@ namespace Marketbuddy.Common
         /// Context menu entry selection: Callback(0, index, 0u, 0, 0), same shape as AutoRetainer's QuickSellItems.
         /// <paramref name="addonName"/> 是這扇選單自己報的名字（見 <see cref="ReadAddonName"/>）：
         /// 守衛用它比對與輪詢，硬寫一個名字會在名字不符時靜默失去保護。
+        ///
+        /// 🔴 <paramref name="closedByCallback"/> ＝**原生端有沒有在回到 C# 之前就把這扇窗關掉**。
+        /// 台服的 <c>AtkUnitBase::FireCallback</c> 在 close 參數為 true、且處理常式回非零時，
+        /// 會在**同一個呼叫堆疊裡**先後跑完 vf6 <c>Hide</c> 與 vf4 <c>Close</c>；
+        /// 而它的回傳暫存器**只在那個關窗區塊裡**被設為 1。
+        /// ⇒ 回傳值的語意是「我有沒有替你把窗關掉」，**不是**「callback 成不成功」。
+        /// 把它當成功與否用是靜默誤判（<c>close: false</c> 的呼叫恆回 false）。
+        /// 🔴 拿到 true 之後**不准在同一個堆疊裡再碰這扇窗**：<c>AtkUnitBase::Close</c> 沒有
+        /// 任何 already-closed 的 early-out，第二發就是攔不到的 AccessViolationException。
         /// </summary>
-        public static bool FireContextMenuSelect(AtkUnitBase* contextMenu, int index, string addonName)
+        public static bool FireContextMenuSelect(
+            AtkUnitBase* contextMenu, int index, string addonName, out bool closedByCallback)
         {
+            closedByCallback = false;
             if (!AddonPressGuard.TryPress(addonName, (nint)contextMenu, PressKind.Terminal))
                 return false;
 
@@ -85,7 +96,7 @@ namespace Marketbuddy.Common
             values[3].Int = 0;
             values[4].Type = ValueType.Int;
             values[4].Int = 0;
-            contextMenu->FireCallback(5, values, true);
+            closedByCallback = contextMenu->FireCallback(5, values, true);
             return true;
         }
 

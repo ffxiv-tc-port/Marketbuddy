@@ -340,23 +340,86 @@ namespace Marketbuddy
                 }
 
                 var name = ResolveItemName(item, out var baseName);
-                pendingMenuSelects.Add(new PendingMenuSelect
+                var pending = new PendingMenuSelect
                 {
                     ItemId = item->ItemId,
                     Name = name,
                     BaseName = baseName,
                     Deadline = DateTime.UtcNow.AddMilliseconds(PendingTimeoutMs),
-                });
+                };
+                pendingMenuSelects.Add(pending);
                 // Hold AutoRetainer off from the menu jump until the whole
                 // list-then-reprice flow has drained (see UpdateSuppression).
                 AcquireSuppression();
 
-                // Hide() 與 Close(true) 是同一次按下的收尾（我們自己關掉剛用完的選單），
-                // 不是第二次按下，所以刻意不再過一次守衛。
-                AddonHelpers.FireContextMenuSelect(addon, i, contextMenuName);
+                // 🔴🔴 送出這一發之後，**不准在同一個呼叫堆疊裡再碰這扇窗**。
+                //    台服的 AtkUnitBase::FireCallback 在 close 參數為 true 且處理常式回非零時，
+                //    會在**回到這裡之前**就先後呼叫 vf6 Hide 與 vf4 Close；而 AtkUnitBase::Close
+                //    本身沒有任何 already-closed 的 early-out（它無條件送 FireCloseCallback 給
+                //    agent、把窗從 AtkUnitManager+0x7920 那張表摘掉、再 Hide 一次，最後派送
+                //    一則關窗事件）。⚠️ 它摘掉的**不是** AllLoadedUnitsList，詳見下面那段。
+                //    ⇒ 原本緊接在後面的 Hide()+Close(true) 就是「對正在關閉／已經關掉的窗
+                //      再操作一次」，也就是原生 AccessViolationException。AVE 在 .NET Core 屬
+                //      corrupted-state exception，try/catch（包含外層那個 detour 的 catch）
+                //      完全攔不到 ⇒ 唯一的防護是不要送第二次。
+                //    分歧點不必猜台服的處理常式回不回非零：FireCallback 的回傳值語意正好就是
+                //    「我有沒有替你把窗關掉」，直接拿它當判準。
+                if (!AddonHelpers.FireContextMenuSelect(addon, i, contextMenuName, out var closedByCallback))
+                {
+                    // 守衛在 CanPress 之後才擋下（同一幀同一執行緒理論上不會發生，但回傳值
+                    // 不能吞掉）：把剛排進去的待處理項收回來，否則它會一直掛到逾時，期間
+                    // IsCapListingInFlight 為真，引擎會誤判有上限掛單正在飛。
+                    // 抑制旗標不必手動放：UpdateSuppression 下一幀看到沒有在飛的工作就會放掉。
+                    pendingMenuSelects.Remove(pending);
+                    Log.Information(
+                        "QuickLister: 守衛擋下了這一次的選單選取，本次快速上架取消（待處理項已收回）");
+                    return;
+                }
+
+                if (closedByCallback)
+                {
+                    // 原生端已經在回到這裡之前跑完 Hide+Close 了 —— 這裡什麼都不做才是對的。
+                    Log.Debug(
+                        $"QuickLister: 已選取『{putUpForSaleText}』({i}) 給 {inventoryType}#{slot}；選單已由原生端關閉");
+                    return;
+                }
+
+                // 回 false ＝原生端走的是不關窗那條：沒有 Hide、沒有 Close，也沒有解參考這扇窗
+                // 的 vtable（回傳暫存器只在關窗區塊裡被設 1）。剩下唯一沒被排除的情形是
+                // 「處理常式自己把窗關掉了」—— 那件事離線證不出來，所以碰它之前用 addon id
+                // 重查一次，當作額外一道閘門。
+                // 🔴 但要知道這道閘門擋得到什麼、擋不到什麼（台服 7.20 反組譯實證）：
+                //    ✅ 擋得到：這扇窗已經被 Finalize／釋放（那時才會從 AllLoadedUnitsList
+                //       移除），以及同一個 id 已經換成另一個實例。
+                //    ❌ 擋不到：「已經 Close 但還沒 Finalize」。AtkUnitBase::Close
+                //       (0x14063CFE0) 只把窗從 AtkUnitManager+0x7920 那張表移除，
+                //       **完全沒有碰 AllLoadedUnitsList (+0x6900)**，而 GetAddonById
+                //       (0x14064B900) 與 GetAddonByName 掃的正是後者 —— 這也正是
+                //       「按下即關的窗，按完那幾幀三關全過」那個危險窗口的成因。
+                //    ⇒ 這道閘門是加分，不是證明。真正把這個站移出危險窗口的，是上面那個
+                //      closedByCallback 分歧：原生端說它關了，我們就一個字都不再碰。
+                // 🔴 這裡對存下來的位址**只做等值比較**：存的是 id，解參考的是遊戲這一幀自己
+                //    交回來的指標。同 id 換成另一扇窗時比較會不相等，一樣不碰。
+                var afterStage = AtkStage.Instance();
+                var afterManager = afterStage == null ? null : afterStage->RaptureAtkUnitManager;
+                var stillOpen = afterManager == null
+                    ? null
+                    : afterManager->GetAddonById((ushort)contextAddonId);
+                if (stillOpen != addon)
+                {
+                    // 走到這裡＝這扇窗已經不在 AllLoadedUnitsList 裡了（被 Finalize／釋放，
+                    // 或同一個 id 換成別的實例）。離線證不出來這會不會真的發生，所以刻意
+                    // 寫 Information：真的踩到時使用者的 log 就是證據（使用者跑 LogLevel 2，
+                    // Debug 收不到）。
+                    Log.Information(
+                        $"QuickLister: 已選取『{putUpForSaleText}』({i}) 給 {inventoryType}#{slot}；callback 說沒關窗，但選單已經不在載入清單裡（已釋放或換了實例），不再動它");
+                    return;
+                }
+
                 agent->AgentInterface.Hide();
-                addon->Close(true);
-                Log.Debug($"QuickLister: selected '{putUpForSaleText}' ({i}) for {inventoryType}#{slot}");
+                stillOpen->Close(true);
+                Log.Debug(
+                    $"QuickLister: 已選取『{putUpForSaleText}』({i}) 給 {inventoryType}#{slot}；選單由我們自己關掉");
                 return;
             }
 
