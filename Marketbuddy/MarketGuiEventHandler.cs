@@ -131,7 +131,10 @@ namespace Marketbuddy
                         //open history on opening the list
                         var history = ((AddonItemSearchResult*)addon)->History->AtkComponentBase.OwnerNode;
                         //Client::UI::AddonItemSearchResult.ReceiveEvent this=0x1CC2BF42BD0 evt=EventType.CHANGE               a3=23  a4=0x1CCD86C1460 a5=0x90EF96E598
-                        Commons.SendClick(addon, EventType.CHANGE, 23, history);
+                        // 切頁籤不會關掉視窗，所以是 Auxiliary（各自 key）；
+                        // 但那扇窗若已經被「回答」過（例如已經送出關閉），守衛一樣會擋下。
+                        if (AddonPressGuard.TryPress("ItemSearchResult", addon, PressKind.Auxiliary, 23))
+                            Commons.SendClick(addon, EventType.CHANGE, 23, history);
                     }
                     catch (Exception ex)
                     {
@@ -170,7 +173,9 @@ namespace Marketbuddy
                         //open compare prices list on opening sell price selection
                         var comparePrices = ((AddonRetainerSell*)addon)->ComparePrices->AtkComponentBase.OwnerNode;
                         // Client::UI::AddonRetainerSell.ReceiveEvent this=0x214C05CB480 evt=EventType.CHANGE               a3=4   a4=0x2146C18C210 (src=0x214C05CB480; tgt=0x214606863B0) a5=0xBB316FE6C8
-                        Commons.SendClick(addon, EventType.CHANGE, 4, comparePrices);
+                        // 開比價視窗不會關掉 RetainerSell，所以是 Auxiliary。
+                        if (AddonPressGuard.TryPress("RetainerSell", addon, PressKind.Auxiliary, 4))
+                            Commons.SendClick(addon, EventType.CHANGE, 4, comparePrices);
                     }
                     catch (Exception ex)
                     {
@@ -312,8 +317,11 @@ namespace Marketbuddy
 
             // click confirm on RetainerSell
             // Client::UI::AddonRetainerSell.ReceiveEvent this=0x214B4D360E0 evt=EventType.CHANGE               a3=21  a4=0x214B920D2E0 (src=0x214B4D360E0; tgt=0x21460686550) a5=0xBB316FE6C8
+            // 🔴 Confirm 送出之後視窗會留到伺服器回應才關 —— 那幾幀裡 GetUnitBase 仍然
+            //    回得到它。SetPrice 可以被第二次列項事件重入，重送 Confirm 就是原生 AVE。
             var addonRetainerSell = (AddonRetainerSell*)retainerSell;
-            Commons.SendClick(new IntPtr(addonRetainerSell), EventType.CHANGE, 21, addonRetainerSell->Confirm);
+            if (AddonPressGuard.TryPress("RetainerSell", (nint)retainerSell, PressKind.Terminal))
+                Commons.SendClick(new IntPtr(addonRetainerSell), EventType.CHANGE, 21, addonRetainerSell->Confirm);
         }
 
         /// <summary>
@@ -386,6 +394,11 @@ namespace Marketbuddy
             if (closeButtonComponent == null)
                 return;
 
+            // 守衛記的是 ItemSearchResult 這扇**視窗**（不是那個 window component）：
+            // 關閉事件送出後的幾幀它還在，重送就是對關閉中的視窗再按一次。
+            if (!AddonPressGuard.TryPress("ItemSearchResult", (nint)addon, PressKind.Terminal))
+                return;
+
             Commons.SendClick(new IntPtr(windowComponent), EventType.CHANGE, 2, closeButtonComponent->OwnerNode);
         }
 
@@ -436,10 +449,14 @@ namespace Marketbuddy
                 // The auto flow would have confirmed immediately; cancel the
                 // whole listing instead so the item stays where it was. Both
                 // closes are one-shot native calls, nothing waits on them.
+                // 這兩個 Close 也是「對可能正在關閉中的視窗做原生呼叫」，
+                // 而 SetPrice 可以被第二次列項事件重入 —— 一樣過守衛。
                 var addonItemSearchResult = Commons.GetUnitBase("ItemSearchResult");
-                if (addonItemSearchResult != null)
+                if (addonItemSearchResult != null &&
+                    AddonPressGuard.TryPress("ItemSearchResult", (nint)addonItemSearchResult, PressKind.Terminal))
                     addonItemSearchResult->Close(true);
-                retainerSell->Close(true);
+                if (AddonPressGuard.TryPress("RetainerSell", (nint)retainerSell, PressKind.Terminal))
+                    retainerSell->Close(true);
                 ChatGui.Print("[Marketbuddy] Listing cancelled, the item stays where it was".Loc());
             }
 
@@ -468,6 +485,10 @@ namespace Marketbuddy
             var priceComponentNumericInput = GetNumericInput(retainerSell, 15);
             var quantityComponentNumericInput = GetNumericInput(retainerSell, 11);
             if (priceComponentNumericInput == null)
+                return false;
+
+            // 守衛擋下就整個不做（不要填了價格才發現不能按，留下一個半完成的視窗）。
+            if (!AddonPressGuard.TryPress("RetainerSell", addonPtr, PressKind.Terminal))
                 return false;
 
             priceComponentNumericInput->SetValue(price);

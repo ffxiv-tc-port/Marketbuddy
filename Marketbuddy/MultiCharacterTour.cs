@@ -655,8 +655,11 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
         if (retainerList == null)
             return;
 
-        lastCloseAttempt = DateTime.UtcNow;
-        AddonHelpers.FireIntCallback(retainerList, -1);
+        // 這是一個刻意的重試迴圈（關不掉就每秒再試一次，最多 15 秒）。
+        // 守衛讓「同一扇窗」在它走完生命週期之前只按一次，逃生口之後才准補按；
+        // 被擋下時不推進牆鐘，下一幀就能重新評估。
+        if (AddonHelpers.FireIntCallback(retainerList, "RetainerList", -1))
+            lastCloseAttempt = DateTime.UtcNow;
     }
 
     /// <summary>一名角色處理完（不論結果）：記帳 → 歸還控制權 → 看看整輪是不是跑完了。</summary>

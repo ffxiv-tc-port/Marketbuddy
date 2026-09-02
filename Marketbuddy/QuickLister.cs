@@ -324,6 +324,21 @@ namespace Marketbuddy
                     continue;
                 }
 
+                // 守衛要在建立呼叫端狀態**之前**問，因為底下那發 callback 可能同步
+                // 開出 RetainerSell，待處理項必須先排好。CanPress 只問不記，
+                // 同一幀同一執行緒接著呼叫的 TryPress 一定得到相同答案。
+                var contextMenuName = AddonHelpers.ReadAddonName(addon);
+                if (contextMenuName.Length == 0)
+                    contextMenuName = "ContextMenu";
+                if (!AddonPressGuard.CanPress(contextMenuName, (nint)addon, PressKind.Terminal))
+                {
+                    // 上一次的選單還沒走完生命週期（位址還在）。這一輪就不做 ——
+                    // 刻意**不**排重試：使用者再按一次右鍵就是了。
+                    Log.Information(
+                        "QuickLister: 上一個右鍵選單還沒關乾淨，這一次的快速上架跳過（不對可能正在關閉的選單再按一次）");
+                    return;
+                }
+
                 var name = ResolveItemName(item, out var baseName);
                 pendingMenuSelects.Add(new PendingMenuSelect
                 {
@@ -336,7 +351,9 @@ namespace Marketbuddy
                 // list-then-reprice flow has drained (see UpdateSuppression).
                 AcquireSuppression();
 
-                AddonHelpers.FireContextMenuSelect(addon, i);
+                // Hide() 與 Close(true) 是同一次按下的收尾（我們自己關掉剛用完的選單），
+                // 不是第二次按下，所以刻意不再過一次守衛。
+                AddonHelpers.FireContextMenuSelect(addon, i, contextMenuName);
                 agent->AgentInterface.Hide();
                 addon->Close(true);
                 Log.Debug($"QuickLister: selected '{putUpForSaleText}' ({i}) for {inventoryType}#{slot}");

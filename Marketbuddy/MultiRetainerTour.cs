@@ -453,7 +453,11 @@ namespace Marketbuddy
             if (!ThrottleUiAction())
                 return TickTaskResult.Continue;
 
-            AddonHelpers.FireRetainerListSelect(retainerList, target.SortedIndex);
+            // 守衛擋下 ＝「這一輪沒按到，下一輪再來」，不能當成已經選好了：
+            // 回 Done 會直接跳到下一步，變成對著沒開的出售品視窗空等到看門狗。
+            if (!AddonHelpers.FireRetainerListSelect(retainerList, target.SortedIndex))
+                return TickTaskResult.Continue;
+
             return TickTaskResult.Done;
         }
 
@@ -541,7 +545,7 @@ namespace Marketbuddy
             {
                 var sellList = AddonHelpers.GetReadyAddon("RetainerSellList");
                 if (sellList != null && ThrottleUiAction())
-                    AddonHelpers.FireIntCallback(sellList, -1);
+                    AddonHelpers.FireIntCallback(sellList, "RetainerSellList", -1);
                 return TickTaskResult.Continue;
             }
 
@@ -549,7 +553,7 @@ namespace Marketbuddy
             if (selectString != null)
             {
                 if (ThrottleUiAction() && !AddonHelpers.TrySelectStringEntry(selectString, quitEntryText))
-                    AddonHelpers.FireIntCallback(selectString, -1);
+                    AddonHelpers.FireIntCallback(selectString, "SelectString", -1);
                 return TickTaskResult.Continue;
             }
 
@@ -567,8 +571,10 @@ namespace Marketbuddy
 
             if ((DateTime.UtcNow - lastTalkClick).TotalMilliseconds >= TalkThrottleMs)
             {
-                lastTalkClick = DateTime.UtcNow;
-                AddonHelpers.ClickTalk(talk);
+                // 守衛擋下時**不要**推進牆鐘：那會白白多等一個節流週期。
+                // 這兩層是「取較嚴的那個」，不會讓按下的次數比原本多。
+                if (AddonHelpers.ClickTalk(talk))
+                    lastTalkClick = DateTime.UtcNow;
             }
 
             return true;

@@ -61,6 +61,12 @@ namespace Marketbuddy
             {
                 DalamudInitialize(pluginInterface);
 
+                // 🔴 越早越好。這支會訂閱 Framework.Update 當自己的幀時鐘，而同一個外掛
+                //    內部的 Framework.Update 是單一多播委派包在同一個 try/catch 裡：
+                //    排在前面的處理常式擲例外，後面所有處理常式那個 tick 完全不會被呼叫。
+                //    時鐘停掉 ＝ 重按守衛的逃生口不會到期。
+                AddonPressGuard.Initialize();
+
                 // Must run before the UI is constructed or the command registered, as those
                 // resolve their .Loc() text once at construction time.
                 Localization.Init(pluginInterface.AssemblyLocation.DirectoryName);
@@ -179,6 +185,8 @@ namespace Marketbuddy
             // Last: must run after every engine released its reference so a
             // leftover suppression can never survive an unload.
             Safe(() => AutoRetainerBridge.Shutdown());
+            // 所有會按下去的模組都拆完之後才收掉重按守衛。
+            Safe(() => AddonPressGuard.Shutdown());
             // 收尾:任何經由 Commons.Hook() 註冊的 hook 都在這裡拆掉。
             Safe(() => Commons.Dispose());
         }
