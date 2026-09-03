@@ -159,6 +159,23 @@ namespace Marketbuddy
 
         public bool TataruPraiseOnRelistDone = true;
 
+        /// <summary>
+        /// 把高頻的 <c>[MBDIAG]</c> 診斷行從 <c>Debug</c> 提升到 <c>Information</c>。
+        ///
+        /// <para>
+        /// 預設 <b>false</b>：那些行是 2026-08-02 市場查價鑑識留下的探針，實機兩天量到
+        /// 3,990 行 <c>Information</c>（QUERY／GATE 佔絕大多數），常態下只是噪音。
+        /// 關著的時候它們仍然以 <c>Debug</c> 寫進 log（使用者的 LogLevel 只濾掉 Verbose），
+        /// 所以資訊沒有消失，只是不再混進 <c>[INF]</c> 軸。
+        /// </para>
+        ///
+        /// <para>
+        /// ⚠️ <c>REFUSED</c>／<c>TIMEOUT</c>／<c>MKTRESULT-ERR</c>／快取清除這些低頻、
+        /// 代表真的出事的行<b>不受這個開關影響</b>，一律維持原等級。
+        /// </para>
+        /// </summary>
+        public bool VerboseMarketDiagnostics = false;
+
         public int Version { get; set; } = 0;
 
         // the below exist just to make saving/loading less cumbersome

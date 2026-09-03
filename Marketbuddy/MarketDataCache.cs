@@ -232,7 +232,7 @@ namespace Marketbuddy
 
             foreach (var itemId in stale)
                 Cache.Remove(itemId);
-            Log.Information($"{Diag} CACHE-PRUNE dropped={stale.Count} remaining={Cache.Count}");
+            MarketDiag.Trace($"{Diag} CACHE-PRUNE dropped={stale.Count} remaining={Cache.Count}");
         }
 
         private static void OnOfferingsReceived(IMarketBoardCurrentOfferings offerings)

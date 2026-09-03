@@ -232,7 +232,7 @@ namespace Marketbuddy
                 var decrease = Math.Max(StepMs, (intervalMs - StartIntervalMs) / 2);
                 intervalMs = Math.Max(StartIntervalMs, intervalMs - decrease);
                 narrowCount++;
-                Log.Information(
+                MarketDiag.Trace(
                     $"{Diag} GATE narrowed {before} -> {intervalMs} ms " +
                     $"(floor {StartIntervalMs}, after {narrowAfter} requests, " +
                     $"{RefusalsInLast(RateWindowRequests)}/{recentFilled} refused in window; " +
@@ -247,7 +247,7 @@ namespace Marketbuddy
                 requestsSinceChange = 0;
                 var was = narrowAfter;
                 narrowAfter = Math.Max(BaseNarrowAfter, narrowAfter / 2);
-                Log.Information(
+                MarketDiag.Trace(
                     $"{Diag} GATE probe-penalty relaxed {was} -> {narrowAfter} requests " +
                     $"(floor {StartIntervalMs} held with a fully clean " +
                     $"{Math.Min(CleanWindowRequests, recentFilled)}-request window)");
@@ -275,7 +275,7 @@ namespace Marketbuddy
                 // 🔑 這才是常態路徑：實機兩輪乾淨的批次各只有 1 次孤立的拒絕（2/151）。
                 // 代價＝一個閘門週期；撴寬的代價＝之後每一件都多 StepMs，貴得多。
                 absorbedRefusals++;
-                Log.Information(
+                MarketDiag.Trace(
                     $"{Diag} GATE absorbed a refusal at send-gap {gap} ms " +
                     $"(isolated: {RefusalsInLast(ClusterWindow)}/{Math.Min(ClusterWindow, recentFilled)} recent, " +
                     $"{RefusalsInLast(RateWindowRequests)}/{recentFilled} in window; " +
@@ -285,7 +285,7 @@ namespace Marketbuddy
 
             if (intervalMs >= CapMs)
             {
-                Log.Information(
+                MarketDiag.Trace(
                     $"{Diag} GATE at cap {CapMs} ms, refusal at send-gap {gap} ms not actionable " +
                     $"(cluster={inCluster} overRate={overRate}; session {seenRefusals}/{seenRequests})");
                 return;
@@ -304,7 +304,7 @@ namespace Marketbuddy
             intervalMs = Math.Min(intervalMs + StepMs, CapMs);
             requestsSinceChange = 0;
             widenCount++;
-            Log.Information(
+            MarketDiag.Trace(
                 $"{Diag} GATE widened {before} -> {intervalMs} ms at send-gap {gap} ms " +
                 $"(cluster={inCluster} {RefusalsInLast(ClusterWindow)}/{ClusterWindow}, " +
                 $"overRate={overRate} {RefusalsInLast(RateWindowRequests)}/{recentFilled}; " +
@@ -337,7 +337,7 @@ namespace Marketbuddy
             var windowRefused = RefusalsInLast(RateWindowRequests);
             var windowRate = windowSeen == 0 ? 0.0 : (double)windowRefused / windowSeen;
 
-            Log.Information(
+            MarketDiag.Trace(
                 $"{Diag} GATE summary ({reason}): interval={intervalMs} ms (floor {StartIntervalMs}, cap {CapMs}), " +
                 $"effective={EffectiveMs(intervalMs, windowRate):F0} ms/slot at this operating point " +
                 $"(recent {windowRefused}/{windowSeen} = {100.0 * windowRate:F1}%), " +

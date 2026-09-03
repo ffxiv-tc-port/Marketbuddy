@@ -594,8 +594,8 @@ namespace Marketbuddy
             if (reason == lastBlockReason)
                 return;
             lastBlockReason = reason;
-            // Information：使用者的記錄等級只會濾掉 Verbose、Debug 收得到但單檔數十萬行會淹沒。
-            Log.Information($"[Marketbuddy] [MBDIAG] QUICKLIST-BLOCKED {reason}");
+            // 預設走 Debug（仍然進得了 log），把「詳細市場診斷」打開才升到 Information。
+            MarketDiag.Trace($"[Marketbuddy] [MBDIAG] QUICKLIST-BLOCKED {reason}");
         }
 
         /// <summary>上一次跑 <see cref="PumpRepriceQueue"/> 的時刻，用來算出要把軟期限往後推多久。</summary>

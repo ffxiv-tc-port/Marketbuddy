@@ -1341,7 +1341,7 @@ namespace Marketbuddy
             var totalMs = job.StartedAt == DateTime.MinValue
                 ? 0d
                 : (now - job.StartedAt).TotalMilliseconds;
-            Log.Information(
+            MarketDiag.Trace(
                 $"{Diag} QUERY item={job.ItemId} '{job.Name}' via={via} n={n} " +
                 $"attempts={job.Attempt} totalMs={totalMs:F0}");
         }
