@@ -775,7 +775,7 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
         catch (Exception e)
         {
             // 🔴 這一條是真正危險的失敗：AR 端的等待沒有時限。
-            // 寫成 Information 讓使用者回報得到（他跑 LogLevel 2）。
+            // 寫成 Information 讓使用者回報得到（他跑 LogLevel 1）。
             Log.Information($"[MultiCharacterTour] 🔴 歸還控制權失敗（{why}）：{e.Message}。AutoRetainer 可能停在等待狀態，請手動關掉它的多開模式。");
         }
     }

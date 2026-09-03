@@ -59,7 +59,7 @@ internal static class TataruPraiseIPC
                 return;
 
             var accepted = PluginInterface.GetIpcSubscriber<string, bool>(TagPraise).InvokeFunc(CategoryMarket);
-            // Information 級：這是「使用者說沒出聲」時唯一問得出真相的一行（使用者跑 LogLevel 2）。
+            // Information 級：這是「使用者說沒出聲」時唯一問得出真相的一行（使用者跑 LogLevel 1）。
             Log.Information($"[TataruPraise] {reason}：Praise(「{CategoryMarket}」) 回傳 {accepted}。");
         }
         catch (IpcNotReadyError)

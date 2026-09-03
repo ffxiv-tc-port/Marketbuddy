@@ -169,9 +169,9 @@ namespace Marketbuddy
         //   (b) the packet DOES arrive and one of the guards in
         //       OnOfferingsReceived drops it (RequestId collision, or an
         //       ItemId mismatch).
-        // These logs are Information level on purpose: the user's log level
-        // filters out DBG/VRB, and Dalamud's own marketboard packet tracing
-        // is Verbose, so it is invisible in their captures.
+        // These logs are Information level on purpose: the user's log level is 1, so DBG
+        // is captured but drowned by the 100k+ DBG lines a single log file holds, and
+        // Dalamud's own marketboard packet tracing is Verbose - which really is filtered out.
         // Grep tag: MBDIAG
         private const string Diag = "[MBDIAG]";
         private DateTime lastDataReceivedAt = DateTime.MinValue;
@@ -1330,7 +1330,7 @@ namespace Marketbuddy
         /// CACHE-STORE / HISTORY 各印一行，實機一輪累積約 16k 行 Information，
         /// 把使用者 log 裡別的東西擠掉。那些細節現在全部降到 Debug，需要時把
         /// LogLevel 調到 Debug 就整組回來，判讀邏輯完全沒變。
-        /// 這一行必須留在 Information：使用者跑 LogLevel 2，Debug/Verbose 收不到，
+        /// 這一行必須留在 Information：使用者跑 LogLevel 1，盲區只有 Verbose,Debug 收得到但單檔數十萬行會淹沒，
         /// 沒有它就完全看不見查價發生過。
         /// </summary>
         /// <param name="via">答案是怎麼來的：cache / offerings / empty(...)。</param>

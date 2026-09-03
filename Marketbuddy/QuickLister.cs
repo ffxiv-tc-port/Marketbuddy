@@ -409,8 +409,8 @@ namespace Marketbuddy
                 {
                     // 走到這裡＝這扇窗已經不在 AllLoadedUnitsList 裡了（被 Finalize／釋放，
                     // 或同一個 id 換成別的實例）。離線證不出來這會不會真的發生，所以刻意
-                    // 寫 Information：真的踩到時使用者的 log 就是證據（使用者跑 LogLevel 2，
-                    // Debug 收不到）。
+                    // 寫 Information：真的踩到時使用者的 log 就是證據（使用者跑 LogLevel 1，
+                    // Debug 收得到但單檔數十萬行會淹沒）。
                     Log.Information(
                         $"QuickLister: 已選取『{putUpForSaleText}』({i}) 給 {inventoryType}#{slot}；callback 說沒關窗，但選單已經不在載入清單裡（已釋放或換了實例），不再動它");
                     return;
@@ -594,7 +594,7 @@ namespace Marketbuddy
             if (reason == lastBlockReason)
                 return;
             lastBlockReason = reason;
-            // Information：使用者的記錄等級會濾掉 Debug/Verbose。
+            // Information：使用者的記錄等級只會濾掉 Verbose、Debug 收得到但單檔數十萬行會淹沒。
             Log.Information($"[Marketbuddy] [MBDIAG] QUICKLIST-BLOCKED {reason}");
         }
 

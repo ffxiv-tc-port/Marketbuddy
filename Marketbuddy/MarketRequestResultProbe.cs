@@ -89,7 +89,7 @@ namespace Marketbuddy
     internal sealed unsafe class MarketRequestResultProbe : IDisposable
     {
         // 與 BatchReprice / MarketRequestGate 一致的 grep 標籤。
-        // 這些 log 刻意用 Information 等級：使用者的記錄等級會濾掉 DBG/VRB。
+        // 這些 log 刻意用 Information 等級：使用者的記錄等級只會濾掉 VRB、DBG 收得到但單檔數十萬行會淹沒。
         // Grep tag: MBDIAG / MKTRESULT
         private const string Diag = "[MBDIAG]";
 
