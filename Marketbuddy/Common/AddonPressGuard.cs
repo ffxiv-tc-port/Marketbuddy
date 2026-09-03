@@ -187,6 +187,8 @@ namespace Marketbuddy.Common
 
             Presses[MakeKey(addonName, address, kind, param)] =
                 new Press(addonName, address, kind, frameCount);
+            // 跨外掛重按診斷：只在真的送出按壓時記一行，刻意不節流。
+            Log.Information($"[按窗診斷] plugin=Marketbuddy addon={addonName} addr=0x{address:X} key={kind}|{(kind == PressKind.Terminal ? 0 : param)}");
             return true;
         }
 
