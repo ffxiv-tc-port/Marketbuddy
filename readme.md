@@ -1,6 +1,6 @@
 # Marketbuddy
 
-Plugin for XivLauncher/Dalamud to help with your day-to-day market operations.
+協助處理日常市場佈告板操作的插件。指令 `/mbuddy` 開關設定視窗。
 
 > **台服（TC）分支說明**
 >
@@ -8,93 +8,18 @@ Plugin for XivLauncher/Dalamud to help with your day-to-day market operations.
 > （Dalamud API 13）維護的 fork，由 [ffxiv-tc-port](https://github.com/ffxiv-tc-port) 發佈。
 > 請**不要**改用上游的發佈清單安裝 —— 上游版本已進入 API 15，在台服客戶端載不起來。
 
-## How to get
+## 主要功能
 
-1. Dalamud 設定 -> 實驗性功能（Experimental）
-2. 在「自訂插件庫」加入 `https://raw.githubusercontent.com/ffxiv-tc-port/DalamudPluginsTC/main/repo.json` 並啟用
-3. 從插件列表安裝
+- **調整價格輔助**：點擊調整價格時自動開啟同商品目前掛賣清單與歷史成交；點清單項目即以低於它 1 gil（或依設定改百分比）出價並自動確認。
+- **快速鍵操作**：按住 CTRL 用剪貼簿的價格直接貼上並確認、按住 ALT 控制是否連動開啟歷史、按住 SHIFT 可抑制部分自動化。
+- **出售清單堆疊上限**：可在雇員出售清單介面自動調整最大堆疊數量。
+- **批次重新定價**：一鍵依市場最低價 undercut 目前雇員或全部雇員的商品，可設定只比較 HQ、可設定跳過稅後淨額低於 NPC 收購價的商品。
+- **批次下架**：依單價門檻批次下架，可選擇下架到雇員庫存或玩家背包。
+- **多角色出售巡迴**：搭配 AutoRetainer 的多角色模式接力執行重新定價／下架，一律使用者手動觸發。
+- **即時出售清單疊加層**：在遊戲原生的雇員出售清單旁顯示即時清單面板。
+- **快速上架熱鍵**：按住指定鍵右鍵道具即可直接上架出售。
+- **市場資料快取**：可設定重用近期查詢結果的秒數，避免重複詢問伺服器。
+- **TataruPraise 整合**：重新上架完成時請 TataruPraise 唸一句台詞。
+- **市場診斷**：可選擇把詳細診斷寫進 Information 等級 log，方便回報問題。
 
-## Commands
-
-* `/mbuddy` plugin config
-
-## Features
-
-Simplifies updating one price:
-* Click adjust price as per usual
-  * The window to change price, the list of current items on the market and history of sales for that item open at once
-  * Click one of the current items on the market
-  * You price will be set 1 gil below and you'll be back at your items list
-  * (the set price will be copied to clipboard)
-
-Simplifies updating more items with the same price:
-* Click adjust price, while holding CTRL
-  * The value from the clipboard will be used for that item
-
-Each feature can be configured in the plugin config.
-
-Holding SHIFT prevents some automation, but you're better off just disabling whatever you don't want in the config.
-
-## Changelog
-
-* 0.2.4.0
-  * update for api13 (thanks PhoenixtheII)
-  * persist option to open current prices list when holding SHIFT (thanks PhoenixtheII)
-* 0.2.3.4
-  * update for 7.2 (thanks Limiana)
-* 0.2.3.3
-  * version bump due to IPC changes in Dalamud (fixes unloading error)
-* 0.2.3.2
-  * update to api11 and 7.1 (thanks ChrisMellor and Limiana)
-* 0.2.3.1
-  * update to api10, .net8 and sigs for Dawntrail (thanks Limiana)
-* 0.2.3.0
-  * Add IPC to allow other plugins to request operation halting (by Limiana)
-  * update sigs for 6.5 (thanks Limiana)
-* 0.2.2.16
-  * update sigs for 6.4 (thanks Limiana)
-* 0.2.2.15
-  * allow percentage-based undercutting (thanks Limiana)
-* 0.2.2.14
-  * patch 6.3 fix, dalamud api8 and .net7
-  * potentially fix a crash when exiting the game (thanks Aireil)
-* 0.2.2.13
-  * patch 6.2 fix, dalamud api7 and .net6
-* 0.2.2.12
-  * fix: startup problem resolved
-* 0.2.2.11
-  * fix: handle clipboard exceptions
-* 0.2.2.10
-  * fix: limit max stack size to 9999 (up from 999)
-* 0.2.2.9
-  * fix: buying items will no longer show an error message
-* 0.2.2.8
-  * fix: also allow undercut to be 0
-* 0.2.2.7
-  * fix: prevent undercut from being set to less than 1
-  * new: adds undercut to the overlay
-  * fix: overlay no longer gets disabled when not limiting stack size
-  * fix: price set will always be between 1gil and 999999999gil
-* 0.2.2.6
-  * fixes a crash when quickposting items using CTRL
-* 0.2.2.5
-  * option: use SHIFT to open/not open the price history (previously only used to skip opening)
-* 0.2.2.4
-  * allow setting a custom undercut amount (thanks xPumaa)
-  * option: use ALT to open/not open the price history
-  * some other UI changes
-  * fix a bug that (with a certain configuration setup) would close the item window and leave the price list open
-* 0.2.2.3
-  * set api version 6 (no code changes)
-* 0.2.2.2
-  * set api version 5 (no code changes)
-* 0.2.2.1
-  * api4 branch removed
-    * use the json from the main branch (it's above) to get updates
-* 0.2.1.0
-  * `/mbuddy` shows/hides the config window
-  * `/mbuddyconf` removed
-  * New option to adjust stack size on the retainer sell list addon (because opening the config everytime is annoying)
-* 0.2.0.0
-  * API4 support
-  * Add option to limit the stack size when posting new items
+原作者：[PunishXIV](https://github.com/PunishXIV/Marketbuddy)
