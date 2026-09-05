@@ -739,6 +739,17 @@ namespace Marketbuddy
             }
         }
 
+        /// <summary>
+        /// 設定視窗。2026-09-06 由「一整條垂直清單 ＋ 分隔線」改成**分頁**：原本三百多行
+        /// 設定串在同一個 AlwaysAutoResize ＋ NoScrollbar 的視窗裡，長過螢幕就沒有捲軸
+        /// 可以救，找一項設定也只能從頭掃到尾。
+        ///
+        /// ⚠️ **純版面重組，行為零變更**：控制項、它們讀寫的設定欄位、預設值、範圍、
+        /// 顯示條件與存檔時機全部原封不動，只是換了容器。
+        ///
+        /// 🔴 IPC 鎖的告示刻意留在**分頁列之外的最上面**：那是「整個外掛已經停擺」的狀態，
+        /// 藏進任何一個分頁都等於要使用者先猜對分頁才知道自己被鎖住了。
+        /// </summary>
         public void DrawSettingsWindow()
         {
             if (!SettingsVisible) return;
@@ -751,20 +762,78 @@ namespace Marketbuddy
                 return;
             }
 
-            if(IPCManager.Locks.Count > 0)
+            DrawIpcLockNotice();
+
+            // 🔑 視窗是 AlwaysAutoResize，而每個分頁的內容寬度天生不一樣——沒有一個共同的
+            // 寬度下限，每切一次分頁整個視窗就跳一次大小。這只是視覺上的錨，不碰任何設定。
+            ImGui.Dummy(new Vector2(SettingsContentWidth, 0f));
+
+            if (ImGui.BeginTabBar("##mbsettingstabs"))
             {
-                ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudRed);
-                ImGui.TextWrapped(
-                    "Lock commands has been received from these plugins and Marketbuddy operation is fully halted:"
-                        .Loc());
-                ImGui.TextUnformatted($"{string.Join("\n", IPCManager.Locks)}");
-                if(ImGui.Button("Release locks".Loc()))
+                if (ImGui.BeginTabItem("Prices".Loc() + "##mbtabprices"))
                 {
-                    IPCManager.Locks.Clear();
+                    DrawPriceSettingsTab();
+                    ImGui.EndTabItem();
                 }
-                ImGui.PopStyleColor();
+
+                if (ImGui.BeginTabItem("Relisting".Loc() + "##mbtabrelist"))
+                {
+                    DrawRelistSettingsTab();
+                    ImGui.EndTabItem();
+                }
+
+                if (ImGui.BeginTabItem("Delisting".Loc() + "##mbtabdelist"))
+                {
+                    DrawDelistSettingsTab();
+                    ImGui.EndTabItem();
+                }
+
+                if (ImGui.BeginTabItem("Panels & diagnostics".Loc() + "##mbtabpanels"))
+                {
+                    DrawPanelSettingsTab();
+                    ImGui.EndTabItem();
+                }
+
+                ImGui.EndTabBar();
             }
 
+            ImGui.End();
+        }
+
+        /// <summary>
+        /// 分頁內容的共同寬度**下限**。視窗是 AlwaysAutoResize，沒有下限的話每切一次分頁
+        /// 視窗就跳一次大小。內容比它寬時視窗照樣會自己長大，所以這是下限不是上限。
+        /// </summary>
+        private const float SettingsContentWidth = 620f;
+
+        /// <summary>
+        /// 別的外掛透過 IPC 送來的停止鎖。
+        /// 🔴 畫在分頁列**上面**：這是「整個外掛已經停擺」的狀態，不能藏進某一個分頁。
+        /// </summary>
+        private void DrawIpcLockNotice()
+        {
+            if (IPCManager.Locks.Count == 0)
+                return;
+
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudRed);
+            ImGui.TextWrapped(
+                "Lock commands has been received from these plugins and Marketbuddy operation is fully halted:"
+                    .Loc());
+            ImGui.TextUnformatted($"{string.Join("\n", IPCManager.Locks)}");
+            if (ImGui.Button("Release locks".Loc()))
+            {
+                IPCManager.Locks.Clear();
+            }
+
+            ImGui.PopStyleColor();
+        }
+
+        /// <summary>
+        /// 「比價」分頁：市場比價視窗那一套互動——查詢卡住時自動重試、自動開窗、
+        /// 修飾鍵、點一個價格要做什麼，以及那些動作共用的降價幅度。
+        /// </summary>
+        private void DrawPriceSettingsTab()
+        {
             if (ImGui.Checkbox("Auto-retry a market search that looks throttled/stuck".Loc(), ref conf.AutoRequeryOnThrottle))
                 conf.Save();
 
@@ -851,7 +920,18 @@ namespace Marketbuddy
             }
 
             if (!conf.AutoInputNewPrice) PopStyleDisabled();
+        }
 
+        /// <summary>
+        /// 「重掛」分頁：上架與重掛——堆疊上限、快速上架按鍵、一鍵重掛按鈕與它的定價
+        /// 守衛（HQ 比價、NPC 收購價、最低價）、比價資料快取，最後是完成通知與多角色。
+        ///
+        /// 🔴 多角色重掛刻意留在**這個分頁的最後面**、位置與順序都不往上搬：
+        /// 它是唯一一條由 AutoRetainer 事件接手的鏈，把開關搬到顯眼的地方
+        /// 只會讓它更容易被誤開。
+        /// </summary>
+        private void DrawRelistSettingsTab()
+        {
             ImGui.Spacing();
             if (ImGui.Checkbox("Limit stack size to".Loc(), ref conf.UseMaxStackSize))
                 conf.Save();
@@ -865,6 +945,31 @@ namespace Marketbuddy
             if (ImGui.Checkbox("Adjust maximum stack size in retainer sell list UI".Loc(),
                     ref conf.AdjustMaxStackSizeInSellList))
                 conf.Save();
+
+            ImGui.Spacing();
+            ImGui.TextUnformatted("Quick listing: hold this key and right-click an item to put it up for sale".Loc());
+            DrawNestIndicator(1);
+            ImGui.SetNextItemWidth(100);
+            if (ImGui.BeginCombo("##mbquicklistkey", QuickListKeyLabel(conf.QuickListKeyCode)))
+            {
+                foreach (var code in QuickLister.SelectableKeyCodes)
+                {
+                    if (ImGui.Selectable(QuickListKeyLabel(code), conf.QuickListKeyCode == code))
+                    {
+                        conf.QuickListKeyCode = code;
+                        conf.Save();
+                    }
+                }
+
+                ImGui.EndCombo();
+            }
+
+            DrawNestIndicator(1);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "Pick a key that is not used elsewhere: CTRL already pastes the clipboard price when the sale window opens, and avoid AutoRetainer's own quick-sale key if you have one bound."
+                    .Loc());
+            ImGui.PopStyleColor();
 
             ImGui.Spacing();
             if (ImGui.Checkbox("Show a one-click relist button in the retainer sell list".Loc(),
@@ -939,11 +1044,17 @@ namespace Marketbuddy
             ImGui.PopStyleColor();
 
             DrawMultiCharacterSettings();
+        }
 
-            // 🔴 這一項刻意畫在**最外層**、不掛在重掛那一組底下。
-            // 它管的範圍比「批次重掛」大：改價流程裡的自動下架**以及**兩顆手動下架按鈕
-            // （出售品視窗的「本僱員全下架」、僱員選單的「全僱員下架」）通通聽它。
-            // 縮排在重掛底下會讓人以為關掉重掛就與它無關，但按鈕照樣會照它走。
+        /// <summary>
+        /// 「下架」分頁：下架收回到哪裡，以及兩個「不要全部下架」的篩選。
+        /// </summary>
+        private void DrawDelistSettingsTab()
+        {
+            // 🔴 「下架收回至」管的範圍比「批次重掛」大：改價流程裡的自動下架**以及**
+            // 兩顆手動下架按鈕（出售品視窗的「本僱員全下架」、僱員選單的「全僱員下架」）
+            // 通通聽它。所以它跟兩個下架篩選同屬這一個分頁、同一個最外層縮排——
+            // 三項一起構成「按下下架按鈕會發生什麼事」。
             ImGui.Spacing();
             ImGui.TextUnformatted("Delist destination".Loc());
             ImGui.SameLine();
@@ -974,7 +1085,13 @@ namespace Marketbuddy
             ImGui.PopStyleColor();
 
             DrawDelistFilterSettings();
+        }
 
+        /// <summary>
+        /// 「面板與診斷」分頁：即時掛單面板、兩塊側邊面板的位置，以及診斷記錄的等級。
+        /// </summary>
+        private void DrawPanelSettingsTab()
+        {
             ImGui.Spacing();
             if (ImGui.Checkbox("Show a live sell list next to the game's one".Loc(), ref conf.LiveSellListOverlay))
                 conf.Save();
@@ -992,6 +1109,7 @@ namespace Marketbuddy
             if (conf.LiveSellListOverlay || conf.AdjustMaxStackSizeInSellList || conf.BatchRepriceEnabled)
             {
                 ImGui.Spacing();
+                ImGui.SetNextItemWidth(200);
                 ImGui.DragFloat2("Side panel position (relative to the sell list's top right)".Loc(),
                     ref conf.LiveSellListOffset, 1f, -4000f, 4000f, "%.0f");
                 if (ImGui.IsItemDeactivatedAfterEdit())
@@ -1008,36 +1126,12 @@ namespace Marketbuddy
             if (conf.BatchRepriceEnabled)
             {
                 ImGui.Spacing();
+                ImGui.SetNextItemWidth(200);
                 ImGui.DragFloat2("All-retainers panel position (relative to the retainer list's top right)".Loc(),
                     ref conf.RetainerPanelOffset, 1f, -4000f, 4000f, "%.0f");
                 if (ImGui.IsItemDeactivatedAfterEdit())
                     conf.Save();
             }
-
-            ImGui.Spacing();
-            ImGui.TextUnformatted("Quick listing: hold this key and right-click an item to put it up for sale".Loc());
-            DrawNestIndicator(1);
-            ImGui.SetNextItemWidth(100);
-            if (ImGui.BeginCombo("##mbquicklistkey", QuickListKeyLabel(conf.QuickListKeyCode)))
-            {
-                foreach (var code in QuickLister.SelectableKeyCodes)
-                {
-                    if (ImGui.Selectable(QuickListKeyLabel(code), conf.QuickListKeyCode == code))
-                    {
-                        conf.QuickListKeyCode = code;
-                        conf.Save();
-                    }
-                }
-
-                ImGui.EndCombo();
-            }
-
-            DrawNestIndicator(1);
-            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
-            ImGui.TextWrapped(
-                "Pick a key that is not used elsewhere: CTRL already pastes the clipboard price when the sale window opens, and avoid AutoRetainer's own quick-sale key if you have one bound."
-                    .Loc());
-            ImGui.PopStyleColor();
 
             ImGui.Spacing();
             if (ImGui.Checkbox("Write the detailed market diagnostics at Information level".Loc(),
@@ -1050,8 +1144,6 @@ namespace Marketbuddy
                 "Off by default. The per-item query lines and the request-gate trace are always written to the log either way - this only decides whether they show up at Information level or stay at Debug. Turn it on when someone asks you for a market-board log; leaving it on just makes the log noisier. Refusals, timeouts and market errors are reported regardless of this setting."
                     .Loc());
             ImGui.PopStyleColor();
-
-            ImGui.End();
         }
 
         /// <summary>
