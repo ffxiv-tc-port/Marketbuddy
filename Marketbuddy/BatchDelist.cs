@@ -30,6 +30,13 @@ namespace Marketbuddy
         int SkippedCount { get; }
         int DelistedCount { get; }
         int FailedCount { get; }
+
+        /// <summary>
+        /// 查不到比價資料、刻意留在上限價等人工定價的格數。
+        /// 這不是失敗（見 <see cref="BatchReprice.NeedsPricingCount"/>），下架引擎永遠是 0。
+        /// </summary>
+        int NeedsPricingCount { get; }
+
         string CurrentItemName { get; }
 
         /// <summary>
@@ -242,6 +249,10 @@ namespace Marketbuddy
         public int SkippedCount { get; private set; }
         public int DelistedCount { get; private set; }
         public int FailedCount { get; private set; }
+
+        /// <summary>下架不會定價，永遠是 0；只為了滿足巡迴共用的統計介面。</summary>
+        public int NeedsPricingCount => 0;
+
         public string CurrentItemName { get; private set; } = string.Empty;
 
         public event Action<string>? BatchAborted;

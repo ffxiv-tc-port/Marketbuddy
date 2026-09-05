@@ -98,7 +98,7 @@ namespace Marketbuddy
         private int freeBagSlotsAtStart;
 
         // Aggregated stats for the final summary.
-        private int totalRepriced, totalSkipped, totalDelisted, totalFailed, retainersDone;
+        private int totalRepriced, totalSkipped, totalDelisted, totalFailed, totalNeedsPricing, retainersDone;
 
         public bool IsRunning => queue.IsRunning;
 
@@ -241,7 +241,7 @@ namespace Marketbuddy
             TotalRetainers = targets.Count;
             CurrentRetainerNumber = 0;
             CurrentRetainerName = string.Empty;
-            totalRepriced = totalSkipped = totalDelisted = totalFailed = retainersDone = 0;
+            totalRepriced = totalSkipped = totalDelisted = totalFailed = totalNeedsPricing = retainersDone = 0;
             aborting = false;
             tourStoppedForSpace = false;
 
@@ -517,6 +517,7 @@ namespace Marketbuddy
             totalSkipped += engine.SkippedCount;
             totalDelisted += engine.DelistedCount;
             totalFailed += engine.FailedCount;
+            totalNeedsPricing += engine.NeedsPricingCount;
 
             if (engineBatchAborted)
             {
@@ -712,6 +713,13 @@ namespace Marketbuddy
             {
                 ChatGui.Print("[Marketbuddy] All retainers done: ?? visited, ?? repriced, ?? skipped, ?? delisted, ?? failed"
                     .Loc(retainersDone, totalRepriced, totalSkipped, totalDelisted, totalFailed));
+
+                // 整趟裡查不到比價資料、刻意留在上限價的件數。不是失敗，但要人工介入，
+                // 所以跟「失敗」分開講；是 0 的時候整行不出現。
+                if (totalNeedsPricing > 0)
+                    ChatGui.PrintError(
+                        "[Marketbuddy] ?? item(s) have no market data and are still listed at the price cap - price them by hand."
+                            .Loc(totalNeedsPricing));
 
                 // 純通知，零行為：整輪重掛跑完才響這一聲（途中每個僱員各自的批次收尾被
                 // BatchReprice.ExternalDriverActive 擋掉了）。下架巡迴不響——那不是「重掛跑完」。

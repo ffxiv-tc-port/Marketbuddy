@@ -238,6 +238,15 @@ namespace Marketbuddy
         public int SkippedCount { get; private set; }
         public int DelistedCount { get; private set; }
         public int FailedCount { get; private set; }
+
+        /// <summary>
+        /// 查不到比價資料、因此**刻意**留在上限價等使用者手動定價的格數。
+        /// 🔑 這不是失敗：沒有參考價的時候不亂猜一個價掛出去，正是它該做的事。
+        /// 但它需要人工介入，所以獨立成一個數字，不跟 <see cref="FailedCount"/> 混在一起
+        /// ——算成「失敗」會讓使用者去找一個根本不存在的故障。
+        /// </summary>
+        public int NeedsPricingCount { get; private set; }
+
         public string CurrentItemName { get; private set; } = string.Empty;
 
         /// <summary>
@@ -503,6 +512,7 @@ namespace Marketbuddy
             SkippedCount = 0;
             DelistedCount = 0;
             FailedCount = 0;
+            NeedsPricingCount = 0;
             CurrentItemName = string.Empty;
             CurrentSlot = -1;
             CurrentBatchRetainerId = ActiveRetainerId();
@@ -906,10 +916,17 @@ namespace Marketbuddy
 
         /// <summary>
         /// No market listings for this item. Normal batch slots just keep their
-        /// price; quick-listed slots are parked at the price cap and must never
-        /// be left there silently - fall back to the user's minimum price when
-        /// one is configured, otherwise warn loudly and count as failed.
+        /// price; quick-listed slots are parked at the price cap and are left
+        /// there on purpose - with no reference price, any number we made up
+        /// would be a guess. Warn loudly and count the slot as needing a price
+        /// by hand.
         /// </summary>
+        /// <remarks>
+        /// 🔴 這裡以前會在使用者設了「最低價」時直接照那個最低價掛出去，那是**賤賣**：
+        /// 板上沒人賣的東西往往正是稀有的。最低價欄位的語意是「算出來的價低於它就別掛了」
+        /// （見 <see cref="FinishPricing"/> 的下架守衛），不是「查不到價就拿它當價格」。
+        /// 現在一律維持在上限價等人工定價——那也是使用者明確要的行為。
+        /// </remarks>
         private void HandleNoListings(SlotJob job, string cacheTag)
         {
             if (!job.QuickListed)
@@ -921,15 +938,8 @@ namespace Marketbuddy
                 return;
             }
 
-            if (conf.BatchMinPrice > 0)
-            {
-                ChatGui.Print("[Marketbuddy] ??: no one is selling this item, using your minimum price ?? gil".Loc(job.Name, conf.BatchMinPrice) + cacheTag);
-                FinishPricing(job, (uint)conf.BatchMinPrice, cacheTag, null);
-                return;
-            }
-
             ProcessedSlots++;
-            FailedCount++;
+            NeedsPricingCount++;
             Log.Warning($"BatchReprice: quick-listed slot {job.Slot} ({job.Name}) has no market data; still listed at the price cap");
             ChatGui.PrintError("[Marketbuddy] ??: no market data - still listed at the price cap (??), set a price manually!".Loc(job.Name, Configuration.MAX_PRICE));
         }
@@ -1226,6 +1236,14 @@ namespace Marketbuddy
             ResetRequestState();
             ChatGui.Print("[Marketbuddy] Relist finished: ?? repriced, ?? skipped, ?? delisted, ?? failed"
                 .Loc(RepricedCount, SkippedCount, DelistedCount, FailedCount));
+
+            // 查不到比價資料、刻意留在上限價的那幾件：它們不是失敗，但**一定**要人工介入，
+            // 所以獨立講一行；件數是 0 時整行不出現。
+            if (NeedsPricingCount > 0)
+                ChatGui.PrintError(
+                    "[Marketbuddy] ?? item(s) have no market data and are still listed at the price cap - price them by hand."
+                        .Loc(NeedsPricingCount));
+
             HintAboutStaleSellList();
 
             // 純通知，零行為：請「塔塔露誇獎」念一句「重掛跑完了」。
