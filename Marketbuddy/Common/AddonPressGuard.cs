@@ -188,7 +188,14 @@ namespace Marketbuddy.Common
             Presses[MakeKey(addonName, address, kind, param)] =
                 new Press(addonName, address, kind, frameCount);
             // 跨外掛重按診斷：只在真的送出按壓時記一行，刻意不節流。
-            Log.Information($"[按窗診斷] plugin=Marketbuddy addon={addonName} addr=0x{address:X} key={kind}|{(kind == PressKind.Terminal ? 0 : param)}");
+            // 🔴 這一行的格式逐字固定（艦隊裡多份各自獨立的 AddonPressGuard 共用同一個形狀），
+            //    改格式就無法交叉比對，不要「順手改得好看一點」。
+            // 📌 2026-09-07 由 Information 降為 Debug：它要回答的問題已經有答案了 —— 跨外掛重按
+            //    是真的在發生（2026-09-06 02:20:20 實機：本外掛與 YesAlready 相隔 6ms 按下同一個
+            //    Talk 實例 0x1CA56AE0660）。使用者的 LogLevel 是 1，盲區只有 Verbose，Debug 照樣
+            //    收得到；而這一行每次按壓都寫，單場數千行留在 Information 會把真正需要使用者
+            //    回報的訊號淹沒。要再查跨外掛重按時，這條探針原地還在。
+            Log.Debug($"[按窗診斷] plugin=Marketbuddy addon={addonName} addr=0x{address:X} key={kind}|{(kind == PressKind.Terminal ? 0 : param)}");
             return true;
         }
 

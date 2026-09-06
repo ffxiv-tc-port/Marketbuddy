@@ -191,6 +191,20 @@ namespace Marketbuddy.Common
         /// </summary>
         public static bool ClickTalk(AtkUnitBase* talk)
         {
+            // 🔴🔴 送出前的就地就緒檢查（與 FireContextMenuSelect 的那一道同形狀，理由見該處長註解）。
+            //    ⚠️ 它**擋不住**「別的外掛剛按過、這扇窗正在關閉中」—— IsAddonReady 的三關
+            //    （非 null／IsVisible／LoadedState == Loaded）在拆除途中是全過的。
+            //    這一道的作用是讓本函式**自己**完整：呼叫端有沒有先驗過就緒，不再是本函式
+            //    能不能安全把指標交給原生 ReceiveEvent 的前提。
+            //    📌 目前唯一的呼叫端（MultiRetainerTour.TryAdvanceTalk）在同一幀、同一條同步
+            //    路徑上已經用 GetReadyAddon 驗過，中間沒有原生碼執行 ⇒ 這一道對它恆真；
+            //    它擋的是未來的呼叫端。回 false 的語意同「守衛擋下」＝這一輪沒送。
+            if (!IsAddonReady(talk))
+            {
+                Log.Debug("AddonHelpers: Talk 這一幀還沒就緒（可見／載入完成有一項不成立），不送翻頁");
+                return false;
+            }
+
             // 🔴 AtkStage.Instance() 是 [StaticAddress(..., isPointer: true)]：產生器讀「指標的位址」
             //    再解參考一層，遊戲尚未建立該單例時回 null（非 isPointer 的才保證不回 null）。
             //    `&stage->AtkEventTarget` 在 null 上算出來的是 0（AtkEventTarget 在 +0x0），
