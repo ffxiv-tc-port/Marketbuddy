@@ -812,17 +812,19 @@ namespace Marketbuddy
         /// </summary>
         private void DrawIpcLockNotice()
         {
-            if (IPCManager.Locks.Count == 0)
+            // 🔴 先拍快照再判空：直接讀 Count 之後又列舉集合，中間可能被 IPC 執行緒插入。
+            var locks = IPCManager.SnapshotLocks();
+            if (locks.Length == 0)
                 return;
 
             ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudRed);
             ImGui.TextWrapped(
                 "Lock commands has been received from these plugins and Marketbuddy operation is fully halted:"
                     .Loc());
-            ImGui.TextUnformatted($"{string.Join("\n", IPCManager.Locks)}");
+            ImGui.TextUnformatted($"{string.Join("\n", locks)}");
             if (ImGui.Button("Release locks".Loc()))
             {
-                IPCManager.Locks.Clear();
+                IPCManager.ClearLocks();
             }
 
             ImGui.PopStyleColor();

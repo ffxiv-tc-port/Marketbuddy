@@ -10,14 +10,107 @@ namespace Marketbuddy
 {
     internal static class IPCManager
     {
-        internal static HashSet<string> Locks = new();
-        internal static bool IsLocked => Locks.Count > 0;
-        
+        /// <summary>
+        /// 別的外掛透過 IPC 掛上來的停止鎖（鍵＝對方自己報的名字）。
+        /// 🔴 <b>三種執行緒會碰這個集合</b>：<c>Marketbuddy.Lock</c>／<c>Marketbuddy.Unlock</c>
+        /// 端點跑在<b>呼叫端外掛的執行緒</b>上、<see cref="IsLocked"/> 每幀在 framework
+        /// 執行緒被好幾個模組讀、設定視窗在繪製執行緒列出內容並可能整批清掉。
+        /// 裸 <c>HashSet</c> 的失敗形式不是「讀到舊值」，而是<b>集合本身壞掉</b>
+        /// （或列舉到一半擲 <c>InvalidOperationException</c>）。
+        /// ⇒ 一律走本類別的包裝方法，不要把集合本身或它的方法群組交出去。
+        /// </summary>
+        private static readonly HashSet<string> Locks = new();
+
+        /// <summary>
+        /// <see cref="Locks"/> 的鎖。🔴 鎖內只碰集合：不寫 log、不畫 ImGui、不做檔案 I/O、
+        /// 不呼叫任何別的外掛。
+        /// </summary>
+        private static readonly object LocksGate = new();
+
+        /// <summary>
+        /// <c>Locks.Count</c> 的鏡像，只在持有 <see cref="LocksGate"/> 時寫入。
+        /// <see cref="IsLocked"/> 每幀被讀很多次，走這個 volatile 讀就完全不必進鎖，
+        /// 成本與原本的 <c>Locks.Count</c> 相同。
+        /// </summary>
+        private static volatile int lockCount;
+
+        internal static bool IsLocked => lockCount > 0;
+
+        /// <summary>設定視窗用：目前掛著幾把鎖。</summary>
+        internal static int LockCount => lockCount;
+
+        /// <summary>
+        /// 設定視窗用：把鎖的名字拍成快照再交出去。
+        /// 🔴 直接列舉集合會與 IPC 執行緒的插入並行 ⇒ 擲例外或讀到壞掉的內容。
+        /// </summary>
+        internal static string[] SnapshotLocks()
+        {
+            lock (LocksGate)
+            {
+                return Locks.ToArray();
+            }
+        }
+
+        /// <summary>設定視窗「解除鎖定」按鈕用：把所有鎖清掉。</summary>
+        internal static void ClearLocks()
+        {
+            lock (LocksGate)
+            {
+                Locks.Clear();
+                lockCount = 0;
+            }
+        }
+
+        /// <summary>
+        /// <c>Marketbuddy.Lock</c> 端點的實作。回傳值與原本直接綁 <c>HashSet.Add</c> 逐字相同：
+        /// 新掛上的回 <c>true</c>、同名鎖已經在了回 <c>false</c>（<c>null</c> 也照 HashSet 的原樣收）。
+        /// </summary>
+        private static bool AddLock(string name)
+        {
+            lock (LocksGate)
+            {
+                var added = Locks.Add(name);
+                lockCount = Locks.Count;
+                return added;
+            }
+        }
+
+        /// <summary>
+        /// <c>Marketbuddy.Unlock</c> 端點的實作。回傳值與原本直接綁 <c>HashSet.Remove</c> 逐字相同：
+        /// 真的移掉了才回 <c>true</c>。
+        /// </summary>
+        private static bool RemoveLock(string name)
+        {
+            lock (LocksGate)
+            {
+                var removed = Locks.Remove(name);
+                lockCount = Locks.Count;
+                return removed;
+            }
+        }
+
+        /// <summary>
+        /// <c>Marketbuddy.IsLocked</c> 端點的實作。參數 <c>null</c> 問的是「有沒有任何鎖」，
+        /// 否則問的是「這個名字有沒有掛鎖」——與原本的 lambda 逐字相同。
+        /// </summary>
+        private static bool QueryLocked(string name)
+        {
+            if (name == null)
+                return IsLocked;
+
+            lock (LocksGate)
+            {
+                return Locks.Contains(name);
+            }
+        }
+
         internal static void Init()
         {
-            Svc.PluginInterface.GetIpcProvider<string, bool>("Marketbuddy.Lock").RegisterFunc(Locks.Add);
-            Svc.PluginInterface.GetIpcProvider<string, bool>("Marketbuddy.Unlock").RegisterFunc(Locks.Remove);
-            Svc.PluginInterface.GetIpcProvider<string, bool>("Marketbuddy.IsLocked").RegisterFunc((str) => str == null?IsLocked:Locks.Contains(str));
+            // 🔴 這裡綁的必須是包裝方法。綁 Locks.Add／Locks.Remove 這種方法群組
+            //    等於把裸集合的寫入直接暴露在呼叫端外掛的執行緒上。
+            Svc.PluginInterface.GetIpcProvider<string, bool>("Marketbuddy.Lock").RegisterFunc(AddLock);
+            Svc.PluginInterface.GetIpcProvider<string, bool>("Marketbuddy.Unlock").RegisterFunc(RemoveLock);
+            Svc.PluginInterface.GetIpcProvider<string, bool>("Marketbuddy.IsLocked").RegisterFunc(QueryLocked);
         }
 
         internal static void Shutdown()
