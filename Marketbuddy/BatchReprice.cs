@@ -949,6 +949,11 @@ namespace Marketbuddy
             NeedsPricingCount++;
             Log.Warning($"BatchReprice: quick-listed slot {job.Slot} ({job.Name}) has no market data; still listed at the price cap");
             ChatGui.PrintError("[Marketbuddy] ??: no market data - still listed at the price cap (??), set a price manually!".Loc(job.Name, Configuration.MAX_PRICE));
+
+            // 🔴 聊天訊息會被洗掉，NeedsPricingCount 每一批就歸零 —— 沒有這一行，這一格
+            //    就只存在於聊天記錄裡，之後再也找不回來（實機兩天 107 次、70 件全是這樣消失的）。
+            //    這裡**只記錄**，不改任何價格。
+            RecordNeedsPricing(job);
         }
 
         /// <summary>Slot re-validation, delist thresholds, then the actual price update.</summary>
@@ -987,12 +992,16 @@ namespace Marketbuddy
             var current = inventoryManager->GetRetainerMarketPrice(job.Slot);
             if (current == newPrice)
             {
+                // 已經在該有的價格上 ＝ 這一格沒事了，同樣要從待處理清單上消失。
+                PendingActions.ClearSlot(CurrentBatchRetainerId, job.Slot);
                 Skip(job, "[Marketbuddy] ??: already at ?? gil".Loc(job.Name, newPrice) + cacheTag);
                 return;
             }
 
             inventoryManager->SetRetainerMarketPrice(job.Slot, newPrice);
             NoteChange(job.Slot, (uint)current, newPrice);
+            // 這一格處理完了，從「待處理」清單上消失。
+            PendingActions.ClearSlot(CurrentBatchRetainerId, job.Slot);
             ProcessedSlots++;
             RepricedCount++;
             ChatGui.Print(successMessage ?? "[Marketbuddy] ??: ?? → ?? gil".Loc(job.Name, current, newPrice) + cacheTag);
@@ -1162,6 +1171,7 @@ namespace Marketbuddy
             }
 
             ForgetChange(job.Slot);
+            PendingActions.ClearSlot(CurrentBatchRetainerId, job.Slot);
             ProcessedSlots++;
             DelistedCount++;
             ChatGui.Print(chatMessage + destinationTag);
@@ -1308,6 +1318,43 @@ namespace Marketbuddy
         {
             if (ActiveRetainerId() == recentChangesRetainerId)
                 recentChanges.Remove(slot);
+        }
+
+        /// <summary>
+        /// 把這一格記進「待處理」清單的「掛在上限價」桶。
+        /// 🔴 只記錄，不改任何價格；建議價留空（-1＝不知道），之後由待處理清單自己重算。
+        /// </summary>
+        private void RecordNeedsPricing(SlotJob job)
+        {
+            var inventoryManager = InventoryManager.Instance();
+            var current = inventoryManager == null
+                ? -1L
+                : (long)inventoryManager->GetRetainerMarketPrice(job.Slot);
+
+            PendingActions.Upsert(new PendingActionRow(
+                DateTime.UtcNow, PendingActionKind.PriceCap, job.ItemId, job.IsHq,
+                CurrentBatchRetainerId, RetainerNameOf(CurrentBatchRetainerId), job.Slot,
+                current, -1, string.Empty, string.Empty, DateTime.MinValue, false));
+        }
+
+        /// <summary>
+        /// 某一位僱員的名字（只給人看，任何比對一律用 <c>RetainerId</c>）。
+        /// ⚠️ 只查得到<b>目前角色</b>的僱員；別的角色的僱員回空字串（＝「不知道」）。
+        /// </summary>
+        public static string RetainerNameOf(ulong retainerId)
+        {
+            if (retainerId == 0)
+                return string.Empty;
+            var retainerManager = RetainerManager.Instance();
+            if (retainerManager == null)
+                return string.Empty;
+            foreach (var retainer in retainerManager->Retainers)
+            {
+                if (retainer.RetainerId == retainerId)
+                    return retainer.NameString;
+            }
+
+            return string.Empty;
         }
 
         /// <summary>Content id of the retainer currently being interacted with, or 0.</summary>

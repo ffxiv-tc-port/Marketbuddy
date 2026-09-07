@@ -33,6 +33,12 @@ namespace Marketbuddy
         /// <summary>Injected after construction; lets the quick-list flow take over RetainerSell when it opened it.</summary>
         internal QuickLister? QuickLister { get; set; }
 
+        /// <summary>
+        /// Injected after construction; the pending-actions worklist driver.
+        /// 🔴 純計算與「把某一格交給既有的重掛引擎」，本身不改任何價格。
+        /// </summary>
+        internal PendingActionsBuilder? Pending { get; set; }
+
         private IntPtr AddonRetainerSellList = IntPtr.Zero;
         private IntPtr AddonRetainerList = IntPtr.Zero;
         private IntPtr AddonItemSearchResult = IntPtr.Zero;

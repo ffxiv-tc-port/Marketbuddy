@@ -75,6 +75,7 @@ namespace Marketbuddy
         // ToNumeric()／ToCsv() 的欄位位置。兩者前 25 欄逐字相同（CriticalCommonLib
         // 的 InventoryItem.cs，2026-09-07 實讀），所以 IPC 與 CSV 兩條路共用這組常數。
         private const int FieldContainer = 0;
+        private const int FieldSlot = 1;
         private const int FieldItemId = 2;
         private const int FieldFlags = 6;
         private const int FieldSortedContainer = 20;
@@ -305,6 +306,166 @@ namespace Marketbuddy
                 "csv",
                 "InventoryTools log file (every character's retainers)".Loc(),
                 "This list comes from whatever InventoryTools last wrote to disk, it is not live.".Loc());
+        }
+
+
+        /// <summary>
+        /// 掛單的實際位置：哪一位僱員的哪一格，掛多少錢。
+        /// 巡檢清單本身刻意去重成 (道具, 品質)，因為它只需要查一次伺服器；
+        /// 但「待處理清單」要能指著某一格說「就是這個」，所以另外收一份不去重的位置表。
+        /// </summary>
+        /// <param name="Price">掛售單價；-1＝不知道。</param>
+        internal readonly record struct PriceSurveyPlacement(
+            uint ItemId, bool Hq, ulong RetainerId, short Slot, long Price);
+
+        /// <summary>
+        /// 眼前這一位僱員的掛單位置。🔴 framework 執行緒限定（解遊戲的原生指標）。
+        /// 出售品視窗沒開時回空清單。
+        /// </summary>
+        internal static List<PriceSurveyPlacement> ReadPlacementsFromSellList(MarketGuiEventHandler gui)
+        {
+            var result = new List<PriceSurveyPlacement>();
+            if (!gui.IsRetainerSellListOpen)
+                return result;
+
+            var inventoryManager = InventoryManager.Instance();
+            if (inventoryManager == null)
+                return result;
+
+            var container = inventoryManager->GetInventoryContainer(InventoryType.RetainerMarket);
+            if (container == null || !container->IsLoaded)
+                return result;
+
+            var retainerId = BatchReprice.ActiveRetainerId();
+            if (retainerId == 0)
+                return result;
+
+            var slotCount = Math.Min((int)container->Size, MaxMarketSlots);
+            for (var i = 0; i < slotCount; i++)
+            {
+                var slot = inventoryManager->GetInventorySlot(InventoryType.RetainerMarket, i);
+                if (slot == null || slot->ItemId == 0)
+                    continue;
+                var hq = (slot->Flags & InventoryItem.ItemFlags.HighQuality) != 0;
+                result.Add(new PriceSurveyPlacement(slot->ItemId, hq, retainerId, (short)i,
+                    (long)inventoryManager->GetRetainerMarketPrice((short)i)));
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// 目前角色所有僱員的掛單位置，經由 AllaganTools 的 IPC。
+        /// 🔴 framework 執行緒限定（IPC 的實作跑在我們這條執行緒上，而它會去讀遊戲狀態）。
+        /// 沒裝、端點不存在、或對方內部擲例外時回空清單。
+        /// </summary>
+        internal static List<PriceSurveyPlacement> ReadPlacementsFromAllaganTools()
+        {
+            var result = new List<PriceSurveyPlacement>();
+            HashSet<ulong>? owned;
+            try
+            {
+                owned = PluginInterface
+                    .GetIpcSubscriber<bool, HashSet<ulong>>("AllaganTools.GetCharactersOwnedByActive")
+                    .InvokeFunc(false);
+            }
+            catch
+            {
+                return result;
+            }
+
+            if (owned == null)
+                return result;
+
+            foreach (var characterId in owned)
+            {
+                try
+                {
+                    var rows = PluginInterface
+                        .GetIpcSubscriber<ulong, uint, HashSet<ulong[]>>("AllaganTools.GetCharacterItemsByType")
+                        .InvokeFunc(characterId, RetainerMarketInventoryType);
+                    if (rows == null)
+                        continue;
+
+                    foreach (var row in rows)
+                    {
+                        if (row == null || row.Length < NumericFieldCount)
+                            continue;
+                        if (row[FieldContainer] != RetainerMarketInventoryType)
+                            continue;
+                        var itemId = row[FieldItemId];
+                        if (itemId == 0 || itemId > uint.MaxValue)
+                            continue;
+                        var slotIndex = row[FieldSlot];
+                        if (slotIndex >= MaxMarketSlots)
+                            continue;
+                        result.Add(new PriceSurveyPlacement((uint)itemId,
+                            (row[FieldFlags] & HighQualityFlag) != 0, row[FieldRetainerId], (short)slotIndex,
+                            (long)row[FieldRetainerMarketPrice]));
+                    }
+                }
+                catch
+                {
+                    // 這一位僱員拿不到就跳過；不要讓一位僱員擋掉整條來源。
+                }
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// 所有角色所有僱員的掛單位置，來自 InventoryTools 的 <c>inventories.csv</c>。
+        /// 🔴 執行緒池限定（檔案有數十萬 bytes）。🔴 只讀不寫。
+        /// </summary>
+        internal static List<PriceSurveyPlacement> ReadPlacementsFromCsv(string? path)
+        {
+            var result = new List<PriceSurveyPlacement>();
+            if (string.IsNullOrEmpty(path))
+                return result;
+
+            try
+            {
+                if (!File.Exists(path))
+                    return result;
+
+                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+                while (reader.ReadLine() is { } line)
+                {
+                    if (line.Length == 0)
+                        continue;
+                    var fields = line.Split(',');
+                    if (fields.Length != CsvFieldCount)
+                        continue;
+                    if (fields[FieldContainer] != "12002")
+                        continue;
+                    if (!uint.TryParse(fields[FieldItemId], NumberStyles.Integer, CultureInfo.InvariantCulture,
+                            out var itemId) || itemId == 0)
+                        continue;
+                    if (!int.TryParse(fields[FieldSlot], NumberStyles.Integer, CultureInfo.InvariantCulture,
+                            out var slotIndex) || slotIndex < 0 || slotIndex >= MaxMarketSlots)
+                        continue;
+                    if (!ulong.TryParse(fields[FieldFlags], NumberStyles.Integer, CultureInfo.InvariantCulture,
+                            out var flags))
+                        flags = 0;
+                    if (!ulong.TryParse(fields[FieldRetainerId], NumberStyles.Integer, CultureInfo.InvariantCulture,
+                            out var retainerId))
+                        continue;
+                    if (!long.TryParse(fields[FieldRetainerMarketPrice], NumberStyles.Integer,
+                            CultureInfo.InvariantCulture, out var price))
+                        price = -1;
+
+                    result.Add(new PriceSurveyPlacement(itemId, (flags & HighQualityFlag) != 0, retainerId,
+                        (short)slotIndex, price));
+                }
+            }
+            catch (Exception e)
+            {
+                Log.Information(e, "[Marketbuddy] 待處理清單：讀取 InventoryTools 的 inventories.csv 位置資料失敗。");
+                return [];
+            }
+
+            return result;
         }
 
         /// <summary>(道具, 品質) 去重＋取我方最低掛售價的小工具。</summary>

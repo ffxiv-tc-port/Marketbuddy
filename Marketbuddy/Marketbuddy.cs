@@ -45,6 +45,12 @@ namespace Marketbuddy
         internal LiveSellList LiveSellList { get; private set; }
 
         /// <summary>
+        /// 「待處理」清單的計算與操作驅動器（純計算＋把某一格交給既有的重掛引擎）。
+        /// 🔴 它沒有任何自動改價路徑：巡檢跑完只會重算清單，不會動任何一格的價格。
+        /// </summary>
+        internal PendingActionsBuilder PendingWorklist { get; private set; }
+
+        /// <summary>
         /// 純診斷探針（只記錄、零行為變更）。失敗時為 null，其餘功能不受影響。
         /// </summary>
         private MarketRequestResultProbe? requestResultProbe;
@@ -118,6 +124,11 @@ namespace Marketbuddy
                 // game's own (which never redraws itself after a headless reprice).
                 LiveSellList = new LiveSellList(MarketGuiEventHandler, BatchReprice);
 
+                // 待處理清單：只訂閱 Framework.Update 當自己的幀時鐘，然後等使用者按按鈕。
+                // 🔴 建構本身不讀檔、不算任何東西。
+                PendingWorklist = new PendingActionsBuilder(MarketGuiEventHandler);
+                MarketGuiEventHandler.Pending = PendingWorklist;
+
                 try
                 {
                     QuickLister = new QuickLister(MarketGuiEventHandler, BatchReprice, MultiTour);
@@ -179,6 +190,7 @@ namespace Marketbuddy
             Safe(() => PluginInterface.UiBuilder.OpenConfigUi -= DrawConfigUi);
             Safe(() => Common.Dalamud.CommandManager.RemoveHandler(commandName));
             Safe(() => PluginUi?.Dispose());
+            Safe(() => PendingWorklist?.Dispose());
             Safe(() => LiveSellList?.Dispose());
             Safe(() => QuickLister?.Dispose());
             Safe(() => ManualRequery?.Dispose());

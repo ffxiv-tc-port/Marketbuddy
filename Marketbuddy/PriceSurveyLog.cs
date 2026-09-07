@@ -252,7 +252,8 @@ namespace Marketbuddy
                 row.GateIntervalMs.ToString(CultureInfo.InvariantCulture),
                 Escape(row.Verdict));
 
-        private static string Escape(string? value)
+        /// <summary>CSV 欄位的引號處理；<see cref="PendingActions"/> 用同一份格式寫它自己的檔。</summary>
+        internal static string Escape(string? value)
         {
             var s = value ?? string.Empty;
             if (s.IndexOfAny([',', '"', '\r', '\n']) < 0)
@@ -340,7 +341,8 @@ namespace Marketbuddy
             return true;
         }
 
-        private static List<string> SplitCsv(string line)
+        /// <summary>CSV 一列的拆解；<see cref="PendingActions"/> 共用同一份解析器。</summary>
+        internal static List<string> SplitCsv(string line)
         {
             var fields = new List<string>(13);
             var current = new StringBuilder();

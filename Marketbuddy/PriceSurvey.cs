@@ -950,6 +950,13 @@ namespace Marketbuddy
             //    對方沒裝／開關關著時這整條是安靜的 no-op，回 false。
             var praised = completed && wasRunning && TataruPraiseIPC.TryPraiseSurveyDone("跨世界價格巡檢完成");
 
+            // 剛掃完的資料就是最新的，這時候把「待處理」清單重算一次。
+            // 🔴 純計算：不改任何價格、不下架任何東西、不多送一次市場查詢（見
+            //    PendingActionsBuilder 的類別註解）。與上面那個通知共用同一道
+            //    「整份掃到最後才算數」的閘門——半份資料算出來的清單會誤導人。
+            if (completed && wasRunning && conf.PendingRecomputeAfterSurvey)
+                gui.Pending?.RequestRecompute("survey finished");
+
             if (wasRunning)
                 Log.Information(
                     $"[Marketbuddy] 巡檢結束（{reason}）：世界 {worldName}({worldId})，" +

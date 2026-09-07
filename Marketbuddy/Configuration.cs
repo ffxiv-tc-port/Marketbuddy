@@ -262,6 +262,25 @@ namespace Marketbuddy
         /// </remarks>
         public bool PriceSurveyAllCharacters = true;
 
+        /// <summary>
+        /// 跨世界價格巡檢正常跑完一個世界之後，自動重新計算「待處理」清單。
+        /// </summary>
+        /// <remarks>
+        /// 🔴 <b>純計算</b>：它讀 <c>price_survey.csv</c> 與 InventoryTools 的庫存記錄檔，
+        /// 重算出「被壓價」與「該下架」兩個桶，然後把結果寫進 <c>pending_actions.csv</c>。
+        /// <b>它不會改任何價格、不會下架任何東西、也不會多送一次市場查詢。</b>
+        /// 改價一律仍然要使用者在待處理分頁上一列一列按。
+        /// <para>
+        /// 預設 <b>true</b>：剛掃完的資料就是最新的，這時候不重算等於讓使用者對著舊清單做決定。
+        /// 關掉之後改成手動按「重新計算」。
+        /// </para>
+        /// <para>
+        /// ⚠️ 只有「這個世界的清單整份掃到最後」才觸發（與塔塔露那個通知同一道閘）：
+        /// 自己按停、讓路給重掛或下架、清單根本建不起來，通通不重算——那些時候的資料是半份的。
+        /// </para>
+        /// </remarks>
+        public bool PendingRecomputeAfterSurvey = true;
+
         public int Version { get; set; } = 0;
 
         // the below exist just to make saving/loading less cumbersome
