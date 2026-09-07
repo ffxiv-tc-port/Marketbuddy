@@ -17,6 +17,9 @@ namespace Marketbuddy
     ///   <item><b>掃描</b>：這個世界要掃什麼、按下去開始、跑起來的進度。
     ///         🔴 這裡的「掃描這個世界」是整個功能<b>唯一</b>的啟動入口。</item>
     ///   <item><b>比價</b>：把記錄檔讀回來，一件一列、每個世界一欄，看誰在壓價。</item>
+    ///   <item><b>待處理</b>：把「掛在上限價還沒定價」「被壓價」「該下架」三桶列成一張
+    ///         有按鈕的工作清單，並且<b>存進檔案</b>，跨工作階段活著。
+    ///         🔴 那些按鈕一顆都不會自己按下去——每一次改價都是使用者按的。</item>
     /// </list>
     ///
     /// <para>
@@ -31,6 +34,9 @@ namespace Marketbuddy
         private const int MaxWorldColumns = 12;
 
         private readonly PriceSurvey survey;
+
+        /// <summary>拿得到重掛引擎與待處理清單驅動器的那個中介物件。</summary>
+        private readonly MarketGuiEventHandler gui;
 
         private Configuration conf => Configuration.GetOrLoad();
 
@@ -64,9 +70,10 @@ namespace Marketbuddy
             "Your listing price (highest first)",
         ];
 
-        public PriceSurveyWindow(PriceSurvey survey)
+        public PriceSurveyWindow(PriceSurvey survey, MarketGuiEventHandler gui)
         {
             this.survey = survey;
+            this.gui = gui;
         }
 
         public void Draw(ref bool visible)
@@ -99,6 +106,12 @@ namespace Marketbuddy
                     if (!loadRequested)
                         RequestLoad();
                     DrawCompareTab();
+                    ImGui.EndTabItem();
+                }
+
+                if (ImGui.BeginTabItem("To do".Loc() + "##mbsurveypending"))
+                {
+                    DrawPendingTab();
                     ImGui.EndTabItem();
                 }
 
@@ -604,6 +617,381 @@ namespace Marketbuddy
                         return c != 0 ? c : a.ItemId.CompareTo(b.ItemId);
                     });
                     return;
+            }
+        }
+
+        // =====================================================================
+        //  待處理
+        // =====================================================================
+
+        /// <summary>已經按過「跳過」的那些要不要一起顯示出來。刻意不存檔：它是一個當下的檢視選項。</summary>
+        private bool showSkipped;
+
+        /// <summary>三個桶的顯示順序。先處理最急的（掛在上限價＝現在沒人買得起）。</summary>
+        private static readonly PendingActionKind[] BucketOrder =
+        [
+            PendingActionKind.PriceCap,
+            PendingActionKind.BelowMinimum,
+            PendingActionKind.Undercut,
+        ];
+
+        private void DrawPendingTab()
+        {
+            var pending = gui.Pending;
+            if (pending == null)
+            {
+                ImGui.Spacing();
+                Grey("The pending list is not available.".Loc());
+                return;
+            }
+
+            // 讓 framework 執行緒知道「現在有人在看」，它才會去拍僱員與引擎狀態的快照。
+            pending.NoteUiVisible();
+
+            ImGui.Spacing();
+
+            using (Disabled(pending.IsRecomputing))
+            {
+                if (ImGui.Button("Recalculate".Loc()))
+                    pending.RequestRecompute("user button");
+            }
+
+            Tooltip(
+                "Reads the survey log and your listings and works out which items are undercut or should come off the board. Pure arithmetic: no market query is sent, and no price is ever changed by this button."
+                    .Loc());
+
+            ImGui.SameLine();
+            if (pending.IsRecomputing)
+                Grey("Recomputing...".Loc());
+            else if (pending.LastComputedAt == DateTime.MinValue)
+                Grey("Not calculated in this session yet".Loc());
+            else
+                Grey("Last calculated ??".Loc(FormatAge(pending.LastComputedAt)));
+
+            if (ImGui.Checkbox("Recalculate automatically when a survey finishes".Loc(),
+                    ref conf.PendingRecomputeAfterSurvey))
+                conf.Save();
+            Tooltip(
+                "On (default): the moment a world has been surveyed all the way to the end, this list is worked out again from the fresh data. It only calculates - it never changes a price, never delists anything and never sends an extra market query. Repricing always stays one button per row, pressed by you."
+                    .Loc());
+
+            ImGui.Checkbox("Also show the ones you skipped".Loc(), ref showSkipped);
+            ImGui.SameLine();
+            using (Disabled(pending.IsRecomputing))
+            {
+                if (ImGui.Button("Clear skip marks".Loc()))
+                    PendingActions.ClearSkipped();
+            }
+
+            Tooltip("Puts every entry you skipped back on the list.".Loc());
+
+            if (pending.StatusText.Length > 0)
+            {
+                ImGui.Spacing();
+                ImGui.TextWrapped(pending.StatusText);
+            }
+
+            ImGui.Spacing();
+            // 🔑 「被壓價」整個桶都是相對於家世界定義的，所以那是哪一個世界必須看得見。
+            if (pending.HomeWorldId != 0)
+                Grey("Home world: ??".Loc(pending.HomeWorldName));
+            else
+                Grey("Home world: ? (not logged in)".Loc());
+            Grey("List file: ??".Loc(PendingActions.FileName));
+            Tooltip(SafePendingPath());
+            Grey("A grey ? means \"not known\" - never 0 gil. A suggested price from another world is a reference only: that is a different market."
+                .Loc());
+
+            ImGui.Spacing();
+            ImGui.Separator();
+
+            var rows = pending.Snapshot;
+            var shown = 0;
+            foreach (var kind in BucketOrder)
+                shown += DrawBucket(pending, rows, kind);
+
+            if (shown != 0)
+                return;
+
+            ImGui.Spacing();
+            ImGui.TextWrapped(PendingActions.Loaded
+                ? "Nothing is waiting for you right now.".Loc()
+                : "Reading the list file...".Loc());
+        }
+
+        private int DrawBucket(PendingActionsBuilder pending, IReadOnlyList<PendingActionRow> rows,
+            PendingActionKind kind)
+        {
+            var bucket = new List<PendingActionRow>();
+            var hiddenSkipped = 0;
+            foreach (var row in rows)
+            {
+                if (row.Kind != kind)
+                    continue;
+                if (row.Skipped && !showSkipped)
+                {
+                    hiddenSkipped++;
+                    continue;
+                }
+
+                bucket.Add(row);
+            }
+
+            bucket.Sort(CompareBucketRows);
+
+            var header = BucketTitle(kind).Loc() + $" ({bucket.Count})";
+            ImGui.Spacing();
+            if (!ImGui.CollapsingHeader(header + "###mbpendingbucket" + (int)kind,
+                    ImGuiTreeNodeFlags.DefaultOpen))
+                return bucket.Count + hiddenSkipped;
+
+            Grey(BucketHelp(kind).Loc());
+
+            if (hiddenSkipped > 0)
+                Grey("?? entry(ies) hidden because you skipped them.".Loc(hiddenSkipped));
+
+            if (bucket.Count == 0)
+            {
+                Grey("Nothing in this group.".Loc());
+                return hiddenSkipped;
+            }
+
+            DrawBucketTable(pending, bucket, kind);
+            return bucket.Count + hiddenSkipped;
+        }
+
+        /// <summary>
+        /// 排序：能算出「可以省多少」的排前面（差額大的優先），其餘照道具編號。
+        /// 差額不知道時排在最後——那些是「還缺資料」而不是「沒事」。
+        /// </summary>
+        private static int CompareBucketRows(PendingActionRow a, PendingActionRow b)
+        {
+            var da = Gap(a);
+            var db = Gap(b);
+            if (da != db)
+                return db.CompareTo(da);
+            var c = a.ItemId.CompareTo(b.ItemId);
+            return c != 0 ? c : a.Slot.CompareTo(b.Slot);
+        }
+
+        /// <summary>目前價與建議價的差額；任一邊不知道時 -1（＝排最後，不是 0）。</summary>
+        private static long Gap(PendingActionRow row)
+            => row.CurrentPrice < 0 || row.SuggestedPrice < 0 ? -1 : row.CurrentPrice - row.SuggestedPrice;
+
+        private static string BucketTitle(PendingActionKind kind) => kind switch
+        {
+            PendingActionKind.PriceCap => "Parked at the price cap",
+            PendingActionKind.BelowMinimum => "Should come off the board",
+            _ => "Undercut on your home world",
+        };
+
+        private static string BucketHelp(PendingActionKind kind) => kind switch
+        {
+            PendingActionKind.PriceCap =>
+                "Quick-listed while nobody was selling that item, so no price could be worked out and it was left at the cap on purpose. Nobody can buy these until you price them.",
+            PendingActionKind.BelowMinimum =>
+                "Going by the current market these would end up under the minimum price you set, so relisting them would delist them instead. Decide whether to keep holding them.",
+            _ =>
+                "Somebody else on your home world is selling the same thing cheaper than you, going by the last survey.",
+        };
+
+        private void DrawBucketTable(PendingActionsBuilder pending, List<PendingActionRow> bucket,
+            PendingActionKind kind)
+        {
+            const ImGuiTableFlags flags = ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg |
+                                          ImGuiTableFlags.ScrollX | ImGuiTableFlags.SizingFixedFit;
+
+            if (!ImGui.BeginTable("##mbpendingtable" + (int)kind, 6, flags))
+                return;
+
+            ImGui.TableSetupColumn("Item".Loc(), ImGuiTableColumnFlags.WidthFixed, 220);
+            ImGui.TableSetupColumn("Retainer / slot".Loc(), ImGuiTableColumnFlags.WidthFixed, 150);
+            ImGui.TableSetupColumn("Now".Loc(), ImGuiTableColumnFlags.WidthFixed, 90);
+            ImGui.TableSetupColumn("Suggested".Loc(), ImGuiTableColumnFlags.WidthFixed, 90);
+            ImGui.TableSetupColumn("Source".Loc(), ImGuiTableColumnFlags.WidthFixed, 180);
+            ImGui.TableSetupColumn("Actions".Loc(), ImGuiTableColumnFlags.WidthFixed, 170);
+            ImGui.TableHeadersRow();
+
+            var index = 0;
+            foreach (var row in bucket)
+            {
+                ImGui.TableNextRow();
+                ImGui.PushID(index++);
+
+                ImGui.TableNextColumn();
+                var label = ItemName(row.ItemId) + (row.Hq ? " " + (char)SeIconChar.HighQuality : string.Empty);
+                if (row.Skipped)
+                    Grey(label);
+                else
+                    ImGui.TextUnformatted(label);
+                if (row.Skipped)
+                    Tooltip("You skipped this one.".Loc());
+
+                ImGui.TableNextColumn();
+                DrawPlacementCell(row);
+
+                ImGui.TableNextColumn();
+                if (row.CurrentPrice < 0)
+                {
+                    Grey("?");
+                    Tooltip("The current price of this listing is not known.".Loc());
+                }
+                else
+                {
+                    ImGui.TextUnformatted(row.CurrentPrice.ToString("N0"));
+                }
+
+                ImGui.TableNextColumn();
+                DrawSuggestedCell(row);
+
+                ImGui.TableNextColumn();
+                DrawSourceCell(row);
+
+                ImGui.TableNextColumn();
+                DrawRowActions(pending, row);
+
+                ImGui.PopID();
+            }
+
+            ImGui.EndTable();
+        }
+
+        private void DrawPlacementCell(PendingActionRow row)
+        {
+            if (row.RetainerId == 0 || row.Slot < 0)
+            {
+                // 🔑 「不知道它掛在哪」本身要看得見：藏起來的話使用者會以為清單只是漏了這件。
+                Grey("?");
+                Tooltip(
+                    "Which retainer and slot this listing sits in is not known, so the reprice button cannot be used on it. Install AllaganTools (or open the retainer's sell list once) and recalculate."
+                        .Loc());
+                return;
+            }
+
+            var name = row.RetainerName.Length > 0 ? row.RetainerName : "?";
+            ImGui.TextUnformatted("??  #??".Loc(name, row.Slot + 1));
+            if (row.RetainerName.Length == 0)
+                Tooltip("That retainer belongs to another character, so its name cannot be read from here.".Loc());
+        }
+
+        private static void DrawSuggestedCell(PendingActionRow row)
+        {
+            if (row.SuggestedPrice < 0)
+            {
+                // 🔴 絕不畫成 0：那是一個合法但荒謬的價格。
+                Grey("?");
+                Tooltip("No usable reference price was found for this item.".Loc());
+                return;
+            }
+
+            var reference = !row.SuggestionIsLocal;
+            ImGui.PushStyleColor(ImGuiCol.Text,
+                reference ? ImGuiColors.DalamudGrey : ImGuiColors.HealerGreen);
+            ImGui.TextUnformatted(row.SuggestedPrice.ToString("N0"));
+            ImGui.PopStyleColor();
+            Tooltip(reference
+                ? "Worked out from another world's listings, so treat it as a hint only - that is a different market."
+                    .Loc()
+                : "Your undercut settings applied to the cheapest listing that is not yours. Pressing the reprice button asks the server again and lets the relist engine decide the real price."
+                    .Loc());
+        }
+
+        private static void DrawSourceCell(PendingActionRow row)
+        {
+            if (row.SuggestionSource.Length == 0)
+            {
+                Grey("?");
+                Tooltip("No reference price: neither the live cache nor the survey log knows this item.".Loc());
+                return;
+            }
+
+            var world = row.SuggestionWorld.Length > 0 ? row.SuggestionWorld : "?";
+            var age = row.SuggestionAtUtc == DateTime.MinValue ? "?" : FormatAge(row.SuggestionAtUtc);
+
+            switch (row.SuggestionSource)
+            {
+                case "live":
+                    ImGui.TextUnformatted("live  ??  ??".Loc(world, age));
+                    Tooltip("From the market data this plugin already had in memory for your own world.".Loc());
+                    return;
+                case "survey":
+                    ImGui.TextUnformatted("survey  ??  ??".Loc(world, age));
+                    Tooltip("From the cross-world survey log, the row for your own world.".Loc());
+                    return;
+                default:
+                    ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudOrange);
+                    ImGui.TextUnformatted("other world  ??  ??".Loc(world, age));
+                    ImGui.PopStyleColor();
+                    Tooltip(
+                        "Your own world has no data for this item, so this is the cheapest listing found on another world. Buyers cannot reach it from here - use it as a hint, not as a price."
+                            .Loc());
+                    return;
+            }
+        }
+
+        /// <summary>
+        /// 一列上的兩顆按鈕。
+        /// 🔴 「重新定價」<b>不會自己算一個價格寫進去</b>：它把那一格原封不動交給既有的
+        /// <c>BatchReprice.StartQuickReprice</c>，由那條路徑重新向伺服器問一次行情、
+        /// 套用使用者自己的降價設定、必要時依門檻下架。這裡沒有第二套改價實作。
+        /// </summary>
+        private static void DrawRowActions(PendingActionsBuilder pending, PendingActionRow row)
+        {
+            var addressable = row.RetainerId != 0 && row.Slot >= 0;
+            var thisRetainer = addressable && row.RetainerId == pending.ActiveRetainerId;
+            var canReprice = thisRetainer && pending.RepriceReady;
+
+            using (Disabled(!canReprice))
+            {
+                if (ImGui.Button("Reprice".Loc()))
+                    pending.RequestReprice(row.ItemId, row.Hq, row.Slot);
+            }
+
+            if (!canReprice)
+            {
+                string why;
+                if (!addressable)
+                    why = "This entry has no known retainer and slot, so it cannot be handed to the relist engine."
+                        .Loc();
+                else if (!thisRetainer)
+                    why = "Open this retainer's sell list first - the button only works on the retainer in front of you."
+                        .Loc();
+                else
+                    why = pending.RepriceBlockedReason.Length > 0
+                        ? "Cannot reprice right now: ??".Loc(pending.RepriceBlockedReason)
+                        : "Cannot reprice right now.".Loc();
+                Tooltip(why);
+            }
+            else
+            {
+                Tooltip(
+                    "Hands this one slot to the same single-item pricing the quick lister uses: it asks the server for the current listings and applies your own undercut settings. The suggested price in the table is only an estimate of where it will land."
+                        .Loc());
+            }
+
+            ImGui.SameLine();
+            using (Disabled(row.Skipped))
+            {
+                if (ImGui.Button("Skip".Loc()))
+                    PendingActions.MarkSkipped(row.Key);
+            }
+
+            Tooltip(row.Skipped
+                ? "Already skipped. Use \"Clear skip marks\" above to bring it back."
+                    .Loc()
+                : "Takes this entry off the list. Recalculating will not bring it back until you clear the skip marks."
+                    .Loc());
+        }
+
+        private static string SafePendingPath()
+        {
+            try
+            {
+                return PendingActions.FilePath;
+            }
+            catch
+            {
+                return PendingActions.FileName;
             }
         }
 

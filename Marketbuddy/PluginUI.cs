@@ -32,7 +32,7 @@ namespace Marketbuddy
         public PluginUI(Marketbuddy plugin)
         {
             marketbuddy = plugin;
-            surveyWindow = new PriceSurveyWindow(plugin.PriceSurvey);
+            surveyWindow = new PriceSurveyWindow(plugin.PriceSurvey, plugin.MarketGuiEventHandler);
             SettingsVisible = false;
         }
 
