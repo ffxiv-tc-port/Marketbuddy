@@ -113,9 +113,15 @@ namespace Marketbuddy
         /// <summary>寫檔失敗只吵一次，避免每一件都刷一行。</summary>
         private static int writeFailureLogged;
 
-        /// <summary>記錄檔的完整路徑。</summary>
+        /// <summary>
+        /// 記錄檔的完整路徑。
+        /// 🔴 只算一次：<c>PluginInterface.ConfigDirectory</c> 每次存取都會去檔案系統確認
+        /// （不存在就建），而畫面上的 tooltip 每一幀都會取這個值——那等於每幀一次磁碟操作。
+        /// </summary>
         internal static string FilePath
-            => Path.Combine(PluginInterface.ConfigDirectory.FullName, FileName);
+            => cachedFilePath ??= Path.Combine(PluginInterface.ConfigDirectory.FullName, FileName);
+
+        private static string? cachedFilePath;
 
         /// <summary>
         /// 追加一列。可以從任何執行緒呼叫；實際寫檔一定在執行緒池上。
