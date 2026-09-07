@@ -17,10 +17,12 @@ namespace Marketbuddy;
 /// </para>
 /// <para>
 /// 🔴 <b>只能從主執行緒(framework tick)呼叫。</b>IPC 的實作是在呼叫端的執行緒上跑的，
-/// 從背景 Task 叫過去等於把對方的程式碼拉到背景執行緒。目前兩個呼叫點都在
+/// 從背景 Task 叫過去等於把對方的程式碼拉到背景執行緒。目前每一個呼叫點都在
 /// <c>Framework.Update</c> 的鏈上：<see cref="BatchReprice"/> 與
 /// <see cref="MultiRetainerTour"/> 各自訂閱 <c>Framework.Update</c>，在那裡呼叫
-/// <c>TickTaskQueue.Update()</c>，而 <c>Completed</c> 事件是 <c>Update()</c> 同步叫出來的。
+/// <c>TickTaskQueue.Update()</c>，而 <c>Completed</c> 事件是 <c>Update()</c> 同步叫出來的；
+/// <see cref="MultiCharacterTour"/> 的整輪收尾與 <see cref="PriceSurvey"/> 的
+/// <c>Finish</c> 也都在同一條鏈上。
 /// </para>
 /// <para>
 /// ⚠️ 這是<b>單向通知</b>：回傳值只拿來寫記錄，不影響 Marketbuddy 的任何流程，
@@ -63,7 +65,9 @@ internal static class TataruPraiseIPC
     internal const string CategoryMarket = "市場";
 
     /// <summary>
-    /// 請塔塔露念一句。對方沒裝、關著、或池裡沒東西，這裡都是安靜的 no-op。
+    /// 請塔塔露念一句（<b>重掛</b>收尾用，閘門是
+    /// <see cref="Configuration.TataruPraiseOnRelistDone"/>）。
+    /// 對方沒裝、關著、或池裡沒東西，這裡都是安靜的 no-op。
     /// </summary>
     /// <param name="reason">寫進記錄用的來源描述，讓 log 分得出是哪一條邊觸發的。</param>
     internal static void TryPraise(string reason)
@@ -71,24 +75,55 @@ internal static class TataruPraiseIPC
         if (!Configuration.GetOrLoad().TataruPraiseOnRelistDone)
             return;
 
+        SendPraise(reason);
+    }
+
+    /// <summary>
+    /// 請塔塔露念一句（<b>跨世界價格巡檢正常掃完</b>時用，閘門是
+    /// <see cref="Configuration.TataruPraiseOnSurveyDone"/>）。
+    /// </summary>
+    /// <remarks>
+    /// 🔴 只掛在「這個世界的清單整份掃完」那一條路徑上。使用者自己按停、讓路給重掛／下架、
+    /// 第一件連續沒回應而放棄、清單根本建不起來，這些都不是跑完，一律不叫。
+    /// </remarks>
+    /// <param name="reason">寫進記錄用的來源描述。</param>
+    /// <returns>
+    /// <c>true</c>＝真的送出了 <c>Praise</c>，而且對方回 <c>true</c>。
+    /// <c>false</c> 涵蓋四種情形，全都不是錯誤：這個開關關著、對方沒裝、這個情境現在出不了聲、
+    /// 或對方在冷卻中回了 <c>false</c>。呼叫端只拿它寫記錄，不重試也不改任何流程。
+    /// </returns>
+    internal static bool TryPraiseSurveyDone(string reason)
+    {
+        if (!Configuration.GetOrLoad().TataruPraiseOnSurveyDone)
+            return false;
+
+        return SendPraise(reason);
+    }
+
+    /// <summary>兩個入口共用的送出流程；使用者的開關已經在呼叫端判過了。</summary>
+    private static bool SendPraise(string reason)
+    {
         try
         {
             // 先問 IsAvailableFor(「市場」)：對方的總開關關著、這個情境被使用者關掉、或這個
             // 情境一句已合成的都沒有，就不要浪費它的冷卻。
             if (!PluginInterface.GetIpcSubscriber<string, bool>(TagIsAvailableFor).InvokeFunc(CategoryMarket))
-                return;
+                return false;
 
             var accepted = PluginInterface.GetIpcSubscriber<string, bool>(TagPraise).InvokeFunc(CategoryMarket);
             // Information 級：這是「使用者說沒出聲」時唯一問得出真相的一行（使用者跑 LogLevel 1）。
             Log.Information($"[TataruPraise] {reason}：Praise(「{CategoryMarket}」) 回傳 {accepted}。");
+            return accepted;
         }
         catch (IpcNotReadyError)
         {
             // 對方沒安裝／沒載入。這是完全正常的狀態，刻意不寫 log——沒裝的人每輪都會走到這裡。
+            return false;
         }
         catch (Exception e)
         {
             Log.Information($"[TataruPraise] 呼叫失敗（{reason}）：{e.Message}");
+            return false;
         }
     }
 }

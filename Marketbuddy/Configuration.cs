@@ -160,6 +160,25 @@ namespace Marketbuddy
         public bool TataruPraiseOnRelistDone = true;
 
         /// <summary>
+        /// 跨世界價格巡檢<b>正常掃完一個世界</b>時，透過 IPC 請「塔塔露誇獎」(TataruPraise) 念一句。
+        /// </summary>
+        /// <remarks>
+        /// 📌 純通知：不觸發任何自動化、不改巡檢的任何行為，也不會多送一次市場查詢。
+        /// 沒裝 TataruPraise 時整條路徑是 no-op（見 <see cref="TataruPraiseIPC"/>），
+        /// 所以預設開著對沒裝的人完全沒有影響。
+        /// <para>
+        /// ⚠️ 只有「這個世界的清單整份掃到最後」才響：使用者自己按停、讓路給重掛或下架、
+        /// 第一件連續沒回應而放棄、清單根本建不起來，這些通通<b>不</b>響——那些不是跑完，
+        /// 響了會讓人以為資料已經收齊。
+        /// </para>
+        /// <para>
+        /// 📌 跟 <see cref="TataruPraiseOnRelistDone"/> 分成兩個開關是刻意的：巡檢是唯讀的、
+        /// 一個世界按一次，重掛是會改價的整輪流程；想只聽其中一種的人要關得掉另一種。
+        /// </para>
+        /// </remarks>
+        public bool TataruPraiseOnSurveyDone = true;
+
+        /// <summary>
         /// 把高頻的 <c>[MBDIAG]</c> 診斷行從 <c>Debug</c> 提升到 <c>Information</c>。
         ///
         /// <para>

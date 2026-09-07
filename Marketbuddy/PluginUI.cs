@@ -1200,6 +1200,19 @@ namespace Marketbuddy
                     .Loc());
             ImGui.PopStyleColor();
 
+            // 純通知，掛在巡檢那一組底下：只有「整份掃完」會叫它，按停與讓路都不會。
+            DrawNestIndicator(1);
+            if (ImGui.Checkbox("Ask TataruPraise to say a line when a survey finishes".Loc(),
+                    ref conf.TataruPraiseOnSurveyDone))
+                conf.Save();
+
+            DrawNestIndicator(2);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "Needs the TataruPraise plugin; without it this does nothing at all. It only sends a notification - no extra market query is sent and nothing about the survey changes. It speaks once, and only when this world's list was surveyed all the way to the end: stopping it yourself, standing down for a relist or a delist, giving up after the first item got no answer, or failing to build the list at all, all stay quiet."
+                    .Loc());
+            ImGui.PopStyleColor();
+
             if (ImGui.Button("Open the price survey window".Loc()))
                 SurveyVisible = true;
         }

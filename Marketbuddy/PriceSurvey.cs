@@ -662,7 +662,8 @@ namespace Marketbuddy
         {
             if (queueIndex >= itemQueue.Count)
             {
-                Finish("Done".Loc(), unsupported: false);
+                // 🔴 這是唯一一條「整份掃完」的出口，也是唯一一條會通知塔塔露的出口。
+                Finish("Done".Loc(), unsupported: false, completed: true);
                 return;
             }
 
@@ -933,15 +934,28 @@ namespace Marketbuddy
             }
         }
 
-        private void Finish(string reason, bool unsupported)
+        /// <param name="reason">給使用者看的收場原因（已在地化）。</param>
+        /// <param name="unsupported">true＝這一輪看起來是「這個情境根本送不出查詢」。</param>
+        /// <param name="completed">
+        /// true＝清單整份掃完才收的。🔴 <b>只有這條路徑會通知塔塔露</b>：使用者按停、讓路退讓、
+        /// 第一件連續沒回應而放棄、清單建不起來，一律用預設的 false。
+        /// </param>
+        private void Finish(string reason, bool unsupported, bool completed = false)
         {
             var elapsed = runStartedAt == DateTime.MinValue ? 0 : (DateTime.UtcNow - runStartedAt).TotalSeconds;
-            if (State == SurveyState.Running || State == SurveyState.Preparing)
+            var wasRunning = State == SurveyState.Running || State == SurveyState.Preparing;
+
+            // 🔴 IPC 的實作跑在呼叫端的執行緒上。Finish 的每一個呼叫點都在 OnFrameworkUpdate
+            //    的鏈上（framework 執行緒），所以這裡直接打過去就好，不必 marshal。
+            //    對方沒裝／開關關著時這整條是安靜的 no-op，回 false。
+            var praised = completed && wasRunning && TataruPraiseIPC.TryPraiseSurveyDone("跨世界價格巡檢完成");
+
+            if (wasRunning)
                 Log.Information(
                     $"[Marketbuddy] 巡檢結束（{reason}）：世界 {worldName}({worldId})，" +
                     $"處理 {queueIndex}/{itemQueue.Count} 件，記錄 {recordedRows} 列，" +
                     $"ok={okCount} empty={emptyCount} refused={refusedCount} timeout={timeoutCount} cache={cacheCount}，" +
-                    $"耗時 {elapsed:F0} 秒，閘門 {MarketRequestGate.IntervalMs} ms。");
+                    $"耗時 {elapsed:F0} 秒，閘門 {MarketRequestGate.IntervalMs} ms，已通知塔塔露={praised}。");
 
             MarketRequestGate.LogSummary("price survey finished");
             LastRunLookedUnsupported = unsupported;
