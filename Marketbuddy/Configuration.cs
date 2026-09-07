@@ -281,6 +281,21 @@ namespace Marketbuddy
         /// </remarks>
         public bool PendingRecomputeAfterSurvey = true;
 
+        /// <summary>
+        /// 記錄「僱員的掛售清單少了什麼」——也就是僱員銷售紀錄。預設開。
+        ///
+        /// <para>
+        /// 🔴 這是<b>純觀察</b>：只在「出售品」視窗開著時讀僱員的市場容器與錢包，
+        /// 不送封包、不掛 hook、不改任何價格、不下架任何東西。關掉它只會停止記錄。
+        /// </para>
+        ///
+        /// <para>
+        /// ⚠️ 預設開是因為它沒有任何會改變遊戲狀態的路徑，而且不記就永遠補不回來
+        /// （兩次快照之間發生的事沒有第二個來源）。
+        /// </para>
+        /// </summary>
+        public bool RetainerSalesLogEnabled = true;
+
         public int Version { get; set; } = 0;
 
         // the below exist just to make saving/loading less cumbersome

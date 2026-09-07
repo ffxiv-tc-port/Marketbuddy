@@ -190,6 +190,13 @@ namespace Marketbuddy
             public DelistPhase Phase = DelistPhase.Fire;
             public short Slot = -1;
             public uint ItemId;
+
+            /// <summary>送出當下那一格是不是優質品；記進「我方下架」的帳時要用。</summary>
+            public bool Hq;
+
+            /// <summary>送出的件數；同上。</summary>
+            public int Quantity;
+
             public string Name = string.Empty;
             public DateTime FiredAt;
         }
@@ -505,6 +512,8 @@ namespace Marketbuddy
                     CurrentItemName = job.Name;
 
                     var quantity = (uint)Math.Max(1, slot->Quantity);
+                    job.Hq = (slot->Flags & InventoryItem.ItemFlags.HighQuality) != 0;
+                    job.Quantity = (int)quantity;
 
                     // ⚠️ 兩支函式**不能**互相退回：目的地是使用者的設定，撞牆時如實
                     // 停手／回報，絕不靜默改送到另一個容器（那會把東西放到使用者沒
@@ -556,6 +565,10 @@ namespace Marketbuddy
                     if (slot == null || slot->ItemId != job.ItemId)
                     {
                         // 那一格已經不是原本那件道具了 = 伺服器收下並執行了。
+                        // 記進「我方下架」的短期帳：僱員銷售紀錄靠它把這一格的消失跟真正的
+                        // 賣出分開（見 RetainerDelistLedger）。
+                        RetainerDelistLedger.Note(BatchReprice.ActiveRetainerId(), job.ItemId,
+                            job.Hq, job.Quantity);
                         ProcessedSlots++;
                         DelistedCount++;
                         ChatGui.Print((toRetainerInventory

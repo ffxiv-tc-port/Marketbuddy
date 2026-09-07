@@ -1094,8 +1094,12 @@ namespace Marketbuddy
             Log.Debug($"BatchReprice: cached market tax rates (valid until {rates.ValidUntil:u})");
         }
 
-        /// <summary>Market tax percent for the active retainer's city; falls back to the configured constant.</summary>
-        private uint CurrentTaxPercent()
+        /// <summary>
+        /// Market tax percent for the active retainer's city; falls back to the configured constant.
+        /// ⚠️ internal（不是 private）是因為 <see cref="RetainerMarketWatcher"/> 也要用同一份稅率
+        /// 去對僱員錢包的增量——兩邊各算一份的話，某一天有人改了退回值就會靜默分岔。
+        /// </summary>
+        internal uint CurrentTaxPercent()
         {
             var fallback = (uint)Math.Clamp(conf.MarketTaxPercent, 0, 25);
             if (taxRates == null || taxRates.ValidUntil <= DateTime.UtcNow)
@@ -1169,6 +1173,10 @@ namespace Marketbuddy
                 Fail(job, BatchDelist.DescribeMoveError(result, conf.DelistToRetainerInventory));
                 return;
             }
+
+            // 記進「我方下架」的短期帳：僱員銷售紀錄靠它把這一格的消失跟真正的賣出分開。
+            // 只是記錄，記漏了最壞的結果是那一列變成低信心（見 RetainerDelistLedger）。
+            RetainerDelistLedger.Note(CurrentBatchRetainerId, job.ItemId, job.IsHq, (int)quantity);
 
             ForgetChange(job.Slot);
             PendingActions.ClearSlot(CurrentBatchRetainerId, job.Slot);

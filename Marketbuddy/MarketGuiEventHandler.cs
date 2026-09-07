@@ -39,6 +39,12 @@ namespace Marketbuddy
         /// </summary>
         internal PendingActionsBuilder? Pending { get; set; }
 
+        /// <summary>
+        /// Injected after construction; the retainer sales observer.
+        /// 🔴 純唯讀：畫面只跟它要診斷字串，沒有任何路徑會透過它改變遊戲狀態。
+        /// </summary>
+        internal RetainerMarketWatcher? SalesWatcher { get; set; }
+
         private IntPtr AddonRetainerSellList = IntPtr.Zero;
         private IntPtr AddonRetainerList = IntPtr.Zero;
         private IntPtr AddonItemSearchResult = IntPtr.Zero;

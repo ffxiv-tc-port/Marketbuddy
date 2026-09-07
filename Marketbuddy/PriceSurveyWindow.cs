@@ -20,6 +20,9 @@ namespace Marketbuddy
     ///   <item><b>待處理</b>：把「掛在上限價還沒定價」「被壓價」「該下架」三桶列成一張
     ///         有按鈕的工作清單，並且<b>存進檔案</b>，跨工作階段活著。
     ///         🔴 那些按鈕一顆都不會自己按下去——每一次改價都是使用者按的。</item>
+    ///   <item><b>銷售</b>：僱員的掛售清單兩次之間少了什麼，一件一列，<b>每一列標信心</b>。
+    ///         🔴 這裡刻意<b>沒有</b>「本週收益」這種總計：低信心的列本來就可能不是賣出，
+    ///         把它們加總成一個數字等於用一個自信的數字蓋掉「我們其實不知道」。</item>
     /// </list>
     ///
     /// <para>
@@ -112,6 +115,12 @@ namespace Marketbuddy
                 if (ImGui.BeginTabItem("To do".Loc() + "##mbsurveypending"))
                 {
                     DrawPendingTab();
+                    ImGui.EndTabItem();
+                }
+
+                if (ImGui.BeginTabItem("Sales".Loc() + "##mbsurveysales"))
+                {
+                    DrawSalesTab();
                     ImGui.EndTabItem();
                 }
 
@@ -992,6 +1001,352 @@ namespace Marketbuddy
             catch
             {
                 return PendingActions.FileName;
+            }
+        }
+
+        // =====================================================================
+        //  銷售
+        // =====================================================================
+
+        /// <summary>銷售記錄檔的讀取工作（一定在執行緒池上）。</summary>
+        private Task<List<RetainerSaleRow>>? salesTask;
+
+        /// <summary>畫面上顯示的列（檔案列＋這個工作階段剛寫的列，已去重並由新到舊排序）。</summary>
+        private readonly List<RetainerSaleRow> sales = [];
+
+        /// <summary>已經載入的是哪一代記錄（<see cref="RetainerSalesLog.Revision"/>）；-1＝還沒載過。</summary>
+        private long salesRevisionLoaded = -1;
+
+        /// <summary>我方自己下架的那些列要不要一起顯示。預設不顯示：那不是賣出，只是把帳補平。</summary>
+        private bool showOwnDelists;
+
+        /// <summary>畫面上最多列幾列；再多就只是拖慢繪製，檔案裡的東西一列都沒少。</summary>
+        private const int MaxSalesRows = 300;
+
+        /// <summary>摘要統計的視窗長度（天）。</summary>
+        private const int SalesSummaryDays = 7;
+
+        private void DrawSalesTab()
+        {
+            PumpSalesLoad();
+            if (salesTask == null && salesRevisionLoaded != RetainerSalesLog.Revision)
+                RequestSalesLoad();
+
+            ImGui.Spacing();
+
+            if (ImGui.Checkbox("Record what disappears from your retainers' listings".Loc(),
+                    ref conf.RetainerSalesLogEnabled))
+                conf.Save();
+            Tooltip(
+                "On (default). While a retainer's sell list is open this reads that retainer's market container and gil, and writes down anything that vanished since the last time it was seen. Read-only: no packets, no hooks, nothing is ever listed, repriced or delisted because of it."
+                    .Loc());
+
+            ImGui.SameLine();
+            using (Disabled(salesTask != null))
+            {
+                if (ImGui.Button("Reload".Loc()))
+                    RequestSalesLoad();
+            }
+
+            ImGui.Checkbox("Also show what Marketbuddy delisted itself".Loc(), ref showOwnDelists);
+            Tooltip("Those are not sales - they are in the file so the numbers add up.".Loc());
+
+            ImGui.Spacing();
+            DrawSalesSummary();
+
+            ImGui.Spacing();
+            Grey("Sales file: ??".Loc(RetainerSalesLog.FileName));
+            Tooltip(SafeSalesPath());
+            Grey("Baseline file: ?? (?? retainer(s) known)".Loc(RetainerMarketState.FileName,
+                RetainerMarketState.Count));
+            Tooltip(
+                "A retainer only starts producing entries after its sell list has been open once - that first visit is what establishes the baseline to compare against."
+                    .Loc());
+
+            // 🔑 「有沒有真的在取樣」必須在列上看得見：取不到樣的話這個功能是完全靜默的，
+            //    而「一件都沒賣掉」與「根本沒看過你的僱員」長得一模一樣。
+            var watcher = gui.SalesWatcher;
+            if (watcher != null)
+            {
+                if (watcher.LastSnapshotAt == DateTime.MinValue)
+                    Grey("No snapshot taken in this session yet.".Loc());
+                else
+                    Grey("Last snapshot ?? (?? this session)".Loc(
+                        FormatAge(watcher.LastSnapshotAt), watcher.SnapshotsTaken));
+
+                if (watcher.LastSkipReason.Length > 0)
+                    Grey("Last sample skipped: ??".Loc(watcher.LastSkipReason));
+            }
+
+            ImGui.Spacing();
+            ImGui.Separator();
+
+            if (salesTask != null && sales.Count == 0)
+            {
+                ImGui.Spacing();
+                Grey("Reading the sales file...".Loc());
+                return;
+            }
+
+            DrawSalesTable();
+        }
+
+        /// <summary>
+        /// 摘要。🔴 只加總<b>高信心</b>的列，而且低信心的件數一定要放在旁邊看得見——
+        /// 少了那半句，一個偏低的數字看起來就像一個準確的數字。
+        /// </summary>
+        private void DrawSalesSummary()
+        {
+            var since = DateTime.UtcNow.AddDays(-SalesSummaryDays);
+            var soldItems = 0;
+            var soldEvents = 0;
+            long received = 0;
+            var unknownItems = 0;
+            var receivedUnknown = false;
+
+            foreach (var row in sales)
+            {
+                if (row.AtUtc < since)
+                    continue;
+                switch (row.Confidence)
+                {
+                    case RetainerSaleConfidence.Sold:
+                        soldItems += row.Quantity;
+                        soldEvents++;
+                        if (row.Received >= 0)
+                            received += row.Received;
+                        else
+                            receivedUnknown = true;
+                        break;
+                    case RetainerSaleConfidence.Unknown:
+                        unknownItems += row.Quantity;
+                        break;
+                }
+            }
+
+            if (soldEvents == 0 && unknownItems == 0)
+            {
+                Grey("Nothing recorded in the last ?? days.".Loc(SalesSummaryDays));
+                return;
+            }
+
+            ImGui.TextUnformatted("Last ?? days: ?? item(s) sold with high confidence, ?? gil received"
+                .Loc(SalesSummaryDays, soldItems, received.ToString("N0")));
+            if (receivedUnknown)
+                Grey("Some of those sales have no amount, so the total is a lower bound.".Loc());
+            if (unknownItems > 0)
+                Grey("?? more item(s) only known to have disappeared - not counted.".Loc(unknownItems));
+        }
+
+        private void DrawSalesTable()
+        {
+            const ImGuiTableFlags flags = ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg |
+                                          ImGuiTableFlags.ScrollX | ImGuiTableFlags.SizingFixedFit;
+
+            var shown = 0;
+            var hiddenDelists = 0;
+            var visible = new List<RetainerSaleRow>();
+            foreach (var row in sales)
+            {
+                if (row.Confidence == RetainerSaleConfidence.Delisted && !showOwnDelists)
+                {
+                    hiddenDelists++;
+                    continue;
+                }
+
+                if (visible.Count >= MaxSalesRows)
+                {
+                    shown++;
+                    continue;
+                }
+
+                visible.Add(row);
+                shown++;
+            }
+
+            if (hiddenDelists > 0)
+                Grey("?? entry(ies) hidden because Marketbuddy delisted them itself.".Loc(hiddenDelists));
+
+            if (visible.Count == 0)
+            {
+                ImGui.Spacing();
+                ImGui.TextWrapped(
+                    "Nothing recorded yet. Open a retainer's sell list once to establish the baseline; anything that has gone from it the next time you look shows up here."
+                        .Loc());
+                return;
+            }
+
+            if (shown > visible.Count)
+                Grey("Showing the newest ?? of ?? entries; the file has them all.".Loc(visible.Count, shown));
+
+            if (!ImGui.BeginTable("##mbsalestable", 7, flags))
+                return;
+
+            ImGui.TableSetupColumn("When".Loc(), ImGuiTableColumnFlags.WidthFixed, 120);
+            ImGui.TableSetupColumn("Retainer".Loc(), ImGuiTableColumnFlags.WidthFixed, 110);
+            ImGui.TableSetupColumn("Item".Loc(), ImGuiTableColumnFlags.WidthFixed, 220);
+            ImGui.TableSetupColumn("Qty".Loc(), ImGuiTableColumnFlags.WidthFixed, 50);
+            ImGui.TableSetupColumn("Unit price".Loc(), ImGuiTableColumnFlags.WidthFixed, 90);
+            ImGui.TableSetupColumn("Received".Loc(), ImGuiTableColumnFlags.WidthFixed, 90);
+            ImGui.TableSetupColumn("Confidence".Loc(), ImGuiTableColumnFlags.WidthFixed, 170);
+            ImGui.TableHeadersRow();
+
+            var index = 0;
+            foreach (var row in visible)
+            {
+                ImGui.TableNextRow();
+                ImGui.PushID(index++);
+
+                ImGui.TableNextColumn();
+                ImGui.TextUnformatted(row.AtUtc.ToLocalTime().ToString("MM-dd HH:mm"));
+                Tooltip(row.PrevAtUtc == DateTime.MinValue
+                    ? "?? (the previous look is not recorded)".Loc(FormatAge(row.AtUtc))
+                    : "Between ?? and ?? (local time)".Loc(
+                        row.PrevAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm"),
+                        row.AtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")));
+
+                ImGui.TableNextColumn();
+                if (row.RetainerName.Length > 0)
+                {
+                    ImGui.TextUnformatted(row.RetainerName);
+                }
+                else
+                {
+                    Grey("?");
+                    Tooltip("That retainer's name was not readable when this was recorded.".Loc());
+                }
+
+                ImGui.TableNextColumn();
+                ImGui.TextUnformatted(ItemName(row.ItemId)
+                                      + (row.Hq ? " " + (char)SeIconChar.HighQuality : string.Empty));
+
+                ImGui.TableNextColumn();
+                ImGui.TextUnformatted(row.Quantity.ToString("N0"));
+
+                ImGui.TableNextColumn();
+                if (row.UnitPrice < 0)
+                {
+                    // 🔑 「不知道」要在列上看得見。畫成 0 會被讀成「有人用 0 gil 買走」。
+                    Grey("?");
+                    Tooltip(
+                        "You had that item listed at more than one price and the missing pieces span both, so which price they went at cannot be worked out."
+                            .Loc());
+                }
+                else
+                {
+                    ImGui.TextUnformatted(row.UnitPrice.ToString("N0"));
+                }
+
+                ImGui.TableNextColumn();
+                if (row.Received < 0)
+                {
+                    Grey("?");
+                    Tooltip("No amount could be tied to this entry.".Loc());
+                }
+                else
+                {
+                    ImGui.TextUnformatted(row.Received.ToString("N0"));
+                }
+
+                ImGui.TableNextColumn();
+                DrawConfidenceCell(row);
+
+                ImGui.PopID();
+            }
+
+            ImGui.EndTable();
+        }
+
+        private static void DrawConfidenceCell(RetainerSaleRow row)
+        {
+            switch (row.Confidence)
+            {
+                case RetainerSaleConfidence.Sold:
+                    ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.HealerGreen);
+                    ImGui.TextUnformatted("Sold".Loc());
+                    ImGui.PopStyleColor();
+                    Tooltip(GilMatchExplanation(row));
+                    return;
+                case RetainerSaleConfidence.Delisted:
+                    Grey("Delisted by Marketbuddy".Loc());
+                    Tooltip("Marketbuddy took this off the board itself, so it is not a sale.".Loc());
+                    return;
+                default:
+                    Grey("Gone - reason unknown".Loc());
+                    Tooltip(
+                        "It is no longer listed, but the retainer's gil did not move by the matching amount, so this may just as well have been delisted by hand. Deliberately not counted as income."
+                            .Loc());
+                    return;
+            }
+        }
+
+        /// <summary>
+        /// 這一列為什麼算高信心。<c>gross</c> 出現在這裡是有意義的資訊：
+        /// 它代表僱員收到的是<b>未扣稅</b>的金額，也就是市場稅不是由賣方負擔。
+        /// </summary>
+        private static string GilMatchExplanation(RetainerSaleRow row)
+        {
+            var delta = row.HasGilDelta ? row.GilDelta.ToString("N0") : "?";
+            return row.Basis == "gross"
+                ? "The retainer's gil went up by ?? which matches the listing price before tax."
+                    .Loc(delta)
+                : "The retainer's gil went up by ?? which matches the listing price minus ??% market tax."
+                    .Loc(delta, row.TaxPercent);
+        }
+
+        private void RequestSalesLoad()
+        {
+            if (salesTask != null)
+                return;
+            salesRevisionLoaded = RetainerSalesLog.Revision;
+            // 🔴 讀檔一律丟到執行緒池。
+            salesTask = Task.Run(RetainerSalesLog.LoadAll);
+        }
+
+        private void PumpSalesLoad()
+        {
+            var task = salesTask;
+            if (task == null || !task.IsCompleted)
+                return;
+
+            salesTask = null;
+            List<RetainerSaleRow> rows;
+            try
+            {
+                rows = task.GetAwaiter().GetResult();
+            }
+            catch (Exception e)
+            {
+                Log.Information(e, "[Marketbuddy] 僱員銷售：讀取記錄檔時發生例外。");
+                return;
+            }
+
+            // 追加是非同步的，剛記下的列可能還沒落地 —— 補上這個工作階段寫過的列。
+            // 去重用 Format()（決定性，同一列永遠產生同一行）。
+            var seen = new HashSet<string>();
+            foreach (var row in rows)
+                seen.Add(RetainerSalesLog.Format(row));
+            foreach (var row in RetainerSalesLog.SessionRows())
+            {
+                if (seen.Add(RetainerSalesLog.Format(row)))
+                    rows.Add(row);
+            }
+
+            rows.Sort((a, b) => b.AtUtc.CompareTo(a.AtUtc));
+
+            sales.Clear();
+            sales.AddRange(rows);
+        }
+
+        private static string SafeSalesPath()
+        {
+            try
+            {
+                return RetainerSalesLog.FilePath;
+            }
+            catch
+            {
+                return RetainerSalesLog.FileName;
             }
         }
 

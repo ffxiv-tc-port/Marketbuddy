@@ -57,6 +57,12 @@ namespace Marketbuddy
         internal MarketPurchaseWatcher MarketPurchaseWatcher { get; private set; }
 
         /// <summary>
+        /// 僱員銷售紀錄：比較兩次看到的僱員市場容器，把少掉的東西記成帶信心標記的事件清單。
+        /// 🔴 純唯讀觀察，不下單、不改價、不下架。
+        /// </summary>
+        internal RetainerMarketWatcher RetainerMarketWatcher { get; private set; }
+
+        /// <summary>
         /// 純診斷探針（只記錄、零行為變更）。失敗時為 null，其餘功能不受影響。
         /// </summary>
         private MarketRequestResultProbe? requestResultProbe;
@@ -139,6 +145,11 @@ namespace Marketbuddy
                 // 沒裝 GilDelta 時整條路徑是安靜的 no-op。
                 MarketPurchaseWatcher = new MarketPurchaseWatcher(MarketGuiEventHandler);
 
+                // 僱員銷售紀錄：只訂閱 Framework.Update，並且只在「出售品」視窗開著時
+                // 讀僱員的市場容器與錢包。零封包、零 hook、零記憶體寫入。
+                RetainerMarketWatcher = new RetainerMarketWatcher(MarketGuiEventHandler, BatchReprice);
+                MarketGuiEventHandler.SalesWatcher = RetainerMarketWatcher;
+
                 try
                 {
                     QuickLister = new QuickLister(MarketGuiEventHandler, BatchReprice, MultiTour);
@@ -200,6 +211,7 @@ namespace Marketbuddy
             Safe(() => PluginInterface.UiBuilder.OpenConfigUi -= DrawConfigUi);
             Safe(() => Common.Dalamud.CommandManager.RemoveHandler(commandName));
             Safe(() => PluginUi?.Dispose());
+            Safe(() => RetainerMarketWatcher?.Dispose());
             Safe(() => MarketPurchaseWatcher?.Dispose());
             Safe(() => PendingWorklist?.Dispose());
             Safe(() => LiveSellList?.Dispose());
