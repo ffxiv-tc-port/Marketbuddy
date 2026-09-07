@@ -222,11 +222,26 @@ namespace Marketbuddy
         /// 不走「出售品視窗 → AllaganTools IPC」那條只看得到目前角色的優先序。
         /// </summary>
         /// <remarks>
-        /// 預設 false ＝ 維持優先序：出售品視窗開著時只看眼前那一位僱員，否則問 AllaganTools
+        /// 🔴 2026-09-07 預設由 false 改為 true。使用者要的就是「根據 InventoryTools 的
+        /// 市場出售中清單」跨全部角色掃一遍；而站在市場前面時出售品視窗不會開著、
+        /// AllaganTools 的 IPC 又只涵蓋目前角色的僱員，舊預設幾乎一定只掃到一部分。
+        /// <para>
+        /// 📌 <b>改預設對既有使用者確實生效</b>：這個欄位從來沒有出貨過，所以沒有任何
+        /// 既有設定檔裡有這個鍵；而本外掛走的是 Dalamud 自己那條
+        /// <c>GetPluginConfig()</c> / <c>SavePluginConfig()</c>，
+        /// <c>PluginConfigurations.LoadForType&lt;T&gt;</c> 只給了型別名轉換器，
+        /// 沒有 <c>ObjectCreationHandling</c>、沒有 <c>Populate</c>，
+        /// 所以 JSON 缺鍵時保留的是 C# 的欄位初始值。
+        /// ⚠️ 這一點與 ECommons EzConfig 那條路（既有使用者吃不到新預設）不同，兩者不要互相套用。
+        /// </para>
+        /// false ＝ 走優先序：出售品視窗開著時只看眼前那一位僱員，否則問 AllaganTools
         /// （目前角色的全部僱員），再不行才讀記錄檔。
         /// ⚠️ 記錄檔的新鮮度取決於 InventoryTools 上次寫檔的時間，不是即時的。
+        /// ⚠️ 預設 true 時，沒裝 InventoryTools 會直接說「找不到任何掛售中的道具」，
+        /// <b>不會</b>自己退回上面那條優先序——把畫面上那個核取方塊取消勾選即可
+        /// （來源選擇的邏輯刻意沒有改動，這次只翻了預設值）。
         /// </remarks>
-        public bool PriceSurveyAllCharacters = false;
+        public bool PriceSurveyAllCharacters = true;
 
         public int Version { get; set; } = 0;
 
