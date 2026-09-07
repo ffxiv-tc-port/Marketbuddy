@@ -324,6 +324,82 @@ namespace Marketbuddy
             }
         }
 
+        // ---------------------------------------------------------------
+        // Lifestream（世界轉移）
+        //
+        // 🔴 端點名與型別逐字取自 Lifestream/Lifestream/IPC/IPCProvider.cs（2026-09-07 實讀）：
+        //    EzIPC 的預設前綴是對方的 InternalName，所以是 Lifestream.<方法名>。
+        //    ChangeWorld(string) -> bool、IsBusy() -> bool、
+        //    CanVisitSameDC(string) -> bool、CanVisitCrossDC(string) -> bool。
+        // 🔴 <b>只能在 framework 執行緒上呼叫。</b>Lifestream 那側有一道
+        //    IpcFrameworkGate：已經在主執行緒時就地執行（零額外成本），
+        //    但從別的執行緒打過去會變成「排進主執行緒 + 同步等最多 5 秒」——
+        //    在 ImGui 的繪製執行緒上呼叫就是卡住畫面 5 秒。
+        // 📌 Lifestream 沒裝／IPC 還沒好一律靜默回 false／null，不擲例外給呼叫端。
+        // ---------------------------------------------------------------
+
+        /// <summary>Lifestream 現在忙不忙。沒裝時回 false。</summary>
+        internal static bool IsLifestreamBusy()
+        {
+            try
+            {
+                return Svc.PluginInterface.GetIpcSubscriber<bool>("Lifestream.IsBusy").InvokeFunc();
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 這個角色現在能不能去那個世界。
+        /// 回 null 代表<b>問不到</b>（Lifestream 沒裝／IPC 還沒好）——與「不能去」要分得開，
+        /// 因為畫面上要說的話完全不同。
+        /// </summary>
+        internal static bool? CanLifestreamVisit(string world)
+        {
+            if (string.IsNullOrWhiteSpace(world))
+                return false;
+
+            try
+            {
+                if (Svc.PluginInterface.GetIpcSubscriber<string, bool>("Lifestream.CanVisitSameDC")
+                    .InvokeFunc(world))
+                    return true;
+                return Svc.PluginInterface.GetIpcSubscriber<string, bool>("Lifestream.CanVisitCrossDC")
+                    .InvokeFunc(world);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// 請 Lifestream 把角色送去 <paramref name="world"/>。
+        /// </summary>
+        /// <remarks>
+        /// 🔴 <b>呼叫一次只換一次。</b>這裡沒有重試、沒有佇列、沒有「到了就繼續」的串接；
+        /// 回 false 就是這一次沒成功，要不要再試由使用者再按一次按鈕決定。
+        /// 🔴 絕不用聊天指令（空參數的 /li 等於跨世界傳送），一律走具名的 IPC 端點。
+        /// </remarks>
+        /// <returns>Lifestream 接受了這次請求才回 true；沒裝、忙碌中、去不了都回 false。</returns>
+        internal static bool LifestreamChangeWorld(string world)
+        {
+            if (string.IsNullOrWhiteSpace(world))
+                return false;
+
+            try
+            {
+                return Svc.PluginInterface.GetIpcSubscriber<string, bool>("Lifestream.ChangeWorld")
+                    .InvokeFunc(world);
+            }
+            catch (Exception e)
+            {
+                Svc.Log.Information(e, "[Marketbuddy] Lifestream.ChangeWorld 呼叫失敗（沒裝或 IPC 還沒好）。");
+                return false;
+            }
+        }
         /// <summary>
         /// Sets AutoRetainer's suppression flag. Returns true when the call
         /// actually went through (false = AutoRetainer absent / IPC not ready),

@@ -48,6 +48,12 @@ namespace Marketbuddy
 
         private int totalRowsLoaded;
 
+        /// <summary>換世界下拉選單目前選到第幾個。</summary>
+        private int travelChoice;
+
+        /// <summary>每個世界最後一次被掃到的時間（下拉選單上標「還沒掃過」用）。</summary>
+        private readonly Dictionary<uint, DateTime> worldLatest = new();
+
         /// <summary>比價分頁的排序方式。</summary>
         private int sortMode;
 
@@ -77,6 +83,8 @@ namespace Marketbuddy
             }
 
             PumpLoad();
+            if (!loadRequested)
+                RequestLoad();
 
             if (ImGui.BeginTabBar("##mbsurveytabs"))
             {
@@ -164,6 +172,8 @@ namespace Marketbuddy
             else
                 DrawIdleControls();
 
+            DrawTravelSection(running);
+
             ImGui.Spacing();
             ImGui.Separator();
             ImGui.Spacing();
@@ -181,6 +191,66 @@ namespace Marketbuddy
             Grey("Whatever is looked up here is uploaded anonymously to Universalis by Dalamud itself (if you have that turned on in Dalamud). This plugin never contacts any website on its own."
                 .Loc());
         }
+
+        /// <summary>
+        /// 「去下一個世界」。
+        /// 🔴 這顆按鈕<b>只換世界</b>：按下去請 Lifestream 送你過去，抵達之後什麼都不會發生，
+        /// 要掃描得自己回到上面再按一次「掃描這個世界」。刻意不串起來——
+        /// 一顆按鈕就跑完八個世界那種東西是無人值守的自動化，不是這個功能要做的事。
+        /// </summary>
+        private void DrawTravelSection(bool running)
+        {
+            ImGui.Spacing();
+            ImGui.Separator();
+            ImGui.Spacing();
+            ImGui.TextUnformatted("Travel to another world".Loc());
+            Grey("Travelling never starts a scan by itself - press the scan button again once you get there.".Loc());
+
+            if (survey.LifestreamMissing)
+            {
+                Grey("Lifestream is not installed, so this plugin cannot move you between worlds. Travel by hand, then press the scan button again."
+                    .Loc());
+                return;
+            }
+
+            var targets = survey.TravelTargets;
+            if (targets.Count == 0)
+            {
+                Grey("Lifestream does not report any world you can travel to from here.".Loc());
+                return;
+            }
+
+            if (travelChoice >= targets.Count)
+                travelChoice = 0;
+
+            ImGui.SetNextItemWidth(260);
+            if (ImGui.BeginCombo("##mbsurveyworld", WorldLabel(targets[travelChoice])))
+            {
+                for (var i = 0; i < targets.Count; i++)
+                {
+                    if (ImGui.Selectable(WorldLabel(targets[i]), travelChoice == i))
+                        travelChoice = i;
+                }
+
+                ImGui.EndCombo();
+            }
+
+            ImGui.SameLine();
+            using (Disabled(running))
+            {
+                if (ImGui.Button("Travel there".Loc()))
+                    survey.RequestChangeWorld(targets[travelChoice].Name);
+            }
+
+            if (survey.TravelStatus.Length > 0)
+                ImGui.TextWrapped(survey.TravelStatus);
+        }
+
+        /// <summary>下拉選單上的一列：世界名，加上「這個世界上次掃到什麼時候」。</summary>
+        private string WorldLabel((uint WorldId, string Name) target)
+            => worldLatest.TryGetValue(target.WorldId, out var at)
+                ? "?? (scanned ??)".Loc(target.Name, FormatAge(at))
+                : "?? (not scanned yet)".Loc(target.Name);
 
         private void DrawIdleControls()
         {
@@ -468,6 +538,7 @@ namespace Marketbuddy
         {
             entries.Clear();
             worlds.Clear();
+            worldLatest.Clear();
             totalRowsLoaded = rows.Count;
 
             var latestPerWorld = new Dictionary<uint, (string Name, DateTime At)>();
@@ -497,7 +568,11 @@ namespace Marketbuddy
             }
 
             foreach (var (worldId, (name, at)) in latestPerWorld)
+            {
                 worlds.Add((worldId, name, at));
+                worldLatest[worldId] = at;
+            }
+
             worlds.Sort((a, b) => a.WorldId.CompareTo(b.WorldId));
 
             foreach (var entry in entries)

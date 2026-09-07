@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using Dalamud.Game.Network.Structures;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.UI.Info;
+using Lumina.Excel.Sheets;
 using static Marketbuddy.Common.Dalamud;
 
 namespace Marketbuddy
@@ -110,6 +111,14 @@ namespace Marketbuddy
         private bool probeAnswered, probeRefused, probeEmpty;
         private int firstItemNoResponseStreak;
 
+        // ---- 換世界（Lifestream）------------------------------------------
+        // 🔴 這一整組刻意與掃描完全分離：換世界不會開始掃描、掃描也不會換世界。
+        //    「到了下一個世界」之後仍然要使用者自己再按一次「掃描這個世界」。
+        private string? travelRequestWorld;
+        private readonly List<(uint WorldId, string Name)> travelTargets = [];
+        private uint travelTargetsBuiltFor = uint.MaxValue;
+        private bool lifestreamMissing;
+
         // ---- 市場封包接收（形狀逐字比照 BatchReprice，只是不驅動任何改價）------
         private readonly List<(uint Price, bool IsHq, ulong RetainerId)> captured = [];
         private bool offeringsPending;
@@ -142,6 +151,15 @@ namespace Marketbuddy
         /// 上一輪停下來的原因是「這個情境送不出查詢」。畫面用它顯示那句具體的建議。
         /// </summary>
         internal bool LastRunLookedUnsupported { get; private set; }
+
+        /// <summary>同一個資料中心裡、Lifestream 說去得了的世界（不含目前這一個）。</summary>
+        internal IReadOnlyList<(uint WorldId, string Name)> TravelTargets => travelTargets;
+
+        /// <summary>問過 Lifestream 但它不在（或 IPC 還沒好）。畫面要說的話與「沒有可去的世界」不同。</summary>
+        internal bool LifestreamMissing => lifestreamMissing;
+
+        /// <summary>上一次換世界請求的結果，顯示在按鈕旁邊。</summary>
+        internal string TravelStatus { get; private set; } = string.Empty;
 
         internal int OkCount => okCount;
         internal int EmptyCount => emptyCount;
@@ -194,6 +212,19 @@ namespace Marketbuddy
             if (IsRunning)
                 return;
             startRequested = true;
+        }
+
+        /// <summary>
+        /// 🔴 <b>「去下一個世界」的唯一入口</b>，只由巡檢視窗上那顆按鈕呼叫，
+        /// <b>按一次只換一次</b>：這裡只記下一個目的地，framework 執行緒上消費掉之後就清空，
+        /// 沒有重試、沒有佇列、也沒有「到了就自動開始掃描」的串接。
+        /// </summary>
+        internal void RequestChangeWorld(string world)
+        {
+            if (IsRunning || string.IsNullOrWhiteSpace(world))
+                return;
+            travelRequestWorld = world;
+            TravelStatus = string.Empty;
         }
 
         /// <summary>取消。按鈕、關視窗、以及任何讓路條件都走這裡。</summary>
@@ -263,12 +294,7 @@ namespace Marketbuddy
         {
             if (State == SurveyState.Idle)
             {
-                // 🔴 閒置時這裡唯一會做的事，就是把使用者按鈕立下的旗標消費掉。
-                //    沒有任何遊戲狀態可以讓巡檢自己開始跑。
-                if (!startRequested)
-                    return;
-                startRequested = false;
-                BeginRun();
+                TickIdle();
                 return;
             }
 
@@ -297,6 +323,113 @@ namespace Marketbuddy
                     TickRunning(DateTime.UtcNow);
                     return;
             }
+        }
+
+        /// <summary>
+        /// 閒置時的一格。
+        /// 🔴 這裡會做的事只有三件，而且每一件都要有使用者按過按鈕才會發生：
+        /// 消費「開始掃描」旗標、消費「去某個世界」旗標、以及在所在世界變了之後
+        /// 重建可前往世界的清單（那只是一份下拉選單的內容，不會讓任何事情開始跑）。
+        /// </summary>
+        private void TickIdle()
+        {
+            var currentWorldId = PlayerState.CurrentWorld.RowId;
+            if (currentWorldId != 0 && currentWorldId != travelTargetsBuiltFor)
+                RebuildTravelTargets(currentWorldId);
+
+            if (travelRequestWorld is { } destination)
+            {
+                travelRequestWorld = null;
+                ChangeWorldOnce(destination);
+            }
+
+            // 🔴 沒有任何遊戲狀態可以讓巡檢自己開始跑：只有這個旗標。
+            if (!startRequested)
+                return;
+            startRequested = false;
+            BeginRun();
+        }
+
+        /// <summary>
+        /// 重建「這裡去得了哪些世界」的下拉選單內容。
+        /// 候選來自 World 表裡同一個資料中心的列，再逐一問 Lifestream 去不去得了——
+        /// 🔑 刻意<b>不</b>自己維護一份世界名單，也不靠 <c>IsPublic</c>（台服八個正式世界
+        /// 的 <c>IsPublic</c> 全是 false，照它篩會得到空清單）。Lifestream 才是
+        /// 「這個角色現在去得了哪裡」的權威。
+        /// </summary>
+        private void RebuildTravelTargets(uint currentWorldId)
+        {
+            travelTargets.Clear();
+            travelTargetsBuiltFor = currentWorldId;
+            lifestreamMissing = false;
+
+            var currentRow = PlayerState.CurrentWorld.ValueNullable;
+            if (currentRow == null)
+            {
+                // 讀不到就當作還沒建起來，下一格再試。
+                travelTargetsBuiltFor = uint.MaxValue;
+                return;
+            }
+
+            var dataCentre = currentRow.Value.DataCenter.RowId;
+            var sheet = DataManager.GetExcelSheet<World>();
+            if (sheet == null)
+                return;
+
+            foreach (var row in sheet)
+            {
+                if (row.RowId == currentWorldId || row.DataCenter.RowId != dataCentre)
+                    continue;
+                var name = row.Name.ExtractText();
+                if (name.Length == 0)
+                    continue;
+
+                var reachable = IPCManager.CanLifestreamVisit(name);
+                if (reachable == null)
+                {
+                    // 端點不存在 ⇒ Lifestream 沒裝。不必再問剩下的世界。
+                    lifestreamMissing = true;
+                    travelTargets.Clear();
+                    return;
+                }
+
+                if (reachable == true)
+                    travelTargets.Add((row.RowId, name));
+            }
+
+            travelTargets.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
+        }
+
+        /// <summary>
+        /// 🔴 <b>按一次只換一次。</b>沒有重試、沒有排程，抵達之後也不會自己開始掃描。
+        /// </summary>
+        private void ChangeWorldOnce(string destination)
+        {
+            if (IPCManager.IsLocked)
+            {
+                TravelStatus = "Halted by another plugin via IPC".Loc();
+                return;
+            }
+
+            if (AutoRetainerBridge.IsBusy)
+            {
+                TravelStatus = "AutoRetainer is busy (or MultiMode is enabled), stop it first".Loc();
+                return;
+            }
+
+            if (IPCManager.IsLifestreamBusy())
+            {
+                TravelStatus = "Lifestream is busy right now.".Loc();
+                return;
+            }
+
+            var accepted = IPCManager.LifestreamChangeWorld(destination);
+            TravelStatus = accepted
+                ? "Asked Lifestream to travel to ??. Press Scan this world again once you get there.".Loc(destination)
+                : "Lifestream did not accept that request (it may be busy, or that world is not reachable right now).".Loc();
+            Log.Information(
+                $"[Marketbuddy] 巡檢：向 Lifestream 請求前往 {destination}，接受={accepted}。" +
+                "這次呼叫只換一次世界，抵達之後不會自己開始掃描。");
         }
 
         private bool CheckStandDown(out string reason)
