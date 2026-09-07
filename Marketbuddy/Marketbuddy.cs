@@ -51,6 +51,12 @@ namespace Marketbuddy
         internal PendingActionsBuilder PendingWorklist { get; private set; }
 
         /// <summary>
+        /// 純唯讀觀察者：看到使用者在市場板上買下東西時，告訴 GilDelta 那筆金幣是買了什麼。
+        /// 🔴 零封包、零 hook、零記憶體寫入，也不影響 Marketbuddy 的任何流程。
+        /// </summary>
+        internal MarketPurchaseWatcher MarketPurchaseWatcher { get; private set; }
+
+        /// <summary>
         /// 純診斷探針（只記錄、零行為變更）。失敗時為 null，其餘功能不受影響。
         /// </summary>
         private MarketRequestResultProbe? requestResultProbe;
@@ -129,6 +135,10 @@ namespace Marketbuddy
                 PendingWorklist = new PendingActionsBuilder(MarketGuiEventHandler);
                 MarketGuiEventHandler.Pending = PendingWorklist;
 
+                // 金幣歸因提示：只訂閱 Framework.Update 並在市場結果視窗開著時讀一個欄位。
+                // 沒裝 GilDelta 時整條路徑是安靜的 no-op。
+                MarketPurchaseWatcher = new MarketPurchaseWatcher(MarketGuiEventHandler);
+
                 try
                 {
                     QuickLister = new QuickLister(MarketGuiEventHandler, BatchReprice, MultiTour);
@@ -190,6 +200,7 @@ namespace Marketbuddy
             Safe(() => PluginInterface.UiBuilder.OpenConfigUi -= DrawConfigUi);
             Safe(() => Common.Dalamud.CommandManager.RemoveHandler(commandName));
             Safe(() => PluginUi?.Dispose());
+            Safe(() => MarketPurchaseWatcher?.Dispose());
             Safe(() => PendingWorklist?.Dispose());
             Safe(() => LiveSellList?.Dispose());
             Safe(() => QuickLister?.Dispose());
