@@ -144,6 +144,21 @@ namespace Marketbuddy
         internal int SkippedAlreadyDone => skippedAlreadyDone;
         internal string SourceLabel => list?.SourceLabel ?? string.Empty;
 
+        /// <summary>
+        /// 目前所在世界的名稱，<b>在 framework 執行緒上拍好的快照</b>。
+        /// 🔴 繪製執行緒不可以自己去讀 <c>PlayerState</c>：那是原生指標解參
+        /// （<c>PlayerState.Instance()</c> / 本地玩家實體），由遊戲主執行緒每幀重建，
+        /// 讀到一半被換掉就是 AccessViolationException，而 AVE 在 .NET Core 是
+        /// corrupted-state exception，<c>try</c>/<c>catch</c> 攔不到。所以畫面一律讀這份快照。
+        /// </summary>
+        internal string CurrentWorldName { get; private set; } = string.Empty;
+
+        /// <summary>目前所在世界的 id（framework 執行緒快照，0＝還沒登入）。</summary>
+        internal uint CurrentWorldId { get; private set; }
+
+        /// <summary>已經進到遊戲世界裡了（framework 執行緒快照）。</summary>
+        internal bool LoggedIn { get; private set; }
+
         /// <summary>畫面上那一行狀態文字；閒置時是上一輪的結果或失敗原因。</summary>
         internal string StatusText { get; private set; } = string.Empty;
 
@@ -277,7 +292,9 @@ namespace Marketbuddy
                 return false;
             }
 
-            if (PlayerState.ContentId == 0 || PlayerState.CurrentWorld.RowId == 0)
+            // 🔴 這個方法每一幀都被繪製執行緒呼叫（按鈕要不要變灰），所以只讀
+            //    framework 執行緒拍好的快照，不直接碰 PlayerState 的原生指標。
+            if (!LoggedIn || CurrentWorldId == 0)
             {
                 reason = "Not logged in".Loc();
                 return false;
@@ -292,6 +309,8 @@ namespace Marketbuddy
 
         private void OnFrameworkUpdate(IFramework framework)
         {
+            UpdateWorldSnapshot();
+
             if (State == SurveyState.Idle)
             {
                 TickIdle();
@@ -333,9 +352,8 @@ namespace Marketbuddy
         /// </summary>
         private void TickIdle()
         {
-            var currentWorldId = PlayerState.CurrentWorld.RowId;
-            if (currentWorldId != 0 && currentWorldId != travelTargetsBuiltFor)
-                RebuildTravelTargets(currentWorldId);
+            if (CurrentWorldId != 0 && CurrentWorldId != travelTargetsBuiltFor)
+                RebuildTravelTargets(CurrentWorldId);
 
             if (travelRequestWorld is { } destination)
             {
@@ -432,6 +450,20 @@ namespace Marketbuddy
                 "這次呼叫只換一次世界，抵達之後不會自己開始掃描。");
         }
 
+        /// <summary>
+        /// 把「我在哪個世界、有沒有登入」拍成快照給繪製執行緒用。
+        /// 🔴 只在這裡（framework 執行緒）讀 <c>PlayerState</c>。
+        /// </summary>
+        private void UpdateWorldSnapshot()
+        {
+            LoggedIn = PlayerState.ContentId != 0;
+            var world = PlayerState.CurrentWorld;
+            CurrentWorldId = world.RowId;
+            CurrentWorldName = CurrentWorldId == 0
+                ? string.Empty
+                : world.ValueNullable?.Name.ExtractText() ?? $"#{CurrentWorldId}";
+        }
+
         private bool CheckStandDown(out string reason)
         {
             reason = string.Empty;
@@ -454,13 +486,13 @@ namespace Marketbuddy
                 return true;
             }
 
-            if (PlayerState.ContentId == 0)
+            if (!LoggedIn)
             {
                 reason = "Left the game world".Loc();
                 return true;
             }
 
-            if (State == SurveyState.Running && PlayerState.CurrentWorld.RowId != worldId)
+            if (State == SurveyState.Running && CurrentWorldId != worldId)
             {
                 reason = "The world changed, this round stops here".Loc();
                 return true;
@@ -481,9 +513,8 @@ namespace Marketbuddy
                 return;
             }
 
-            var world = PlayerState.CurrentWorld;
-            worldId = world.RowId;
-            worldName = world.ValueNullable?.Name.ExtractText() ?? $"#{worldId}";
+            worldId = CurrentWorldId;
+            worldName = CurrentWorldName;
 
             // 🔴 來源①②讀遊戲／IPC，只能在這裡（framework 執行緒）做。
             list = conf.PriceSurveyAllCharacters

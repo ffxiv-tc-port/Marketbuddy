@@ -122,7 +122,9 @@ namespace Marketbuddy
         {
             ImGui.Spacing();
 
-            var worldName = PlayerState.CurrentWorld.ValueNullable?.Name.ExtractText() ?? string.Empty;
+            // 🔴 世界名讀的是巡檢在 framework 執行緒拍好的快照，不是 PlayerState：
+            //    繪製執行緒不解遊戲的原生指標。
+            var worldName = survey.CurrentWorldName;
             if (worldName.Length == 0)
                 Grey("Current world: ? (not logged in)".Loc());
             else
