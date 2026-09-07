@@ -80,7 +80,7 @@ namespace Marketbuddy
             // Never contend with our own headless engines for the shared
             // InfoProxyItemSearch request slot (BatchReprice drives both the
             // "relist all" batch and every quick-list single-slot reprice).
-            if (gui.BatchEngine?.IsRunning == true)
+            if (gui.BatchEngine?.IsRunning == true || gui.Survey?.IsRunning == true)
             {
                 watching = false;
                 return;

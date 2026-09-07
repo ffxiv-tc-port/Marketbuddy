@@ -176,6 +176,58 @@ namespace Marketbuddy
         /// </summary>
         public bool VerboseMarketDiagnostics = false;
 
+        /// <summary>
+        /// 「跨世界價格巡檢」：帶著自己掛售中的清單，在每一個世界的市場前面按一下，
+        /// 把每一件的行情逐一問過並記進 <c>price_survey.csv</c>。
+        /// </summary>
+        /// <remarks>
+        /// 🔴 <b>預設關閉</b>，而且開著也只是「顯示這個功能的視窗」——真的要跑一定要
+        /// 使用者自己在巡檢視窗上按「掃描這個世界」。它不掛任何自動觸發：
+        /// 沒有 AutoRetainer 事件、沒有 addon 事件、掃完一個世界就停、不會自己換世界。
+        /// <para>🔴 整條路徑只讀不寫：只送遊戲自己的市場查詢，不改任何價格、不掛售、不下架。</para>
+        /// </remarks>
+        public bool PriceSurveyEnabled = false;
+
+        /// <summary>
+        /// 巡檢時可以直接採用的市場快取新鮮度（秒）。<b>0 = 每一件都重新向伺服器查</b>。
+        /// </summary>
+        /// <remarks>
+        /// 🔑 預設刻意是 0，與重掛的 <see cref="MarketDataCacheSeconds"/> 不同：巡檢的產出
+        /// 是一份「這個世界此刻的行情」記錄，混進幾分鐘前的舊值會讓事後比價得出錯的結論。
+        /// 想跑快一點（例如同一輪重跑）再自己調大。
+        /// </remarks>
+        public int PriceSurveyCacheSeconds = 0;
+
+        /// <summary>
+        /// 續掃用：同一個世界在這麼多小時內已經問到答案的道具就跳過。<b>0 = 不跳過</b>。
+        /// </summary>
+        /// <remarks>
+        /// 巡檢一個世界可能要十幾分鐘，中途被打斷（換世界、AutoRetainer 插進來、關視窗）
+        /// 是常態。有了這個，再按一次「掃描這個世界」就會接著上次跑，而不是從頭再來。
+        /// ⚠️ 被拒絕與逾時的那幾件**不算掃過**，下一輪會重新問。
+        /// </remarks>
+        public int PriceSurveySkipHours = 6;
+
+        /// <summary>
+        /// 只巡檢「上一輪資料顯示已經被別人壓價」的道具。
+        /// </summary>
+        /// <remarks>
+        /// ⚠️ 需要 <c>price_survey.csv</c> 裡已經有資料；完全沒有資料時開著它會篩掉全部道具，
+        /// 畫面會直說「沒有符合條件的道具」而不是靜靜地什麼都不做。
+        /// </remarks>
+        public bool PriceSurveyOnlyUndercut = false;
+
+        /// <summary>
+        /// 巡檢清單直接取用 InventoryTools 的 <c>inventories.csv</c>（涵蓋**所有角色**的僱員），
+        /// 不走「出售品視窗 → AllaganTools IPC」那條只看得到目前角色的優先序。
+        /// </summary>
+        /// <remarks>
+        /// 預設 false ＝ 維持優先序：出售品視窗開著時只看眼前那一位僱員，否則問 AllaganTools
+        /// （目前角色的全部僱員），再不行才讀記錄檔。
+        /// ⚠️ 記錄檔的新鮮度取決於 InventoryTools 上次寫檔的時間，不是即時的。
+        /// </remarks>
+        public bool PriceSurveyAllCharacters = false;
+
         public int Version { get; set; } = 0;
 
         // the below exist just to make saving/loading less cumbersome
@@ -215,6 +267,8 @@ namespace Marketbuddy
                 conf.DelistTourSkipRetainers ??= [];
                 conf.MarketTaxPercent = Math.Clamp(conf.MarketTaxPercent, 0, 25);
                 conf.MarketDataCacheSeconds = Math.Clamp(conf.MarketDataCacheSeconds, 0, 3600);
+                conf.PriceSurveyCacheSeconds = Math.Clamp(conf.PriceSurveyCacheSeconds, 0, 3600);
+                conf.PriceSurveySkipHours = Math.Clamp(conf.PriceSurveySkipHours, 0, 168);
             }
 
             _cachedConfig = conf;

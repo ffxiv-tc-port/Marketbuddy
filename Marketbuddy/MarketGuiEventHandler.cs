@@ -24,6 +24,12 @@ namespace Marketbuddy
         /// <summary>Injected after construction; shares the delist thresholds and tax logic with the batch engine.</summary>
         internal BatchReprice? BatchEngine { get; set; }
 
+        /// <summary>Injected after construction; shares the mutual-exclusion state with the delist engine.</summary>
+        internal BatchDelist? DelistEngine { get; set; }
+
+        /// <summary>Injected after construction; the cross-world price survey (read-only, manual only).</summary>
+        internal PriceSurvey? Survey { get; set; }
+
         /// <summary>Injected after construction; lets the quick-list flow take over RetainerSell when it opened it.</summary>
         internal QuickLister? QuickLister { get; set; }
 

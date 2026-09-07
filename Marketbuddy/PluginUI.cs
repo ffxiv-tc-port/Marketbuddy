@@ -38,6 +38,18 @@ namespace Marketbuddy
             set => _settingsVisible = value;
         }
 
+        /// <summary>
+        /// 跨世界價格巡檢視窗開著沒有。刻意**不存檔**：那是一個「現在要做這件事」的視窗，
+        /// 不是一個設定；下次進遊戲不該自己跳出來。
+        /// </summary>
+        public bool SurveyVisible
+        {
+            get => _surveyVisible;
+            set => _surveyVisible = value;
+        }
+
+        private bool _surveyVisible;
+
         public void Dispose()
         {
         }

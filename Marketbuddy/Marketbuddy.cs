@@ -39,6 +39,9 @@ namespace Marketbuddy
 
         internal ManualRequery ManualRequery { get; private set; }
 
+        /// <summary>跨世界掛售價格巡檢（唯讀、只在使用者按下按鈕時才動）。</summary>
+        internal PriceSurvey PriceSurvey { get; private set; }
+
         internal LiveSellList LiveSellList { get; private set; }
 
         /// <summary>
@@ -96,6 +99,12 @@ namespace Marketbuddy
                 MarketGuiEventHandler.BatchEngine = BatchReprice;
 
                 BatchDelist = new BatchDelist(MarketGuiEventHandler);
+                MarketGuiEventHandler.DelistEngine = BatchDelist;
+
+                // 跨世界價格巡檢：只訂閱 Framework.Update 與市場封包事件並等待。
+                // 🔴 它沒有任何自動觸發來源——使用者不去按那顆按鈕，這個物件什麼都不會做。
+                PriceSurvey = new PriceSurvey(MarketGuiEventHandler);
+                MarketGuiEventHandler.Survey = PriceSurvey;
 
                 MultiTour = new MultiRetainerTour(MarketGuiEventHandler, BatchReprice, BatchDelist);
 
@@ -173,6 +182,7 @@ namespace Marketbuddy
             Safe(() => LiveSellList?.Dispose());
             Safe(() => QuickLister?.Dispose());
             Safe(() => ManualRequery?.Dispose());
+            Safe(() => PriceSurvey?.Dispose());
             // 🔴 必須排在 MultiTour 之前：它會取消進行中的巡迴，而且要在那之後
             //    才把 AutoRetainer 的控制權還回去（AR 端的等待沒有時限）。
             Safe(() => MultiCharTour?.Dispose());
@@ -216,8 +226,18 @@ namespace Marketbuddy
 
         private void OnCommand(string command, string args)
         {
-            if (command == commandName)
-                PluginUi.SettingsVisible = !PluginUi.SettingsVisible;
+            if (command != commandName)
+                return;
+
+            // /mbuddy survey ＝ 直接開巡檢視窗。空參數維持一直以來的行為（開關設定視窗）。
+            var argument = args.Trim();
+            if (argument.Equals("survey", StringComparison.OrdinalIgnoreCase))
+            {
+                PluginUi.SurveyVisible = !PluginUi.SurveyVisible;
+                return;
+            }
+
+            PluginUi.SettingsVisible = !PluginUi.SettingsVisible;
         }
 
         private void DrawUi()
