@@ -212,13 +212,13 @@ namespace Marketbuddy
             reason = string.Empty;
             if (IsRunning)
             {
-                reason = "巡檢已經在跑了".Loc();
+                reason = "A price survey is already running".Loc();
                 return false;
             }
 
             if (!conf.PriceSurveyEnabled)
             {
-                reason = "這個功能還沒有啟用".Loc();
+                reason = "This feature is not enabled yet".Loc();
                 return false;
             }
 
@@ -236,19 +236,19 @@ namespace Marketbuddy
 
             if (gui.BatchEngine?.IsRunning == true)
             {
-                reason = "重掛正在進行中".Loc();
+                reason = "A relist is running".Loc();
                 return false;
             }
 
             if (gui.DelistEngine?.IsRunning == true)
             {
-                reason = "下架正在進行中".Loc();
+                reason = "A delist is running".Loc();
                 return false;
             }
 
             if (PlayerState.ContentId == 0 || PlayerState.CurrentWorld.RowId == 0)
             {
-                reason = "還沒登入".Loc();
+                reason = "Not logged in".Loc();
                 return false;
             }
 
@@ -305,31 +305,31 @@ namespace Marketbuddy
 
             if (IPCManager.IsLocked)
             {
-                reason = "已被其他外掛透過 IPC 停止".Loc();
+                reason = "Halted by another plugin via IPC".Loc();
                 return true;
             }
 
             if (AutoRetainerBridge.IsBusy)
             {
-                reason = "AutoRetainer 開始動作，巡檢讓路".Loc();
+                reason = "AutoRetainer started working, the survey stands down".Loc();
                 return true;
             }
 
             if (gui.BatchEngine?.IsRunning == true || gui.DelistEngine?.IsRunning == true)
             {
-                reason = "重掛／下架開始動作，巡檢讓路".Loc();
+                reason = "A relist or delist started, the survey stands down".Loc();
                 return true;
             }
 
             if (PlayerState.ContentId == 0)
             {
-                reason = "已離開遊戲世界".Loc();
+                reason = "Left the game world".Loc();
                 return true;
             }
 
             if (State == SurveyState.Running && PlayerState.CurrentWorld.RowId != worldId)
             {
-                reason = "所在世界改變了，這一輪到此為止".Loc();
+                reason = "The world changed, this round stops here".Loc();
                 return true;
             }
 
@@ -344,7 +344,7 @@ namespace Marketbuddy
         {
             if (!CanStart(out var why))
             {
-                StatusText = "無法開始：??".Loc(why);
+                StatusText = "Cannot start: ??".Loc(why);
                 return;
             }
 
@@ -375,7 +375,7 @@ namespace Marketbuddy
             queueIndex = 0;
             itemQueue.Clear();
             byItemId.Clear();
-            StatusText = "正在整理要巡檢的清單…".Loc();
+            StatusText = "Building the list to survey...".Loc();
         }
 
         private void TickPreparing()
@@ -383,7 +383,7 @@ namespace Marketbuddy
             var task = prepareTask;
             if (task == null)
             {
-                Finish("清單準備失敗".Loc(), unsupported: false);
+                Finish("Could not build the list".Loc(), unsupported: false);
                 return;
             }
 
@@ -400,7 +400,7 @@ namespace Marketbuddy
             catch (Exception e)
             {
                 Log.Information(e, "[Marketbuddy] 巡檢：準備清單時發生例外。");
-                Finish("清單準備失敗".Loc(), unsupported: false);
+                Finish("Could not build the list".Loc(), unsupported: false);
                 return;
             }
 
@@ -408,7 +408,7 @@ namespace Marketbuddy
             if (list == null || list.Items.Count == 0)
             {
                 Finish(
-                    "找不到任何掛售中的道具（需要 InventoryTools／AllaganTools，或先打開僱員的出售品視窗）。".Loc(),
+                    "No listed items found (needs InventoryTools/AllaganTools, or open a retainer's sell list first).".Loc(),
                     unsupported: false);
                 return;
             }
@@ -419,8 +419,8 @@ namespace Marketbuddy
             {
                 Finish(
                     skippedAlreadyDone > 0
-                        ? "這個世界的清單在保留時間內都已經掃過了（?? 件）。".Loc(skippedAlreadyDone)
-                        : "沒有符合條件的道具可以巡檢。".Loc(),
+                        ? "Everything on this world's list was already surveyed within the keep-for window (?? item(s)).".Loc(skippedAlreadyDone)
+                        : "No item matches the current filters.".Loc(),
                     unsupported: false);
                 return;
             }
@@ -498,7 +498,7 @@ namespace Marketbuddy
         {
             if (queueIndex >= itemQueue.Count)
             {
-                Finish("完成".Loc(), unsupported: false);
+                Finish("Done".Loc(), unsupported: false);
                 return;
             }
 
@@ -533,7 +533,7 @@ namespace Marketbuddy
                     var proxy = GetItemSearchProxy();
                     if (proxy == null)
                     {
-                        Finish("拿不到市場查詢介面（InfoProxyItemSearch）".Loc(), unsupported: false);
+                        Finish("The market query interface is unavailable (InfoProxyItemSearch)".Loc(), unsupported: false);
                         return;
                     }
 
@@ -681,7 +681,7 @@ namespace Marketbuddy
                 return false;
 
             Finish(
-                "這個情境送不出市場查詢：第一件連續 ?? 次完全沒有回應。請走到市場前面，或先打開一位僱員的出售品視窗再試一次。"
+                "Market queries cannot be sent in this situation: the first item got no response ?? times in a row. Walk up to a market board, or open a retainer's sell list first, then try again."
                     .Loc(firstItemNoResponseStreak),
                 unsupported: true);
             return true;
@@ -765,7 +765,7 @@ namespace Marketbuddy
             if (queueIndex < itemQueue.Count)
             {
                 currentItemId = itemQueue[queueIndex];
-                StatusText = "巡檢中：?? / ??".Loc(queueIndex, itemQueue.Count);
+                StatusText = "Surveying: ?? / ??".Loc(queueIndex, itemQueue.Count);
             }
         }
 
@@ -782,7 +782,7 @@ namespace Marketbuddy
             MarketRequestGate.LogSummary("price survey finished");
             LastRunLookedUnsupported = unsupported;
             StatusText = itemQueue.Count > 0
-                ? "?? （?? / ?? 件，記錄 ?? 列）".Loc(reason, queueIndex, itemQueue.Count, recordedRows)
+                ? "?? (?? / ?? item(s), ?? row(s) recorded)".Loc(reason, queueIndex, itemQueue.Count, recordedRows)
                 : reason;
             ResetRun();
         }

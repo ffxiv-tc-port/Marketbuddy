@@ -25,10 +25,14 @@ namespace Marketbuddy
         /// </summary>
         private string multiCharArmError = string.Empty;
 
+        /// <summary>跨世界價格巡檢的獨立視窗。</summary>
+        private readonly PriceSurveyWindow surveyWindow;
+
         // passing in the image here just for simplicity
         public PluginUI(Marketbuddy plugin)
         {
             marketbuddy = plugin;
+            surveyWindow = new PriceSurveyWindow(plugin.PriceSurvey);
             SettingsVisible = false;
         }
 
@@ -64,11 +68,24 @@ namespace Marketbuddy
         public void Draw()
         {
             DrawSettingsWindow();
+            DrawSurveyWindow();
             // 順序即排版：重掛面板先畫，畫完把它的下緣交給即時掛單面板當作起點。
             // 兩者在同一個 ImGui frame 內先後執行，所以這個值永遠是「這一幀的」，不會慢一拍。
             var repriceBottom = DrawRepriceWindow();
             DrawRetainerListOverlay();
             marketbuddy.LiveSellList.Draw(repriceBottom);
+        }
+
+        /// <summary>
+        /// 跨世界價格巡檢視窗。關掉視窗＝停止巡檢：一個看不見的東西不應該還在背景送查詢，
+        /// 而且使用者關窗的意思本來就是「不要再跑了」。
+        /// </summary>
+        private void DrawSurveyWindow()
+        {
+            var wasVisible = _surveyVisible;
+            surveyWindow.Draw(ref _surveyVisible);
+            if (wasVisible && !_surveyVisible)
+                surveyWindow.OnClosed();
         }
 
         /// <summary>
@@ -1158,6 +1175,33 @@ namespace Marketbuddy
                 "Off by default. The per-item query lines and the request-gate trace are always written to the log either way - this only decides whether they show up at Information level or stay at Debug. Turn it on when someone asks you for a market-board log; leaving it on just makes the log noisier. Refusals, timeouts and market errors are reported regardless of this setting."
                     .Loc());
             ImGui.PopStyleColor();
+
+            ImGui.Spacing();
+            ImGui.Separator();
+            ImGui.Spacing();
+            DrawPriceSurveyEntry();
+        }
+
+        /// <summary>
+        /// 跨世界價格巡檢的入口。
+        /// 🔴 這裡只有「顯示這個功能」與「打開它的視窗」兩件事——真的要跑一定要使用者
+        /// 自己在那個視窗裡按下「掃描這個世界」，沒有任何自動觸發。
+        /// </summary>
+        private void DrawPriceSurveyEntry()
+        {
+            if (ImGui.Checkbox("Cross-world price survey (reads only, never changes a price)".Loc(),
+                    ref conf.PriceSurveyEnabled))
+                conf.Save();
+
+            DrawNestIndicator(1);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "Take your own listings around the worlds and look up what each of them is going for, one item at a time, then compare. Nothing happens on its own: you press a button once per world, and travelling to the next world is a separate button. It only ever sends the same market query the game's own search sends - no price is changed, nothing is listed or delisted. Results are appended to price_survey.csv in this plugin's config folder."
+                    .Loc());
+            ImGui.PopStyleColor();
+
+            if (ImGui.Button("Open the price survey window".Loc()))
+                SurveyVisible = true;
         }
 
         /// <summary>

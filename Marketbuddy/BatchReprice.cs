@@ -328,7 +328,7 @@ namespace Marketbuddy
             // 跨世界價格巡檢與重掛共用同一個 InfoProxyItemSearch 請求槽，兩者不能同時跑。
             if (gui.Survey?.IsRunning == true)
             {
-                reason = "跨世界價格巡檢正在進行中".Loc();
+                reason = "A cross-world price survey is running".Loc();
                 return false;
             }
 

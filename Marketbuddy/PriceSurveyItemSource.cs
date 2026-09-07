@@ -127,8 +127,8 @@ namespace Marketbuddy
 
             return builder.Build(
                 "sell-list",
-                "僱員出售品視窗（僅眼前這一位僱員）".Loc(),
-                "這個來源只看得到眼前這一位僱員的掛單。想一次巡檢全部僱員，請把出售品視窗關掉再開始。".Loc());
+                "Retainer sell list (this retainer only)".Loc(),
+                "This source only sees the retainer in front of you. Close the sell list before starting, to survey every retainer at once.".Loc());
         }
 
         /// <summary>
@@ -204,7 +204,7 @@ namespace Marketbuddy
 
             return builder.Build(
                 "allagantools",
-                "AllaganTools（目前角色的全部僱員）".Loc(),
+                "AllaganTools (every retainer of the current character)".Loc(),
                 null);
         }
 
@@ -303,8 +303,8 @@ namespace Marketbuddy
 
             return builder.Build(
                 "csv",
-                "InventoryTools 記錄檔（所有角色的僱員）".Loc(),
-                "這份清單來自 InventoryTools 上次寫檔的內容，不是即時的。".Loc());
+                "InventoryTools log file (every character's retainers)".Loc(),
+                "This list comes from whatever InventoryTools last wrote to disk, it is not live.".Loc());
         }
 
         /// <summary>(道具, 品質) 去重＋取我方最低掛售價的小工具。</summary>

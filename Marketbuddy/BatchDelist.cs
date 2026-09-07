@@ -290,7 +290,7 @@ namespace Marketbuddy
             // 跨世界價格巡檢與下架共用同一份市場請求節奏，兩者不能同時跑。
             if (gui.Survey?.IsRunning == true)
             {
-                reason = "跨世界價格巡檢正在進行中".Loc();
+                reason = "A cross-world price survey is running".Loc();
                 return false;
             }
 
