@@ -49,6 +49,9 @@ namespace Marketbuddy
         private bool loadRequested;
         private DateTime loadedAt = DateTime.MinValue;
 
+        /// <summary>上一次看到的 <see cref="PriceSurvey.RunSerial"/>；變了就重讀記錄檔。</summary>
+        private int lastSeenRunSerial = -1;
+
         /// <summary>比價分頁的資料（已經整理成一件一列）。</summary>
         private readonly List<CompareEntry> entries = [];
 
@@ -96,6 +99,16 @@ namespace Marketbuddy
             if (!loadRequested)
                 RequestLoad();
 
+            // 🔑 一輪收場（跑完、暫停、停止）就把記錄檔重讀一次。
+            //    少了這一步，「哪些世界掃過」與比價表都會停在視窗第一次打開時的樣子：
+            //    掃完一個世界再拉開換世界選單，它照樣寫著「還沒掃過」。
+            var serial = survey.RunSerial;
+            if (serial != lastSeenRunSerial)
+            {
+                lastSeenRunSerial = serial;
+                RequestLoad();
+            }
+
             if (ImGui.BeginTabBar("##mbsurveytabs"))
             {
                 if (ImGui.BeginTabItem("Scan".Loc() + "##mbsurveyscan"))
@@ -130,10 +143,14 @@ namespace Marketbuddy
             ImGui.End();
         }
 
-        /// <summary>視窗被關掉時呼叫：巡檢跟著停。看不見的東西不應該還在跑。</summary>
+        /// <summary>
+        /// 視窗被關掉時呼叫：巡檢跟著停手——看不見的東西不應該還在背景送查詢。
+        /// 🔑 2026-09-08 起改成<b>暫停</b>而不是結束：進度留著，重開視窗按「繼續掃描」
+        /// 就從原地接下去。關窗仍然一件都不會再查，而且<b>不會</b>自己恢復。
+        /// </summary>
         public void OnClosed()
         {
-            survey.RequestStop("The survey window was closed".Loc());
+            survey.RequestPause("The survey window was closed".Loc());
         }
 
         // =====================================================================
@@ -157,7 +174,11 @@ namespace Marketbuddy
             ImGui.Spacing();
 
             var running = survey.IsRunning;
-            using (Disabled(running))
+            var paused = survey.IsPaused;
+
+            // 🔴 暫停中也不准改：這幾項全部參與「要掃哪些件」的計算，中途改了
+            //    續跑接上去的那半段會用不同的規則，兩半合起來就不是同一份資料了。
+            using (Disabled(running || paused))
             {
                 if (ImGui.Checkbox("Take the list from InventoryTools' log file (covers every character's retainers)".Loc(),
                         ref conf.PriceSurveyAllCharacters))
@@ -193,10 +214,12 @@ namespace Marketbuddy
 
             if (running)
                 DrawRunningControls();
+            else if (paused)
+                DrawPausedControls();
             else
                 DrawIdleControls();
 
-            DrawTravelSection(running);
+            DrawTravelSection(running || paused);
 
             ImGui.Spacing();
             ImGui.Separator();
@@ -266,15 +289,50 @@ namespace Marketbuddy
                     survey.RequestChangeWorld(targets[travelChoice].Name);
             }
 
+            if (survey.IsPaused)
+                Grey("A round is paused on ??. Continue it or stop it before travelling - a paused round cannot be picked up on a different world."
+                    .Loc(survey.WorldName));
+
             if (survey.TravelStatus.Length > 0)
                 ImGui.TextWrapped(survey.TravelStatus);
         }
 
-        /// <summary>下拉選單上的一列：世界名，加上「這個世界上次掃到什麼時候」。</summary>
+        /// <summary>
+        /// 下拉選單上的一列：世界名，加上「這個世界掃到哪了」。
+        ///
+        /// <para>
+        /// 🔑 權威來源是 <see cref="PriceSurveyWorldLog"/>（它記得那一輪的完整清單有幾件），
+        /// 所以「掃完了」與「掃到一半」分得出來。沒有那一列時退回行情記錄檔裡的最後時間戳
+        /// ——那只知道「有掃過一些」，所以話要說得比較弱，<b>不可以講成掃完了</b>。
+        /// </para>
+        /// </summary>
         private string WorldLabel((uint WorldId, string Name) target)
-            => worldLatest.TryGetValue(target.WorldId, out var at)
-                ? "?? (scanned ??)".Loc(target.Name, FormatAge(at))
+        {
+            if (PriceSurveyWorldLog.TryGet(target.WorldId, out var row))
+            {
+                var freshness = PriceSurveyWorldLog.Classify(
+                    row, conf.PriceSurveySkipHours, survey.CurrentContentId, DateTime.UtcNow);
+                switch (freshness)
+                {
+                    case SurveyWorldFreshness.Complete:
+                        return "?? (all ?? done, ??)".Loc(target.Name, row.PlannedTotal, FormatAge(row.AtUtc));
+                    case SurveyWorldFreshness.Partial:
+                        return "?? (?? / ?? done, ??)".Loc(
+                            target.Name, row.Surveyed, row.PlannedTotal, FormatAge(row.AtUtc));
+                    case SurveyWorldFreshness.Stale:
+                        return "?? (?? - past the keep-for window, will be surveyed again)".Loc(
+                            target.Name, FormatAge(row.AtUtc));
+                    case SurveyWorldFreshness.OtherCharacter:
+                        return "?? (?? - another character's list)".Loc(target.Name, FormatAge(row.AtUtc));
+                    case SurveyWorldFreshness.Untracked:
+                        return "?? (last visited ??)".Loc(target.Name, FormatAge(row.AtUtc));
+                }
+            }
+
+            return worldLatest.TryGetValue(target.WorldId, out var at)
+                ? "?? (has some data, ??)".Loc(target.Name, FormatAge(at))
                 : "?? (not scanned yet)".Loc(target.Name);
+        }
 
         private void DrawIdleControls()
         {
@@ -306,6 +364,9 @@ namespace Marketbuddy
                 Grey("(off by default; enabling it only makes the button clickable, nothing happens on its own)".Loc());
             }
 
+            DrawThisWorldProgress();
+            DrawWorldMemoryControls();
+
             if (survey.StatusText.Length == 0)
                 return;
 
@@ -322,14 +383,157 @@ namespace Marketbuddy
             }
         }
 
+        /// <summary>
+        /// 閒置時，把「這個世界上次掃到哪」直接寫在按鈕底下。
+        /// 🔑 這一行存在的理由：續掃本來就會跳過保留時間內問過的道具，可是進度列
+        /// 每一輪都從 0 重新算，看起來就像整份重來。把「上次到哪、按下去會從哪接」
+        /// 寫在列上，使用者才看得出來它其實沒有重來。
+        /// </summary>
+        private void DrawThisWorldProgress()
+        {
+            var worldId = survey.CurrentWorldId;
+            if (worldId == 0)
+                return;
+
+            ImGui.Spacing();
+
+            if (!PriceSurveyWorldLog.TryGet(worldId, out var row))
+            {
+                Grey(PriceSurveyWorldLog.Loaded
+                    ? "This world has not been surveyed yet.".Loc()
+                    : "Reading the world progress file...".Loc());
+                return;
+            }
+
+            var freshness = PriceSurveyWorldLog.Classify(
+                row, conf.PriceSurveySkipHours, survey.CurrentContentId, DateTime.UtcNow);
+
+            switch (freshness)
+            {
+                case SurveyWorldFreshness.Complete:
+                    Grey("This world: all ?? item(s) surveyed ??.".Loc(row.PlannedTotal, FormatAge(row.AtUtc)));
+                    Tooltip(
+                        "Scanning again now would find every item still inside the keep-for window, so it would have nothing left to ask."
+                            .Loc());
+                    return;
+                case SurveyWorldFreshness.Partial:
+                    ImGui.TextUnformatted("This world: ?? / ?? item(s) surveyed ?? - scanning again carries on from item ??."
+                        .Loc(row.Surveyed, row.PlannedTotal, FormatAge(row.AtUtc), row.Surveyed + 1));
+                    Tooltip(
+                        "Items already answered inside the keep-for window are skipped, so the ones below were never lost. Refusals and timeouts are always asked again."
+                            .Loc());
+                    return;
+                case SurveyWorldFreshness.Stale:
+                    Grey("This world: last surveyed ??, which is past the keep-for window - the next scan starts over.".Loc(
+                        FormatAge(row.AtUtc)));
+                    Tooltip("Raise \"Skip items already surveyed within (hours)\" if you want a longer memory.".Loc());
+                    return;
+                case SurveyWorldFreshness.OtherCharacter:
+                    Grey("This world: the ?? record was made by another character with a list that only covered that character."
+                        .Loc(FormatAge(row.AtUtc)));
+                    return;
+                case SurveyWorldFreshness.Untracked:
+                    Grey("This world: last visited ??. \"Skip items already surveyed within\" is 0, so nothing is ever skipped."
+                        .Loc(FormatAge(row.AtUtc)));
+                    return;
+            }
+        }
+
+        /// <summary>「忘記掃過哪些世界」——「掃過」的第四種失效條件，也是唯一一種由使用者觸發的。</summary>
+        private void DrawWorldMemoryControls()
+        {
+            var known = PriceSurveyWorldLog.Count;
+            if (known == 0)
+                return;
+
+            ImGui.Spacing();
+            Grey("?? world(s) remembered".Loc(known));
+            ImGui.SameLine();
+            using (Disabled(PriceSurveyWorldLog.IsLoading))
+            {
+                if (ImGui.Button("Forget which worlds were scanned".Loc()))
+                    PriceSurveyWorldLog.Clear();
+            }
+
+            Tooltip(
+                "Clears ?? only. Every price this survey has ever recorded stays in ??, and nothing in the game is touched."
+                    .Loc(PriceSurveyWorldLog.FileName, PriceSurveyLog.FileName));
+        }
+
+        /// <summary>
+        /// 暫停中的操作列。
+        /// 🔴 這裡的「繼續掃描」是<b>離開暫停唯一的前進方向</b>，而且一定要使用者按。
+        /// </summary>
+        private void DrawPausedControls()
+        {
+            var canResume = survey.CanResume(out var why);
+            using (Disabled(!canResume))
+            {
+                if (ImGui.Button("Continue the survey".Loc(), new Vector2(180, 0)))
+                    survey.RequestResume();
+            }
+
+            ImGui.SameLine();
+            if (ImGui.Button("Stop and discard".Loc(), new Vector2(180, 0)))
+                survey.RequestStop("The paused round was discarded".Loc());
+
+            Tooltip(
+                "Discarding only throws away this round's remaining queue. Everything already surveyed stays in the log file, so starting again would skip it anyway."
+                    .Loc());
+
+            if (!canResume)
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudOrange);
+                ImGui.TextWrapped(why);
+                ImGui.PopStyleColor();
+            }
+
+            ImGui.Spacing();
+
+            var total = Math.Max(1, survey.Total);
+            ImGui.ProgressBar(survey.Processed / (float)total, new Vector2(-1, 0),
+                $"{survey.Processed} / {survey.Total}");
+
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudYellow);
+            ImGui.TextWrapped("Paused: ??".Loc(survey.PauseReason));
+            ImGui.PopStyleColor();
+
+            var pausedFor = survey.PausedForSeconds;
+            if (pausedFor >= 0)
+                Grey("Paused for ??".Loc(FormatDuration(pausedFor)));
+
+            Grey("World ??  Source ??".Loc(survey.WorldName, survey.SourceLabel));
+            Grey("Nothing is being asked while paused, and it will not resume on its own - press Continue.".Loc());
+            Grey("?? row(s) recorded  ?? found  ?? nobody selling  ?? refused  ?? timed out  ?? from cache".Loc(
+                survey.RecordedRows, survey.OkCount, survey.EmptyCount, survey.RefusedCount,
+                survey.TimeoutCount, survey.CacheCount));
+            if (survey.SkippedAlreadyDone > 0)
+                Grey("?? item(s) skipped (surveyed within the keep-for window)".Loc(survey.SkippedAlreadyDone));
+        }
+
         private void DrawRunningControls()
         {
+            var preparing = survey.State == PriceSurvey.SurveyState.Preparing;
+
+            // 🔑 準備階段還沒有佇列可以留著，所以那時候只給「停止」——
+            //    給一顆按下去等於停止的「暫停」比沒有那顆更糟。
+            using (Disabled(preparing))
+            {
+                if (ImGui.Button("Pause".Loc(), new Vector2(180, 0)))
+                    survey.RequestPause("Paused by the user".Loc());
+            }
+
+            Tooltip(
+                "Keeps this round's queue and progress. Nothing is asked while paused, and it never continues on its own - you press Continue."
+                    .Loc());
+
+            ImGui.SameLine();
             if (ImGui.Button("Stop the price survey".Loc(), new Vector2(180, 0)))
                 survey.RequestStop("Stopped by the user".Loc());
 
             ImGui.Spacing();
 
-            if (survey.State == PriceSurvey.SurveyState.Preparing)
+            if (preparing)
             {
                 ImGui.TextUnformatted(survey.StatusText);
                 return;

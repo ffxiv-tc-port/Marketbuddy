@@ -71,6 +71,23 @@ namespace Marketbuddy
             Idle,
             Preparing,
             Running,
+
+            /// <summary>
+            /// 暫停：整輪的清單、進度、統計全部留著，只是不再送任何查詢。
+            ///
+            /// <para>
+            /// 🔴 <b>離開暫停只有兩條路，兩條都要使用者按按鈕</b>：按「繼續掃描」
+            /// （<see cref="RequestResume"/>）或按「停止」（<see cref="RequestStop"/>）。
+            /// 沒有任何遊戲狀態、任何事件、任何逾時會讓它自己繼續跑——
+            /// 「換完世界自動接著掃」那種串接正是這個功能刻意不做的事。
+            /// </para>
+            ///
+            /// <para>
+            /// ⚠️ 暫停中 <see cref="IsRunning"/> 是 <c>false</c>：重掛／下架／手動重查
+            /// 拿它當互斥判準，暫停的巡檢沒有在用市場查詢的額度，不該擋住它們。
+            /// </para>
+            /// </summary>
+            Paused,
         }
 
         private enum ItemPhase
@@ -85,6 +102,9 @@ namespace Marketbuddy
         // ---- 使用者按鈕交過來的意圖（唯一入口）--------------------------------
         private bool startRequested;
         private string? stopRequested;
+        private string? pauseRequested;
+        private bool resumeRequested;
+        private DateTime pausedAt;
 
         // ---- 準備階段 --------------------------------------------------------
         private Task<PrepareResult>? prepareTask;
@@ -100,6 +120,13 @@ namespace Marketbuddy
         private int recordedRows;
         private int okCount, emptyCount, refusedCount, timeoutCount, cacheCount;
         private int skippedAlreadyDone;
+
+        /// <summary>
+        /// 開始這一輪的是哪一個角色。
+        /// 🔑 刻意在開始時抄下來、不在收場時現讀：登出那條收場路徑上
+        /// <see cref="CurrentContentId"/> 已經變成 0，現讀會把「誰掃的」寫成「不知道」。
+        /// </summary>
+        private ulong runContentId;
 
         // ---- 目前這一件 -----------------------------------------------------
         private ItemPhase phase;
@@ -132,8 +159,28 @@ namespace Marketbuddy
 
         internal SurveyState State { get; private set; } = SurveyState.Idle;
 
-        /// <summary>其他引擎的互斥判準：巡檢在跑的時候大家讓開。</summary>
-        internal bool IsRunning => State != SurveyState.Idle;
+        /// <summary>
+        /// 其他引擎的互斥判準：巡檢在跑的時候大家讓開。
+        /// ⚠️ <b>暫停中不算在跑</b>：暫停的巡檢一個查詢都沒在送，擋住重掛／下架只會讓人卡住。
+        /// </summary>
+        internal bool IsRunning => State is SurveyState.Preparing or SurveyState.Running;
+
+        /// <summary>暫停中（清單與進度都還在，等使用者按「繼續掃描」或「停止」）。</summary>
+        internal bool IsPaused => State == SurveyState.Paused;
+
+        /// <summary>暫停的原因（已在地化）；沒有暫停時是空字串。</summary>
+        internal string PauseReason { get; private set; } = string.Empty;
+
+        /// <summary>暫停了多久（秒）；沒有暫停時 -1。</summary>
+        internal double PausedForSeconds
+            => State == SurveyState.Paused ? (DateTime.UtcNow - pausedAt).TotalSeconds : -1;
+
+        /// <summary>
+        /// 每一次一輪收場（跑完、停止、暫停）就 +1。
+        /// 🔑 畫面拿它當「記錄檔可能變了」的訊號去重讀——少了它，
+        /// 「哪些世界掃過」那份標示會停在視窗第一次打開時的樣子，掃完一個世界也不會更新。
+        /// </summary>
+        internal int RunSerial { get; private set; }
 
         internal int Total => itemQueue.Count;
         internal int Processed => queueIndex;
@@ -158,6 +205,9 @@ namespace Marketbuddy
 
         /// <summary>已經進到遊戲世界裡了（framework 執行緒快照）。</summary>
         internal bool LoggedIn { get; private set; }
+
+        /// <summary>目前角色的 ContentId（framework 執行緒快照，0＝還沒登入）。</summary>
+        internal ulong CurrentContentId { get; private set; }
 
         /// <summary>畫面上那一行狀態文字；閒置時是上一輪的結果或失敗原因。</summary>
         internal string StatusText { get; private set; } = string.Empty;
@@ -236,18 +286,45 @@ namespace Marketbuddy
         /// </summary>
         internal void RequestChangeWorld(string world)
         {
-            if (IsRunning || string.IsNullOrWhiteSpace(world))
+            // 🔴 暫停中也不換世界：換過去之後那一輪的進度就對不上這個世界了，
+            //    與其偷偷把它丟掉，不如讓使用者先決定要「繼續掃描」還是「停止」。
+            if (IsRunning || IsPaused || string.IsNullOrWhiteSpace(world))
                 return;
             travelRequestWorld = world;
             TravelStatus = string.Empty;
         }
 
-        /// <summary>取消。按鈕、關視窗、以及任何讓路條件都走這裡。</summary>
+        /// <summary>
+        /// 取消整輪（進度丟掉）。按鈕與任何不可回復的讓路條件都走這裡。
+        /// ⚠️ 暫停中也收：那是「放棄這次暫停」。
+        /// </summary>
         internal void RequestStop(string reason)
+        {
+            if (!IsRunning && !IsPaused)
+                return;
+            stopRequested = reason;
+        }
+
+        /// <summary>
+        /// 暫停（進度留著）。按鈕、關視窗、以及可回復的讓路條件走這裡。
+        /// 🔴 暫停<b>不會</b>自己解除：要繼續一定得使用者再按一次。
+        /// </summary>
+        internal void RequestPause(string reason)
         {
             if (!IsRunning)
                 return;
-            stopRequested = reason;
+            pauseRequested = reason;
+        }
+
+        /// <summary>
+        /// 🔴 <b>「繼續掃描」的唯一入口</b>，只由巡檢視窗上那顆按鈕呼叫。
+        /// 這裡只立旗標，真正的檢查與續跑發生在 framework 執行緒上。
+        /// </summary>
+        internal void RequestResume()
+        {
+            if (!IsPaused)
+                return;
+            resumeRequested = true;
         }
 
         /// <summary>
@@ -259,6 +336,12 @@ namespace Marketbuddy
             if (IsRunning)
             {
                 reason = "A price survey is already running".Loc();
+                return false;
+            }
+
+            if (IsPaused)
+            {
+                reason = "A price survey is paused - continue it or stop it first".Loc();
                 return false;
             }
 
@@ -303,6 +386,73 @@ namespace Marketbuddy
             return true;
         }
 
+        /// <summary>
+        /// 暫停中的這一輪現在能不能接著跑。回 false 時 <paramref name="reason"/> 是給使用者看的一句話。
+        /// 🔴 這個方法每一幀都被繪製執行緒呼叫（按鈕要不要變灰），所以只讀 framework 執行緒
+        /// 拍好的快照，不直接碰 <c>PlayerState</c> 的原生指標。
+        /// </summary>
+        internal bool CanResume(out string reason)
+        {
+            reason = string.Empty;
+            if (State != SurveyState.Paused)
+            {
+                reason = "Nothing is paused".Loc();
+                return false;
+            }
+
+            if (queueIndex >= itemQueue.Count)
+            {
+                reason = "That round has nothing left to survey".Loc();
+                return false;
+            }
+
+            if (!conf.PriceSurveyEnabled)
+            {
+                reason = "This feature is not enabled yet".Loc();
+                return false;
+            }
+
+            if (IPCManager.IsLocked)
+            {
+                reason = "locked via IPC by another plugin".Loc();
+                return false;
+            }
+
+            if (AutoRetainerBridge.IsBusy)
+            {
+                reason = "AutoRetainer is busy (or MultiMode is enabled), stop it first".Loc();
+                return false;
+            }
+
+            if (gui.BatchEngine?.IsRunning == true)
+            {
+                reason = "A relist is running".Loc();
+                return false;
+            }
+
+            if (gui.DelistEngine?.IsRunning == true)
+            {
+                reason = "A delist is running".Loc();
+                return false;
+            }
+
+            if (!LoggedIn || CurrentWorldId == 0)
+            {
+                reason = "Not logged in".Loc();
+                return false;
+            }
+
+            // 🔴 這一輪的每一列都記著它是在 worldId 問到的。在別的世界接著跑會把
+            //    另一個世界的行情寫成這個世界的，那是靜默的資料汙染，不是小問題。
+            if (CurrentWorldId != worldId)
+            {
+                reason = "That round belongs to ??, and you are not there".Loc(worldName);
+                return false;
+            }
+
+            return true;
+        }
+
         // =====================================================================
         //  幀時鐘
         // =====================================================================
@@ -311,13 +461,24 @@ namespace Marketbuddy
         {
             UpdateWorldSnapshot();
 
+            // 「哪些世界掃過」那份小記錄檔：第一次讀在執行緒池上，之後兩行都是 no-op。
+            PriceSurveyWorldLog.BeginLoad();
+            PriceSurveyWorldLog.PumpLoad();
+
             if (State == SurveyState.Idle)
             {
                 TickIdle();
                 return;
             }
 
+            if (State == SurveyState.Paused)
+            {
+                TickPaused();
+                return;
+            }
+
             startRequested = false;
+            resumeRequested = false;
 
             if (stopRequested is { } reason)
             {
@@ -326,10 +487,23 @@ namespace Marketbuddy
                 return;
             }
 
-            // 讓路條件：任何一個成立就立刻收手。
-            if (CheckStandDown(out var standDownReason))
+            if (pauseRequested is { } pauseReason)
             {
-                Finish(standDownReason, unsupported: false);
+                pauseRequested = null;
+                PauseOrFinish(pauseReason);
+                return;
+            }
+
+            // 讓路條件：任何一個成立就立刻收手。
+            // 🔑 可回復的（別的引擎在用市場、視窗關了）改成**暫停**，進度留著；
+            //    不可回復的（登出、世界換了）才是真的結束——那兩種情況下的進度
+            //    接不回去，留著只會讓人在錯的世界按「繼續」。
+            if (CheckStandDown(out var standDownReason, out var recoverable))
+            {
+                if (recoverable)
+                    PauseOrFinish(standDownReason);
+                else
+                    Finish(standDownReason, unsupported: false);
                 return;
             }
 
@@ -342,6 +516,50 @@ namespace Marketbuddy
                     TickRunning(DateTime.UtcNow);
                     return;
             }
+        }
+
+        /// <summary>
+        /// 暫停時的一格。
+        /// 🔴 這裡<b>只</b>消費使用者的兩個旗標，外加一道「這一輪還接得回去嗎」的守衛。
+        /// 沒有任何路徑會讓它自己恢復掃描。
+        /// </summary>
+        private void TickPaused()
+        {
+            // 暫停中不接受「開始」與「換世界」；旗標消費掉，免得之後莫名其妙生效。
+            startRequested = false;
+            travelRequestWorld = null;
+
+            if (stopRequested is { } reason)
+            {
+                stopRequested = null;
+                resumeRequested = false;
+                Finish(reason, unsupported: false);
+                return;
+            }
+
+            pauseRequested = null;
+
+            // 🔴 守衛：登出或換了世界，這一輪就再也接不回去了——與其讓它掛在那裡，
+            //    不如當場結束並說清楚，這樣「繼續掃描」永遠不會把別的世界的行情
+            //    寫成這個世界的。
+            if (!LoggedIn)
+            {
+                resumeRequested = false;
+                Finish("Left the game world, the paused round was dropped".Loc(), unsupported: false);
+                return;
+            }
+
+            if (CurrentWorldId != worldId)
+            {
+                resumeRequested = false;
+                Finish("The world changed, the paused round was dropped".Loc(), unsupported: false);
+                return;
+            }
+
+            if (!resumeRequested)
+                return;
+            resumeRequested = false;
+            ResumeRun();
         }
 
         /// <summary>
@@ -456,7 +674,8 @@ namespace Marketbuddy
         /// </summary>
         private void UpdateWorldSnapshot()
         {
-            LoggedIn = PlayerState.ContentId != 0;
+            CurrentContentId = PlayerState.ContentId;
+            LoggedIn = CurrentContentId != 0;
             var world = PlayerState.CurrentWorld;
             CurrentWorldId = world.RowId;
             CurrentWorldName = CurrentWorldId == 0
@@ -464,9 +683,14 @@ namespace Marketbuddy
                 : world.ValueNullable?.Name.ExtractText() ?? $"#{CurrentWorldId}";
         }
 
-        private bool CheckStandDown(out string reason)
+        /// <param name="recoverable">
+        /// true＝這個理由消失之後這一輪還接得回去（暫停就好）；
+        /// false＝這一輪的前提沒了（登出、換世界），只能結束。
+        /// </param>
+        private bool CheckStandDown(out string reason, out bool recoverable)
         {
             reason = string.Empty;
+            recoverable = true;
 
             if (IPCManager.IsLocked)
             {
@@ -489,12 +713,14 @@ namespace Marketbuddy
             if (!LoggedIn)
             {
                 reason = "Left the game world".Loc();
+                recoverable = false;
                 return true;
             }
 
             if (State == SurveyState.Running && CurrentWorldId != worldId)
             {
                 reason = "The world changed, this round stops here".Loc();
+                recoverable = false;
                 return true;
             }
 
@@ -515,6 +741,7 @@ namespace Marketbuddy
 
             worldId = CurrentWorldId;
             worldName = CurrentWorldName;
+            runContentId = CurrentContentId;
 
             // 🔴 來源①②讀遊戲／IPC，只能在這裡（framework 執行緒）做。
             list = conf.PriceSurveyAllCharacters
@@ -532,6 +759,9 @@ namespace Marketbuddy
 
             State = SurveyState.Preparing;
             LastRunLookedUnsupported = false;
+            PauseReason = string.Empty;
+            pauseRequested = null;
+            resumeRequested = false;
             runStartedAt = DateTime.UtcNow;
             recordedRows = 0;
             okCount = emptyCount = refusedCount = timeoutCount = cacheCount = 0;
@@ -934,6 +1164,152 @@ namespace Marketbuddy
             }
         }
 
+        // =====================================================================
+        //  暫停與續跑
+        // =====================================================================
+
+        /// <summary>
+        /// 能暫停就暫停，不能就結束。
+        /// ⚠️ 只有 <see cref="SurveyState.Running"/> 暫停得起來：<see cref="SurveyState.Preparing"/>
+        /// 階段還沒有佇列可以留（清單正在執行緒池上組），留一個空殼只會讓「繼續掃描」按下去什麼都沒有。
+        /// </summary>
+        private void PauseOrFinish(string reason)
+        {
+            // ⚠️ 最後一件已經處理完、只差下一格收尾的那一瞬間不可以暫停：
+            //    那會把「整份掃完」的收場（塔塔露、待處理重算、世界標成掃完）
+            //    擋在一個 <see cref="CanResume"/> 永遠不會放行的暫停後面。
+            //    這時候該做的事跟 <see cref="TickRunning"/> 下一格會做的完全一樣。
+            if (State == SurveyState.Running && queueIndex >= itemQueue.Count)
+            {
+                Finish("Done".Loc(), unsupported: false, completed: true);
+                return;
+            }
+
+            if (State != SurveyState.Running)
+            {
+                Finish(reason, unsupported: false);
+                return;
+            }
+
+            PauseRun(reason);
+        }
+
+        /// <summary>
+        /// 把整輪凍住：清單、進度、統計全部原地留著，只把「正在等的那一件」清乾淨。
+        /// 🔴 那一件<b>刻意不算數</b>——它還沒被寫進記錄檔，續跑時會重新問一次，
+        /// 比留著半個等待狀態誠實得多。
+        /// </summary>
+        private void PauseRun(string reason)
+        {
+            State = SurveyState.Paused;
+            pausedAt = DateTime.UtcNow;
+            PauseReason = reason;
+            RunSerial++;
+
+            ClearInFlight();
+            currentItemId = queueIndex < itemQueue.Count ? itemQueue[queueIndex] : 0;
+
+            StatusText = "Paused: ?? (?? / ?? item(s) done)".Loc(reason, queueIndex, itemQueue.Count);
+
+            Log.Information(
+                $"[Marketbuddy] 巡檢暫停（{reason}）：世界 {worldName}({worldId})，" +
+                $"處理 {queueIndex}/{itemQueue.Count} 件，記錄 {recordedRows} 列，" +
+                "進度留著，要繼續必須使用者自己按「繼續掃描」——不會自己恢復。");
+
+            MarketRequestGate.LogSummary("price survey paused");
+            NoteWorldProgress();
+        }
+
+        /// <summary>
+        /// 從暫停處接著跑。
+        /// 🔴 <b>不重建清單、不重讀任何檔案、不多送一次市場查詢</b>：佇列與
+        /// <see cref="queueIndex"/> 從來沒被清掉，接的就是原來那一份。
+        /// </summary>
+        private void ResumeRun()
+        {
+            if (!CanResume(out var why))
+            {
+                StatusText = "Cannot continue: ??".Loc(why);
+                return;
+            }
+
+            var pausedSeconds = (DateTime.UtcNow - pausedAt).TotalSeconds;
+
+            State = SurveyState.Running;
+            PauseReason = string.Empty;
+            ClearInFlight();
+            currentItemId = itemQueue[queueIndex];
+            StatusText = "Surveying: ?? / ??".Loc(queueIndex, itemQueue.Count);
+
+            Log.Information(
+                $"[Marketbuddy] 巡檢續跑：世界 {worldName}({worldId})，" +
+                $"從第 {queueIndex + 1} 件接續（共 {itemQueue.Count} 件），暫停了 {pausedSeconds:F0} 秒，" +
+                $"閘門 {MarketRequestGate.IntervalMs} ms。清單沒有重建，已經問過的不會再問一次。");
+        }
+
+        /// <summary>
+        /// 把「正在等的那一件」的狀態清乾淨——<b>不動</b>佇列、進度與統計。
+        /// <see cref="ResetRun"/> 與 <see cref="PauseRun"/> 共用這一段。
+        /// </summary>
+        private void ClearInFlight()
+        {
+            phase = ItemPhase.Throttle;
+            attempt = 0;
+            notBefore = DateTime.MinValue;
+            offeringsPending = false;
+            offeringsReceived = false;
+            historySeen = false;
+            captured.Clear();
+
+            // 探針槽裡任何還沒被取走的答覆都已經無主。
+            MarketRequestResultProbe.ArmForRequest();
+
+            var proxy = GetItemSearchProxy();
+            if (proxy == null)
+                return;
+            proxy->EndRequest();
+            proxy->ListingCount = 0;
+            proxy->EntryCount = 0;
+        }
+
+        /// <summary>
+        /// 把「這個世界掃到哪了」寫進 <see cref="PriceSurveyWorldLog"/>。
+        ///
+        /// <para>
+        /// 🔑 <c>plannedTotal</c> 是<b>這個世界的完整清單</b>（這一輪的佇列 ＋ 因為
+        /// 保留時間內已經問過而被略過的），所以連著跑好幾段的結果會自然累加：
+        /// 第一段 78/633、第二段 127/633，而不是每段各自從 0 開始。
+        /// </para>
+        ///
+        /// <para>
+        /// ⚠️ 開著「只巡檢被壓價的」時<b>不記</b>：那一輪的佇列是被篩過的，
+        /// 拿它當「這個世界掃到哪」會把一份挑過的子集講成整個世界的進度。
+        /// </para>
+        /// </summary>
+        private void NoteWorldProgress()
+        {
+            if (worldId == 0 || conf.PriceSurveyOnlyUndercut)
+                return;
+
+            var plannedTotal = itemQueue.Count + skippedAlreadyDone;
+            if (plannedTotal <= 0)
+                return;
+
+            // 真的問到答案的：這一輪查到的 ok／empty（快取命中已經算在裡面），
+            // 加上一開始就因為「保留時間內已經問過」而略過的那些。
+            var surveyed = Math.Min(plannedTotal, skippedAlreadyDone + okCount + emptyCount);
+
+            PriceSurveyWorldLog.Record(new SurveyWorldRow(
+                DateTime.UtcNow,
+                worldId,
+                worldName,
+                runContentId,
+                list?.SourceKey ?? string.Empty,
+                plannedTotal,
+                surveyed,
+                queueIndex >= itemQueue.Count));
+        }
+
         /// <param name="reason">給使用者看的收場原因（已在地化）。</param>
         /// <param name="unsupported">true＝這一輪看起來是「這個情境根本送不出查詢」。</param>
         /// <param name="completed">
@@ -943,7 +1319,7 @@ namespace Marketbuddy
         private void Finish(string reason, bool unsupported, bool completed = false)
         {
             var elapsed = runStartedAt == DateTime.MinValue ? 0 : (DateTime.UtcNow - runStartedAt).TotalSeconds;
-            var wasRunning = State == SurveyState.Running || State == SurveyState.Preparing;
+            var wasRunning = State is SurveyState.Running or SurveyState.Preparing or SurveyState.Paused;
 
             // 🔴 IPC 的實作跑在呼叫端的執行緒上。Finish 的每一個呼叫點都在 OnFrameworkUpdate
             //    的鏈上（framework 執行緒），所以這裡直接打過去就好，不必 marshal。
@@ -969,30 +1345,28 @@ namespace Marketbuddy
             StatusText = itemQueue.Count > 0
                 ? "?? (?? / ?? item(s), ?? row(s) recorded)".Loc(reason, queueIndex, itemQueue.Count, recordedRows)
                 : reason;
+
+            // 🔑 這一輪的進度要在 ResetRun 之前記下來（那裡會把狀態收乾淨）。
+            if (wasRunning)
+            {
+                NoteWorldProgress();
+                RunSerial++;
+            }
+
             ResetRun();
         }
 
         private void ResetRun()
         {
             State = SurveyState.Idle;
-            phase = ItemPhase.Throttle;
             prepareTask = null;
-            offeringsPending = false;
-            offeringsReceived = false;
-            historySeen = false;
-            captured.Clear();
             currentItemId = 0;
-            attempt = 0;
+            PauseReason = string.Empty;
+            pauseRequested = null;
+            resumeRequested = false;
 
-            // 這一輪結束了，探針槽裡任何還沒被取走的答覆都已經無主。
-            MarketRequestResultProbe.ArmForRequest();
-
-            var proxy = GetItemSearchProxy();
-            if (proxy == null)
-                return;
-            proxy->EndRequest();
-            proxy->ListingCount = 0;
-            proxy->EntryCount = 0;
+            // 這一輪結束了，進行中那一件的狀態與探針槽一起清掉。
+            ClearInFlight();
         }
 
         private static int RetryBackoffFor(int attemptNumber)
