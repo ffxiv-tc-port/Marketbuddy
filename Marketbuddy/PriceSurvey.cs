@@ -64,6 +64,9 @@ namespace Marketbuddy
         /// <summary>第一件連續這麼多次「什麼都沒回來」就判定這個情境送不出查詢，整輪停下。</summary>
         private const int FirstItemGiveUpAfter = 3;
 
+        /// <summary>準備階段最多等採購清單重讀這麼久；超過就用上一份繼續，不卡住。</summary>
+        private const double ShoppingReloadWaitSeconds = 5;
+
         private const string Diag = "[MBDIAG]";
 
         internal enum SurveyState
@@ -121,6 +124,27 @@ namespace Marketbuddy
         private int okCount, emptyCount, refusedCount, timeoutCount, cacheCount;
         private int skippedAlreadyDone;
 
+        // ---- 採購清單（第四種來源，與上面那份「我在賣什麼」完全分開）------------
+        // 🔴 這一整組只有 conf.PriceSurveyShoppingList 打開時才有內容，而那個設定預設關。
+        //    關著的時候下面每一個集合都是空的，整條路徑等於不存在。
+        /// <summary>這一輪開始時的設定快照：中途改設定不會讓半輪的規則不一致。</summary>
+        private bool shoppingEnabled;
+
+        /// <summary>這一輪要順便查行情的採購清單道具（已經與掛售清單去重）。</summary>
+        private readonly HashSet<uint> shoppingIds = [];
+
+        /// <summary>這一輪因為採購清單而多排進佇列的件數（不含與掛售清單重疊、順路查到的）。</summary>
+        private int shoppingExtraQueued;
+
+        /// <summary>這一輪寫進 <see cref="ShoppingSurveyLog"/> 的列數。</summary>
+        private int shoppingRecordedRows;
+
+        /// <summary>因為保留時間內已經問過而略過的採購清單件數。</summary>
+        private int shoppingSkippedAlreadyDone;
+
+        /// <summary>開始這一輪時的 <see cref="ShoppingList.Generation"/>；用來等那次重讀回來。</summary>
+        private int shoppingGenerationAtStart;
+
         /// <summary>
         /// 開始這一輪的是哪一個角色。
         /// 🔑 刻意在開始時抄下來、不在收場時現讀：登出那條收場路徑上
@@ -147,7 +171,10 @@ namespace Marketbuddy
         private bool lifestreamMissing;
 
         // ---- 市場封包接收（形狀逐字比照 BatchReprice，只是不驅動任何改價）------
-        private readonly List<(uint Price, bool IsHq, ulong RetainerId)> captured = [];
+        // 🔑 這裡比 BatchReprice 多帶一個 Quantity：採購清單要回答「這個世界買得到幾個」。
+        //    刻意只加在本類別自己的緩衝區上，MarketDataCache 與 BatchReprice 的三元組
+        //    一個位元組都沒動——那條路上的定價邏輯不該因為一個顯示欄位而被碰。
+        private readonly List<(uint Price, bool IsHq, ulong RetainerId, uint Quantity)> captured = [];
         private bool offeringsPending;
         private bool offeringsReceived;
         private bool historySeen;
@@ -189,6 +216,15 @@ namespace Marketbuddy
         internal string WorldName => worldName;
         internal int RecordedRows => recordedRows;
         internal int SkippedAlreadyDone => skippedAlreadyDone;
+
+        /// <summary>這一輪因為採購清單而多排進佇列的件數（0＝沒開那個功能，或全部順路）。</summary>
+        internal int ShoppingExtraQueued => shoppingExtraQueued;
+
+        /// <summary>這一輪已經寫進採購記錄檔的列數。</summary>
+        internal int ShoppingRecordedRows => shoppingRecordedRows;
+
+        /// <summary>這一輪採購清單裡因為保留時間內已經問過而略過的件數。</summary>
+        internal int ShoppingSkippedAlreadyDone => shoppingSkippedAlreadyDone;
         internal string SourceLabel => list?.SourceLabel ?? string.Empty;
 
         /// <summary>
@@ -464,6 +500,11 @@ namespace Marketbuddy
             // 「哪些世界掃過」那份小記錄檔：第一次讀在執行緒池上，之後兩行都是 no-op。
             PriceSurveyWorldLog.BeginLoad();
             PriceSurveyWorldLog.PumpLoad();
+
+            // 採購清單：讀檔在執行緒池上，名稱換 id 在這條（framework）執行緒上。
+            // 🔴 沒有人要求重讀時這兩行都是 no-op；它們不會讓任何事情開始跑。
+            ShoppingList.BeginLoad();
+            ShoppingList.PumpLoad();
 
             if (State == SurveyState.Idle)
             {
@@ -751,11 +792,29 @@ namespace Marketbuddy
             var needCsvList = list == null;
             var csvPath = needCsvList ? PriceSurveyItemSource.InventoryToolsCsvPath() : null;
 
+            // 🔴 這一輪要不要順便查採購清單，在這裡定案；之後改設定不會讓半輪的規則不一致。
+            shoppingEnabled = conf.PriceSurveyShoppingList;
+            shoppingIds.Clear();
+            shoppingExtraQueued = 0;
+            shoppingRecordedRows = 0;
+            shoppingSkippedAlreadyDone = 0;
+            shoppingGenerationAtStart = ShoppingList.Generation;
+            if (shoppingEnabled)
+            {
+                // 每一輪都重讀一次清單檔：使用者剛改完檔就按掃描是最自然的順序。
+                // 讀檔在執行緒池上、名稱換 id 在 framework 執行緒上，兩段都由
+                // OnFrameworkUpdate 開頭那兩行推動；TickPreparing 會等它回來。
+                ShoppingList.RequestReload();
+            }
+
+            var wantShoppingHistory = shoppingEnabled;
+
             // 記錄檔的讀取（續掃用的「已掃過」集合、以及「只掃被壓價的」需要的上一輪資料）
             // 一律在執行緒池上做——那個檔案會長到幾萬列。
             prepareTask = Task.Run(() => new PrepareResult(
                 needCsvList ? PriceSurveyItemSource.TryFromInventoryToolsCsv(csvPath) : null,
-                PriceSurveyLog.LoadAll()));
+                PriceSurveyLog.LoadAll(),
+                wantShoppingHistory ? ShoppingSurveyLog.LoadAll() : []));
 
             State = SurveyState.Preparing;
             LastRunLookedUnsupported = false;
@@ -784,6 +843,19 @@ namespace Marketbuddy
             if (!task.IsCompleted)
                 return;
 
+            // 🔑 還要等那次採購清單重讀回來（判準是「世代號變了」，不是 IsLoading——
+            //    後者在「要求了但工作還沒被踢出去」那一格會誤判成已完成）。
+            //    ⚠️ 給它一個上限：等不到就用手上這一份繼續，寧可清單舊一點也不要卡在準備階段。
+            if (shoppingEnabled && ShoppingList.Generation == shoppingGenerationAtStart)
+            {
+                if ((DateTime.UtcNow - runStartedAt).TotalSeconds < ShoppingReloadWaitSeconds)
+                    return;
+
+                Log.Information(
+                    $"[Marketbuddy] 巡檢：等採購清單重讀超過 {ShoppingReloadWaitSeconds} 秒，" +
+                    "改用上一次讀到的那一份繼續。");
+            }
+
             prepareTask = null;
 
             PrepareResult prepared;
@@ -799,21 +871,39 @@ namespace Marketbuddy
             }
 
             list ??= prepared.CsvList;
+
+            // 🔑 沒有任何掛售中的道具，但採購清單上有東西時仍然可以跑：那是「我只想查要買的」。
+            //    這時候用一份空的清單頂著（來源標成 shopping-only），既有的收場文字與
+            //    OwnRetainerIds 判斷全部照舊成立。
+            var shoppingOnly = false;
             if (list == null || list.Items.Count == 0)
             {
-                Finish(
-                    "No listed items found (needs InventoryTools/AllaganTools, or open a retainer's sell list first).".Loc(),
-                    unsupported: false);
-                return;
+                if (!shoppingEnabled || ShoppingList.Items.Count == 0)
+                {
+                    Finish(
+                        "No listed items found (needs InventoryTools/AllaganTools, or open a retainer's sell list first).".Loc(),
+                        unsupported: false);
+                    return;
+                }
+
+                shoppingOnly = true;
+                list = new PriceSurveyItemList
+                {
+                    SourceKey = "shopping-only",
+                    SourceLabel = "Shopping list only (nothing of yours is listed)".Loc(),
+                    Items = [],
+                    OwnRetainerIds = [],
+                };
             }
 
-            BuildQueue(prepared.History);
+            BuildQueue(prepared.History, prepared.ShoppingHistory);
 
             if (itemQueue.Count == 0)
             {
                 Finish(
-                    skippedAlreadyDone > 0
-                        ? "Everything on this world's list was already surveyed within the keep-for window (?? item(s)).".Loc(skippedAlreadyDone)
+                    skippedAlreadyDone + shoppingSkippedAlreadyDone > 0
+                        ? "Everything on this world's list was already surveyed within the keep-for window (?? item(s)).".Loc(
+                            skippedAlreadyDone + shoppingSkippedAlreadyDone)
                         : "No item matches the current filters.".Loc(),
                     unsupported: false);
                 return;
@@ -827,10 +917,13 @@ namespace Marketbuddy
             notBefore = DateTime.MinValue;
             Log.Information(
                 $"[Marketbuddy] 巡檢開始：世界 {worldName}({worldId})，{itemQueue.Count} 件，" +
-                $"來源={list.SourceKey}，略過已掃 {skippedAlreadyDone} 件，閘門 {MarketRequestGate.IntervalMs} ms。");
+                $"來源={list.SourceKey}{(shoppingOnly ? "（只有採購清單）" : string.Empty)}，" +
+                $"略過已掃 {skippedAlreadyDone} 件，" +
+                $"採購清單多排 {shoppingExtraQueued} 件（略過已掃 {shoppingSkippedAlreadyDone} 件），" +
+                $"閘門 {MarketRequestGate.IntervalMs} ms。");
         }
 
-        private void BuildQueue(List<PriceSurveyRow> history)
+        private void BuildQueue(List<PriceSurveyRow> history, List<ShoppingSurveyRow> shoppingHistory)
         {
             byItemId.Clear();
             foreach (var item in list!.Items)
@@ -882,6 +975,79 @@ namespace Marketbuddy
 
                 itemQueue.Add(item.ItemId);
             }
+
+            AppendShoppingList(shoppingHistory);
+        }
+
+        /// <summary>
+        /// 把採購清單的道具接在佇列<b>後面</b>。
+        ///
+        /// <para>
+        /// 🔑 <b>刻意接在後面而不是混進去</b>：這樣「我在賣的那份」永遠先跑完，
+        /// 中途被打斷時損失的一定是採購清單那一段——那一段本來就是順路的。
+        /// 也因為順序如此，「這個世界的掛售清單掃到哪」那個進度才算得準
+        /// （見 <see cref="NoteWorldProgress"/>）。
+        /// </para>
+        ///
+        /// <para>
+        /// 🔑 <b>與掛售清單重疊的道具不會多查一次</b>：它已經在佇列裡了，
+        /// 這裡只把它記進 <see cref="shoppingIds"/>，一次查詢兩份記錄。
+        /// </para>
+        ///
+        /// <para>
+        /// ⚠️ 「只巡檢被壓價的」那個篩選<b>不套用</b>在採購清單上：被壓價講的是我方掛單，
+        /// 而採購清單上的東西我根本沒掛。
+        /// </para>
+        /// </summary>
+        /// <param name="shoppingHistory">採購清單的歷史行情（續掃用）。</param>
+        private void AppendShoppingList(List<ShoppingSurveyRow> shoppingHistory)
+        {
+            if (!shoppingEnabled)
+                return;
+
+            var wanted = ShoppingList.Items;
+            if (wanted.Count == 0)
+                return;
+
+            // 續掃：這個世界在保留時間內已經有結論的採購道具就不必再問一次。
+            // 判準與掛售清單那邊逐字相同（被拒絕與逾時都不算掃過）。
+            var alreadyDone = new HashSet<uint>();
+            if (conf.PriceSurveySkipHours > 0)
+            {
+                var cutoff = DateTime.UtcNow.AddHours(-conf.PriceSurveySkipHours);
+                foreach (var row in shoppingHistory)
+                {
+                    if (row.WorldId != worldId || row.AtUtc <= cutoff || !row.Answered)
+                        continue;
+                    alreadyDone.Add(row.ItemId);
+                }
+            }
+
+            // 🔴 判準是「真的排進佇列了沒」，不是「掛售清單走訪過沒」——後者也包含
+            //    被「已經掃過」「只掃被壓價的」篩掉的那些，拿它當順路的依據會讓那幾件
+            //    永遠不會被查，而且是靜默的。
+            var queued = new HashSet<uint>(itemQueue);
+
+            foreach (var item in wanted)
+            {
+                // 已經在佇列裡（我自己也在賣這件）＝順路，一次查詢寫兩份記錄，不多送任何請求。
+                if (queued.Contains(item.ItemId))
+                {
+                    shoppingIds.Add(item.ItemId);
+                    continue;
+                }
+
+                if (alreadyDone.Contains(item.ItemId))
+                {
+                    shoppingSkippedAlreadyDone++;
+                    continue;
+                }
+
+                shoppingIds.Add(item.ItemId);
+                itemQueue.Add(item.ItemId);
+                queued.Add(item.ItemId);
+                shoppingExtraQueued++;
+            }
         }
 
         // =====================================================================
@@ -908,7 +1074,11 @@ namespace Marketbuddy
                     if (MarketDataCache.TryGet(currentItemId, conf.PriceSurveyCacheSeconds, out var cached, out _))
                     {
                         captured.Clear();
-                        captured.AddRange(cached);
+                        // ⚠️ 共用快取沒有存件數（那是採購清單才要的欄位，不值得為它動
+                        //    BatchReprice 的定價路徑）。件數在這裡一律寫 0，
+                        //    CompleteItem 看到 source=="cache" 就把它記成 -1＝「不知道」。
+                        foreach (var (price, isHq, retainerId) in cached)
+                            captured.Add((price, isHq, retainerId, 0u));
                         cacheCount++;
                         CompleteItem(cached.Count > 0 ? "ok" : "empty", "cache", cached.Count);
                         return;
@@ -1088,24 +1258,47 @@ namespace Marketbuddy
             long lowestNq = -1, lowestHq = -1;
             ulong lowestNqRetainer = 0, lowestHqRetainer = 0;
 
+            // 採購清單要的「這裡買得到幾個」：這一頁掛單的合計件數，分品質算。
+            // 🔑 沒有掛單時是 0（＝確認沒得買），快取來的答案是 -1（＝不知道）——
+            //    兩者對使用者的意思完全不同，畫面也畫成不同的東西。
+            long nqQuantity = 0, hqQuantity = 0;
+
             if (verdict is "ok" or "empty")
             {
-                foreach (var (price, isHq, retainerId) in captured)
+                foreach (var (price, isHq, retainerId, quantity) in captured)
                 {
                     if (isHq)
                     {
+                        hqQuantity += quantity;
                         if (lowestHq < 0 || price < lowestHq)
                         {
                             lowestHq = price;
                             lowestHqRetainer = retainerId;
                         }
                     }
-                    else if (lowestNq < 0 || price < lowestNq)
+                    else
                     {
-                        lowestNq = price;
-                        lowestNqRetainer = retainerId;
+                        nqQuantity += quantity;
+                        if (lowestNq < 0 || price < lowestNq)
+                        {
+                            lowestNq = price;
+                            lowestNqRetainer = retainerId;
+                        }
                     }
                 }
+            }
+            else
+            {
+                nqQuantity = hqQuantity = -1;
+            }
+
+            // 共用快取沒有存件數 ⇒ 這一次的件數是「不知道」，不是 0。
+            if (string.Equals(source, "cache", StringComparison.Ordinal))
+            {
+                if (lowestNq >= 0)
+                    nqQuantity = -1;
+                if (lowestHq >= 0)
+                    hqQuantity = -1;
             }
 
             var knowOwners = list != null && list.OwnRetainerIds.Count > 0;
@@ -1129,6 +1322,17 @@ namespace Marketbuddy
                         lowestNq, lowestHq, lowestIsOurs, listingCount, source, gate, verdict));
                     recordedRows++;
                 }
+            }
+
+            // 🔑 採購清單的記錄寫在<b>另一個檔</b>：這幾件我根本沒有掛，寫進 price_survey.csv
+            //    只會讓比價分頁與待處理清單多出一堆「我方價＝不知道」的幽靈列。
+            //    同一次查詢可以同時滿足兩份清單，這裡不會多送任何一個請求。
+            if (shoppingIds.Contains(currentItemId))
+            {
+                ShoppingSurveyLog.Append(new ShoppingSurveyRow(
+                    now, worldId, worldName, currentItemId,
+                    lowestNq, nqQuantity, lowestHq, hqQuantity, listingCount, source, verdict));
+                shoppingRecordedRows++;
             }
 
             switch (verdict)
@@ -1291,12 +1495,18 @@ namespace Marketbuddy
             if (worldId == 0 || conf.PriceSurveyOnlyUndercut)
                 return;
 
-            var plannedTotal = itemQueue.Count + skippedAlreadyDone;
+            // 🔴 採購清單那一段<b>不算進</b>「這個世界的掛售清單掃到哪」：那份進度是拿來
+            //    回答「我在賣的東西比完了沒」的，混進採購件數會讓已經掃完的世界看起來沒掃完。
+            //    採購清單刻意排在佇列最後（見 AppendShoppingList），所以扣掉尾巴就是掛售那段。
+            var ownQueued = itemQueue.Count - shoppingExtraQueued;
+            var plannedTotal = ownQueued + skippedAlreadyDone;
             if (plannedTotal <= 0)
                 return;
 
             // 真的問到答案的：這一輪查到的 ok／empty（快取命中已經算在裡面），
             // 加上一開始就因為「保留時間內已經問過」而略過的那些。
+            // ⚠️ 進到採購那一段之後 ok+empty 會超過 plannedTotal，Math.Min 把它夾回
+            //    「掛售那段全部做完」，那正是當下的事實。
             var surveyed = Math.Min(plannedTotal, skippedAlreadyDone + okCount + emptyCount);
 
             PriceSurveyWorldLog.Record(new SurveyWorldRow(
@@ -1307,7 +1517,7 @@ namespace Marketbuddy
                 list?.SourceKey ?? string.Empty,
                 plannedTotal,
                 surveyed,
-                queueIndex >= itemQueue.Count));
+                queueIndex >= ownQueued));
         }
 
         /// <param name="reason">給使用者看的收場原因（已在地化）。</param>
@@ -1337,6 +1547,7 @@ namespace Marketbuddy
                 Log.Information(
                     $"[Marketbuddy] 巡檢結束（{reason}）：世界 {worldName}({worldId})，" +
                     $"處理 {queueIndex}/{itemQueue.Count} 件，記錄 {recordedRows} 列，" +
+                    $"採購清單 {shoppingRecordedRows} 列（多查 {shoppingExtraQueued} 件），" +
                     $"ok={okCount} empty={emptyCount} refused={refusedCount} timeout={timeoutCount} cache={cacheCount}，" +
                     $"耗時 {elapsed:F0} 秒，閘門 {MarketRequestGate.IntervalMs} ms，已通知塔塔露={praised}。");
 
@@ -1393,7 +1604,7 @@ namespace Marketbuddy
             lastAcceptedRequestId = offerings.RequestId;
             captured.Clear();
             foreach (var listing in listings)
-                captured.Add((listing.PricePerUnit, listing.IsHq, listing.RetainerId));
+                captured.Add((listing.PricePerUnit, listing.IsHq, listing.RetainerId, listing.ItemQuantity));
 
             offeringsPending = false;
             offeringsReceived = true;
@@ -1415,7 +1626,13 @@ namespace Marketbuddy
                 : (InfoProxyItemSearch*)infoModule->GetInfoProxyById(InfoProxyId.ItemSearch);
         }
 
-        /// <summary>準備階段在執行緒池上算出來的兩份東西。</summary>
-        private readonly record struct PrepareResult(PriceSurveyItemList? CsvList, List<PriceSurveyRow> History);
+        /// <summary>準備階段在執行緒池上算出來的三份東西。</summary>
+        /// <param name="ShoppingHistory">
+        /// 採購清單的歷史行情；沒開那個功能時是空清單（那時候完全不讀那個檔）。
+        /// </param>
+        private readonly record struct PrepareResult(
+            PriceSurveyItemList? CsvList,
+            List<PriceSurveyRow> History,
+            List<ShoppingSurveyRow> ShoppingHistory);
     }
 }
