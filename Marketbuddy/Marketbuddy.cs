@@ -99,6 +99,15 @@ namespace Marketbuddy
                 // only ever writes to a dictionary and never drives anything.
                 MarketDataCache.Init();
 
+                // 「歷史最近賣出價」的來源（Universalis 的 HTTP API）。Init 只是把 HttpClient
+                // 準備好，🔴 本身不送出任何請求：要使用者自己開啟那個定價方式、而且站在僱員的
+                // 出售品視窗前，才會有查詢排進佇列。零遊戲內市場查詢、零封包、零 hook。
+                LastSoldPriceSource.Init();
+
+                // 掛售年齡：把「這一次載入的時間」記下來，功能開始看之前就已經在架上的東西
+                // 拿它當暫定起點。🔴 只在「完全沒有紀錄」時寫一次，見 RetainerListingAge。
+                RetainerListingAge.Init();
+
                 // 純被動診斷：記錄每一次市場查價結果的 (listingCount, errorCode, itemId)，
                 // 然後原封不動呼叫 Original。用來判定「伺服器拒絕時到底有沒有回封包」。
                 // 掛不上去只影響診斷，所以自己吞掉例外。
@@ -227,6 +236,8 @@ namespace Marketbuddy
             Safe(() => MarketGuiEventHandler?.Dispose());
             Safe(() => requestResultProbe?.Dispose());
             Safe(() => MarketDataCache.Shutdown());
+            // 取消進行中的 HTTP 查詢並釋放 HttpClient。排在引擎之後：它們不再會排新的查詢。
+            Safe(() => LastSoldPriceSource.Shutdown());
             // Last: must run after every engine released its reference so a
             // leftover suppression can never survive an unload.
             Safe(() => AutoRetainerBridge.Shutdown());

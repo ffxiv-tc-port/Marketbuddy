@@ -81,6 +81,21 @@ namespace Marketbuddy
         private const int SlotWatchdogSeconds = 90;  // hard per-slot watchdog (queue-level safety net; sized for MaxAttempts attempts plus gate spacing and backoffs, with margin)
         private const int EmptyResultGraceMs = 1000; // history seen + this long with no offerings => nothing on sale (measured HISTORY->OFFERINGS max is 432 ms, so this is 2.3x the observed worst case)
 
+        /// <summary>
+        /// 「以歷史最近賣出價重掛」時，一格最多等 Universalis 這麼久。
+        ///
+        /// <para>
+        /// ⚠️ 這條路徑不送任何遊戲內查詢，等的是一個 HTTP 回應（<see cref="LastSoldPriceSource"/>
+        /// 自己的逾時是 15 秒，外加最多一次退避），所以 25 秒蓋得住正常情況。
+        /// 逾時之後<b>不是失敗</b>：那一格落回既有的市場比價流程，也就是它原本的定價方式。
+        /// </para>
+        /// <para>
+        /// 🔴 必須明顯小於 <see cref="SlotWatchdogSeconds"/>：那個看門狗一到期是<b>整批中止</b>，
+        /// 而「網路慢」不該讓整輪重掛死掉。
+        /// </para>
+        /// </summary>
+        private const int LastSoldWaitMs = 25000;
+
         /// <summary>Backoff before retry attempt N: escalates fast, then caps low - never the multi-second climb of a classic exponential backoff.</summary>
         private static int RetryBackoffFor(int attempt) => Math.Min(RetryBackoffBaseMs * attempt, RetryBackoffCapMs);
 
@@ -105,6 +120,12 @@ namespace Marketbuddy
             public SlotPhase Phase = SlotPhase.Throttle;
             public DateTime NotBefore = DateTime.MinValue;
             public DateTime WaitStart;
+            /// <summary>
+            /// 這一格開始等 Universalis 回答「歷史最近賣出價」的時間；
+            /// <see cref="DateTime.MinValue"/>＝還沒開始等。等太久就放棄那個定價方式、
+            /// 落回既有的市場比價流程（見 <see cref="LastSoldWaitMs"/>）。
+            /// </summary>
+            public DateTime LastSoldWaitStart = DateTime.MinValue;
             /// <summary>Diagnostics only: when this slot was first ticked, for total-elapsed reporting.</summary>
             public DateTime StartedAt = DateTime.MinValue;
             /// <summary>send→send gap of the attempt currently in flight; fed back to the gate when it turns out to have been swallowed.</summary>
@@ -181,6 +202,9 @@ namespace Marketbuddy
         /// 只用來替 CACHE-HIT 標出 within-batch / cross-batch，沒有行為作用。
         /// </summary>
         private DateTime batchStartedAt = DateTime.MinValue;
+
+        /// <summary>這一批已經講過一次「拿不到歷史賣出價，改用市場比價」了嗎。每批重設。</summary>
+        private bool lastSoldFallbackWarned;
 
         private static double MsSince(DateTime t) =>
             t == DateTime.MinValue ? -1 : (DateTime.UtcNow - t).TotalMilliseconds;
@@ -524,6 +548,18 @@ namespace Marketbuddy
             CurrentSlot = -1;
             CurrentBatchRetainerId = ActiveRetainerId();
             batchStartedAt = DateTime.UtcNow;
+            lastSoldFallbackWarned = false;
+
+            // 「以歷史最近賣出價重掛」開著時，整批的道具一次排進 Universalis 查詢佇列
+            // （一個 HTTP 請求就問完一整位僱員）。⚠️ 這只是預取，不改變任何觸發時機：
+            // 使用者沒按按鈕的話 BeginBatch 根本不會被呼叫。
+            if (conf.RelistUseLastSoldPrice)
+            {
+                var itemIds = new HashSet<uint>();
+                foreach (var job in jobs)
+                    itemIds.Add(job.ItemId);
+                RequestLastSoldPrices(itemIds);
+            }
             lastAcceptedRequestId = int.MinValue;
             offeringsPending = false;
             offeringsReceived = false;
@@ -606,6 +642,13 @@ namespace Marketbuddy
             switch (job.Phase)
             {
                 case SlotPhase.Throttle:
+                    // 「以歷史最近賣出價重掛」——這個定價方式完全不需要市場資料，所以排在
+                    // 最前面：命中的話這一格連一次遊戲內市場查詢都不會送出去。
+                    // 🔴 查不到的道具**不在這裡處理**，直接往下走既有的市場比價流程
+                    //    （不猜、不拿別的來源硬湊）。
+                    if (conf.RelistUseLastSoldPrice && TickLastSoldPricing(job, now) is { } lastSoldResult)
+                        return lastSoldResult;
+
                     // Fresh cached market data for this item skips the whole
                     // request/wait pipeline (and the request throttle).
                     //
@@ -879,6 +922,101 @@ namespace Marketbuddy
                 default:
                     return TickTaskResult.AbortQueue;
             }
+        }
+
+        /// <summary>
+        /// 「以歷史最近賣出價，無條件捨去到百位」這個定價方式的整條處理。
+        ///
+        /// <para>
+        /// 回傳值刻意是三態：<c>Done</c>＝這一格已經用這個價格處理完；<c>Continue</c>＝還在等
+        /// Universalis 回答；<b><c>null</c>＝這個定價方式不適用這一格</b>，呼叫端要繼續走既有的
+        /// 市場比價流程。用 <c>bool</c> 表示不了中間那一態，而把「還在等」誤當成「查不到」
+        /// 會讓第一批永遠拿不到歷史價。
+        /// </para>
+        ///
+        /// <para>
+        /// 🔴 這條路徑<b>一次遊戲內市場查詢都不送</b>：價格來自 Universalis 的 HTTP API。
+        /// </para>
+        /// </summary>
+        private TickTaskResult? TickLastSoldPricing(SlotJob job, DateTime now)
+        {
+            var state = LastSoldPriceSource.StateOf(job.ItemId);
+
+            if (state is LastSoldState.Unknown or LastSoldState.Loading)
+            {
+                if (job.LastSoldWaitStart == DateTime.MinValue)
+                {
+                    job.LastSoldWaitStart = now;
+                    // 沒人替這一件排過查詢（例如批次開始之後才換上來的道具）——自己補一次。
+                    if (state == LastSoldState.Unknown)
+                        RequestLastSoldPrices([job.ItemId]);
+                }
+                else if ((now - job.LastSoldWaitStart).TotalMilliseconds > LastSoldWaitMs)
+                {
+                    WarnLastSoldFallback(job, "timed out");
+                    return null;
+                }
+
+                return TickTaskResult.Continue;
+            }
+
+            if (state == LastSoldState.Ready &&
+                LastSoldPriceSource.TryGet(job.ItemId, job.IsHq, conf.RelistLastSoldIgnoreQuality, out var sold))
+            {
+                var newPrice = LastSoldPriceSource.RoundDownToHundred(sold.UnitPrice);
+                var when = FormatSoldAt(sold.SoldAtUtc);
+                Log.Information(
+                    $"{Diag} LASTSOLD item={job.ItemId} '{job.Name}' unit={sold.UnitPrice} " +
+                    $"rounded={newPrice} soldHq={sold.Hq} soldAt={when} world='{sold.World}' " +
+                    $"ignoreQuality={conf.RelistLastSoldIgnoreQuality}");
+                FinishPricing(job, newPrice, string.Empty,
+                    "[Marketbuddy] ??: last sold for ?? gil (??) → ?? gil".Loc(
+                        job.Name, sold.UnitPrice.ToString("N0"), when, newPrice.ToString("N0")));
+                return TickTaskResult.Done;
+            }
+
+            // 走到這裡有三種情形，處置相同：這一格落回它原本的定價方式（市場比價）。
+            //   (a) Universalis 沒有這件的成交紀錄；
+            //   (b) 查詢失敗；
+            //   (c) 有資料，但「不忽略優質」而這個品質剛好沒有成交紀錄。
+            if (state == LastSoldState.Failed)
+                WarnLastSoldFallback(job, "lookup failed");
+            else
+                Log.Information(
+                    $"{Diag} LASTSOLD-MISS item={job.ItemId} '{job.Name}' state={state} " +
+                    $"hq={job.IsHq} ignoreQuality={conf.RelistLastSoldIgnoreQuality}; falling back to market pricing");
+
+            return null;
+        }
+
+        /// <summary>「最近一次賣出」的時間；<see cref="DateTime.MinValue"/> 一律畫成 <c>?</c>，絕不畫成某個看起來合理的日期。</summary>
+        internal static string FormatSoldAt(DateTime soldAtUtc)
+            => soldAtUtc == DateTime.MinValue ? "?" : soldAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
+
+        /// <summary>
+        /// 🔴 只從 framework 執行緒呼叫：它會讀 <c>PlayerState</c>。
+        /// </summary>
+        private static void RequestLastSoldPrices(IReadOnlyCollection<uint> itemIds)
+        {
+            var worldId = PlayerState.ContentId == 0 ? 0u : PlayerState.CurrentWorld.RowId;
+            LastSoldPriceSource.Request(worldId, itemIds);
+        }
+
+        /// <summary>
+        /// 歷史賣出價這條路走不通、這一格改用市場比價時的告知。
+        /// 一整批只講一次——每一格都講會把真正的改價結果洗掉。
+        /// </summary>
+        private void WarnLastSoldFallback(SlotJob job, string reason)
+        {
+            Log.Information(
+                $"{Diag} LASTSOLD-FALLBACK item={job.ItemId} '{job.Name}' reason={reason}; using market pricing instead");
+
+            if (lastSoldFallbackWarned)
+                return;
+            lastSoldFallbackWarned = true;
+            ChatGui.PrintError(
+                "[Marketbuddy] Could not get the last sale price from Universalis; those items keep their usual pricing."
+                    .Loc());
         }
 
         private void ApplySlot(SlotJob job)

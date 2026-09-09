@@ -296,6 +296,66 @@ namespace Marketbuddy
         /// </summary>
         public bool RetainerSalesLogEnabled = true;
 
+        /// <summary>
+        /// 重掛時改用「這件道具在整個資料中心最近一次實際成交的價格，無條件捨去到百位」定價，
+        /// 而不是既有的「最低掛售價再降一點」。
+        /// </summary>
+        /// <remarks>
+        /// 🔴 <b>預設關閉</b>，而且只有使用者自己按下重掛按鈕時才生效：它是一種<b>定價方式</b>，
+        /// 不是新的觸發來源，沒有任何自動接手鏈。
+        /// <para>
+        /// 🔴 價格來源是 <b>Universalis 的 HTTP API</b>（<see cref="LastSoldPriceSource"/>），
+        /// <b>不送遊戲內的市場查詢</b>：不呼叫 <c>InfoProxyItemSearch.RequestData()</c>、
+        /// 不開任何原生視窗、零封包。所以它也不會撞到台服「查詢被拒絕時完全靜默」那個問題。
+        /// </para>
+        /// <para>
+        /// ⚠️ <b>查不到歷史成交價的道具不會被硬湊</b>：那一格照舊走既有的市場比價流程
+        /// （見 <see cref="BatchReprice"/>）。這是刻意的——沒有成交紀錄的東西往往正是稀有的，
+        /// 拿別的來源代打會賤賣。
+        /// </para>
+        /// <para>
+        /// ⚠️ 這個開關作用在<b>重掛引擎</b>，所以「本僱員重掛」「全僱員重掛巡迴」與
+        /// 「快速上架後自動定價」三條路徑都會跟著改用它。刻意不分岔成兩套定價規則。
+        /// </para>
+        /// </remarks>
+        public bool RelistUseLastSoldPrice = false;
+
+        /// <summary>
+        /// 查歷史最近賣出價時忽略優質狀態：同一個 itemId 的優質與普通成交視為同一件道具，
+        /// 取<b>時間最近</b>的那一筆。
+        /// </summary>
+        /// <remarks>
+        /// 📌 預設 <b>true</b>：使用者要的就是「忽略優質狀態」。這不算改既有行為——
+        /// 它的上層開關 <see cref="RelistUseLastSoldPrice"/> 預設是關的，所以無論這裡是
+        /// true 還是 false，沒有開啟新定價方式的人一個位元組都不會變。
+        /// <para>
+        /// ⚠️ 只影響<b>查價</b>。僱員銷售紀錄那邊的比對鍵仍然含品質，那是另一件事：
+        /// 少了品質它就配不出「少掉的是哪一批」。
+        /// </para>
+        /// </remarks>
+        public bool RelistLastSoldIgnoreQuality = true;
+
+        /// <summary>
+        /// 在「即時出售品清單」面板上多畫三欄：本世界目前最低價、整個資料中心目前最低價、
+        /// 以及最近一次成交（價格＋時間）。
+        /// </summary>
+        /// <remarks>
+        /// 🔴 <b>預設關閉</b>，而且是<b>純顯示</b>：不會因為任何數字自動降價或自動下架。
+        /// <para>
+        /// 📌 三個數字與 <see cref="RelistUseLastSoldPrice"/> 用的是<b>同一次</b> Universalis 查詢
+        /// （aggregated 端點一次就把 <c>minListing</c> 與 <c>recentPurchase</c> 都給了），
+        /// 所以開這一項不會多送任何請求，也一樣<b>不碰遊戲內的市場查詢</b>。
+        /// </para>
+        /// <para>
+        /// ⚠️ 最低價一律照該格自己的品質取，<b>不受</b> <see cref="RelistLastSoldIgnoreQuality"/> 影響：
+        /// 拿自己的優質品去跟普通品的最低價比是錯的比較。
+        /// </para>
+        /// <para>
+        /// ⚠️ Universalis 的新鮮度取決於有沒有人上傳，所以那是「已知的最低價」不是「此刻的真值」。
+        /// </para>
+        /// </remarks>
+        public bool LiveSellListMarketColumns = false;
+
         public int Version { get; set; } = 0;
 
         // the below exist just to make saving/loading less cumbersome

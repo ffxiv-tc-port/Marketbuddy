@@ -201,6 +201,10 @@ namespace Marketbuddy
 
         private void DrawTourStartButton(MultiRetainerTour tour)
         {
+            // 巡迴驅動的是同一個重掛引擎，所以定價方式也是同一個 —— 告示要一起出現，
+            // 否則使用者會以為新的定價方式只作用在出售品視窗那顆按鈕上。
+            DrawLastSoldNotice();
+
             var canStart = tour.CanStart(TourMode.Reprice, out var reason);
             // When AutoRetainer is the only blocker, keep the button clickable
             // so pressing it explains the situation instead of doing nothing.
@@ -513,6 +517,8 @@ namespace Marketbuddy
             if (marketbuddy.MultiTour.IsRunning)
                 return;
 
+            DrawLastSoldNotice();
+
             var canStart = engine.CanStart(out var reason);
             // When AutoRetainer is the only blocker, keep the button clickable
             // so pressing it explains the situation instead of doing nothing.
@@ -535,6 +541,40 @@ namespace Marketbuddy
             else if (ImGui.IsItemHovered())
             {
                 ImGui.SetTooltip(PricingRuleText());
+            }
+        }
+
+        /// <summary>
+        /// 重掛按鈕上方那一行「這一次不是照最低價定價」的告示。
+        ///
+        /// 🔑 這是**列上**的資訊不是滑鼠提示：按下去會用完全不同的一套價格，那件事必須在
+        /// 按下去之前就看得見（形式比照下架那邊的 <see cref="DrawDelistFilterSummary"/>）。
+        /// 每一件實際會掛多少則在即時掛單面板的「重掛後」欄——那是逐件的金額，
+        /// 藏在 tooltip 裡會讓人看不到自己按下去會賣多少錢。
+        /// </summary>
+        private void DrawLastSoldNotice()
+        {
+            if (!conf.RelistUseLastSoldPrice)
+                return;
+
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudYellow);
+            ImGui.TextWrapped("Pricing from the most recent sale, rounded down to 100 gil".Loc());
+            ImGui.PopStyleColor();
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(PricingRuleText());
+
+            if (conf.LiveSellListOverlay)
+                return;
+
+            // 面板關著就看不到逐件的金額——那正是「價格要看得見才送出」被架空的情況，
+            // 所以在這裡講出來，並提供一個一鍵打開的按鈕（不替使用者偷偷改設定）。
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped("Turn on the live listings panel to see what each item would be relisted at.".Loc());
+            ImGui.PopStyleColor();
+            if (ImGui.SmallButton("Show it".Loc() + "##mbshowlivelist"))
+            {
+                conf.LiveSellListOverlay = true;
+                conf.Save();
             }
         }
 
@@ -1009,6 +1049,25 @@ namespace Marketbuddy
                 conf.Save();
 
             DrawNestIndicator(1);
+            if (ImGui.Checkbox("Price from the most recent sale instead, rounded down to 100 gil".Loc(),
+                    ref conf.RelistUseLastSoldPrice))
+                conf.Save();
+
+            DrawNestIndicator(2);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "Takes the price the item most recently actually sold for anywhere on your data centre and rounds it down to the nearest 100 gil. The figure comes from the Universalis web API - the same source PriceInsight uses - so the game's own market board is never queried and no listing is looked up in game. Items with no sale on record keep their usual pricing (lowest listing minus your undercut); nothing is guessed. What each item would be relisted at is shown in the live listings panel before you press the button."
+                    .Loc());
+            ImGui.PopStyleColor();
+
+            DrawNestIndicator(2);
+            if (!conf.RelistUseLastSoldPrice) PushStyleDisabled();
+            if (ImGui.Checkbox("Ignore quality: use the newer of that item's HQ and NQ sales".Loc(),
+                    ref conf.RelistLastSoldIgnoreQuality))
+                conf.Save();
+            if (!conf.RelistUseLastSoldPrice) PopStyleDisabled();
+
+            DrawNestIndicator(1);
             if (ImGui.Checkbox("HQ items only undercut other HQ listings".Loc(), ref conf.BatchCompareHqOnly))
                 conf.Save();
 
@@ -1132,6 +1191,25 @@ namespace Marketbuddy
             ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
             ImGui.TextWrapped(
                 "Batch repricing writes prices straight into the retainer's market container without opening any game window - which is exactly why it is fast, but it also means the game's sell list never redraws and keeps showing the prices it had when you opened it (a just-listed item stays at 999,999,999 on screen even though the server already has the right price). This panel is drawn by the plugin and re-read every frame, so it is always current. It only reads: no game windows are touched and nothing is clicked for you."
+                    .Loc());
+            ImGui.PopStyleColor();
+
+            DrawNestIndicator(1);
+            if (ImGui.Checkbox("Also show market prices and how long each item has been listed".Loc(),
+                    ref conf.LiveSellListMarketColumns))
+                conf.Save();
+
+            DrawNestIndicator(2);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "Four extra columns, purely informational: the cheapest listing on your own world, the cheapest anywhere on your data centre, what the item last actually sold for (with the date), and how long it has been sitting on the board. The first three come from the Universalis web API in the same request the relist pricing uses, so nothing is asked of the game's market board; where Universalis has nothing the cell shows a grey question mark - never a zero. The game never says when something was listed, so the age is counted from the moment Marketbuddy watched it go up; anything that was already listed before then is marked with a ~ and counted from when the plugin loaded. Nothing here triggers anything - an item sitting there for a month is never relisted or delisted for you."
+                    .Loc());
+            ImGui.PopStyleColor();
+
+            DrawNestIndicator(2);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "The age clock is fed by the same look at the sell list that the sales log uses, so turning off \"Record what disappears from your retainers' listings\" stops it too."
                     .Loc());
             ImGui.PopStyleColor();
 
@@ -1302,9 +1380,22 @@ namespace Marketbuddy
             conf.UndercutUsePercent ? conf.UndercutPercent == 0 : conf.UndercutPrice == 0;
 
         /// <summary>按鈕的滑鼠提示：把從標題省掉的定價規則交代清楚，而且完全不佔版面。</summary>
-        private string PricingRuleText() => UndercutIsZero
-            ? "Prices at the lowest listing (no undercut)".Loc()
-            : "Prices at the lowest listing minus ??".Loc(GetUndercutText());
+        private string PricingRuleText()
+        {
+            // 新的定價方式開著時，「最低價 -N」那句話就不是這顆按鈕會做的事了——
+            // 講錯的規則比不講更糟。查不到成交紀錄的道具仍然走舊規則，所以兩句都要說。
+            if (conf.RelistUseLastSoldPrice)
+            {
+                return "Prices at the most recent sale on the data centre, rounded down to 100 gil.".Loc() + "\n" +
+                       (UndercutIsZero
+                           ? "Items with no sale on record: the lowest listing (no undercut).".Loc()
+                           : "Items with no sale on record: the lowest listing minus ??.".Loc(GetUndercutText()));
+            }
+
+            return UndercutIsZero
+                ? "Prices at the lowest listing (no undercut)".Loc()
+                : "Prices at the lowest listing minus ??".Loc(GetUndercutText());
+        }
 
         private string GetUndercutText(bool escape = false)
         {

@@ -61,7 +61,48 @@ namespace Marketbuddy
             public readonly string Name = name;
             public readonly uint Quantity = quantity;
             public readonly uint UnitPrice = unitPrice;
+
+            /// <summary>這一件的「歷史最近賣出價」目前處在什麼狀態（查詢中／查不到／有值）。</summary>
+            public LastSoldState SoldState { get; init; }
+
+            /// <summary>成交單價；只有 <see cref="HasSold"/> 為 true 時才有意義。</summary>
+            public long SoldUnitPrice { get; init; }
+
+            public DateTime SoldAtUtc { get; init; }
+
+            /// <summary>那一筆成交本身是優質品還是普通品（可能與這一格掛的品質不同——那正是「忽略優質」的意思）。</summary>
+            public bool SoldHq { get; init; }
+
+            /// <summary>可為 null：<c>default(Row)</c> 與「回應裡沒帶世界」都會落在這裡，畫面上一律畫成 <c>?</c>。</summary>
+            public string? SoldWorld { get; init; }
+
+            /// <summary>
+            /// 真的取到了一筆成交紀錄。
+            /// ⚠️ 與 <c>SoldState == Ready</c> <b>不等價</b>：Universalis 有這件的資料，但在
+            /// 「不忽略優質」的設定下這個品質剛好沒有成交紀錄時，狀態是 Ready 而這裡是 false。
+            /// </summary>
+            public bool HasSold { get; init; }
+
+            /// <summary>按下重掛會掛出去的價格（成交價無條件捨去到百位）。</summary>
+            public uint RelistPrice { get; init; }
+
+            /// <summary>本世界目前的最低掛售價；<b>null＝查不到，不是 0</b>。</summary>
+            public MarketPricePoint? MinWorld { get; init; }
+
+            /// <summary>整個資料中心目前的最低掛售價；<b>null＝查不到，不是 0</b>。</summary>
+            public MarketPricePoint? MinDc { get; init; }
+
+            /// <summary>這一批東西掛在架上多久了；<b>null＝完全沒有紀錄</b>（不是 0，也不是「剛剛」）。</summary>
+            public ListingAge? Age { get; init; }
         }
+
+        /// <summary>道具 id 的暫存集合，給「歷史最近賣出價」預取用；重用，不每幀配置。</summary>
+        private readonly HashSet<uint> prefetchIds = [];
+
+        /// <summary>上一次替出售品視窗裡的道具排查詢的時間。預取不必每幀做。</summary>
+        private DateTime lastPrefetchAt = DateTime.MinValue;
+
+        private static readonly TimeSpan PrefetchEvery = TimeSpan.FromSeconds(1);
 
         private readonly MarketGuiEventHandler gui;
         private readonly BatchReprice engine;
@@ -97,6 +138,14 @@ namespace Marketbuddy
         private void OnFrameworkUpdate(IFramework framework)
         {
             haveAnchor = false;
+
+            // 「歷史最近賣出價」的預取。刻意排在下面那道顯示開關**之前**：重掛引擎自己也要用
+            // 這份資料，它不該取決於使用者有沒有開這個面板。
+            // 🔴 這只是一個對 Universalis 的唯讀 HTTP 查詢，不送任何遊戲內市場查詢、不改任何價格。
+            //    定價方式關著（預設）時整條路徑一個位元組都不會動。
+            if (conf.RelistUseLastSoldPrice && gui.IsRetainerSellListOpen)
+                PrefetchLastSoldPrices();
+
             if (!conf.LiveSellListOverlay || !gui.IsRetainerSellListOpen)
             {
                 rows.Clear();
@@ -126,6 +175,43 @@ namespace Marketbuddy
             haveAnchor = true;
 
             RebuildRows();
+        }
+
+        /// <summary>
+        /// 把出售品視窗裡這一位僱員的道具排進「歷史最近賣出價」的查詢佇列。
+        /// 🔴 只在 framework 執行緒上跑（它讀市場容器與 <c>PlayerState</c>）；
+        /// 真正的 HTTP 在執行緒池上，見 <see cref="LastSoldPriceSource"/>。
+        /// 每秒最多一次——已經有夠新答案的道具在那一側就會被濾掉，所以這裡只是省下容器掃描。
+        /// </summary>
+        private void PrefetchLastSoldPrices()
+        {
+            var now = DateTime.UtcNow;
+            if (now - lastPrefetchAt < PrefetchEvery)
+                return;
+            lastPrefetchAt = now;
+
+            var inventoryManager = InventoryManager.Instance();
+            var container = inventoryManager == null
+                ? null
+                : inventoryManager->GetInventoryContainer(InventoryType.RetainerMarket);
+            if (container == null || !container->IsLoaded)
+                return;
+
+            prefetchIds.Clear();
+            var slotCount = Math.Min((int)container->Size, MaxMarketSlots);
+            for (var i = 0; i < slotCount; i++)
+            {
+                var slot = inventoryManager->GetInventorySlot(InventoryType.RetainerMarket, i);
+                if (slot == null || slot->ItemId == 0)
+                    continue;
+                prefetchIds.Add(slot->ItemId);
+            }
+
+            if (prefetchIds.Count == 0)
+                return;
+
+            var worldId = PlayerState.ContentId == 0 ? 0u : PlayerState.CurrentWorld.RowId;
+            LastSoldPriceSource.Request(worldId, prefetchIds);
         }
 
         private void RebuildRows()
@@ -176,11 +262,42 @@ namespace Marketbuddy
                 if ((slot->Flags & InventoryItem.ItemFlags.HighQuality) != 0)
                     name += $" {(char)SeIconChar.HighQuality}";
 
+                var isHq = (slot->Flags & InventoryItem.ItemFlags.HighQuality) != 0;
+                var soldState = LastSoldState.Unknown;
+                var hasSold = false;
+                LastSoldEntry sold = default;
+                uint relistPrice = 0;
+                MarketPricePoint? minWorld = null;
+                MarketPricePoint? minDc = null;
+                if (conf.RelistUseLastSoldPrice || conf.LiveSellListMarketColumns)
+                {
+                    soldState = LastSoldPriceSource.StateOf(slot->ItemId);
+                    hasSold = LastSoldPriceSource.TryGet(slot->ItemId, isHq,
+                        conf.RelistLastSoldIgnoreQuality, out sold);
+                    if (hasSold)
+                        relistPrice = LastSoldPriceSource.RoundDownToHundred(sold.UnitPrice);
+                    LastSoldPriceSource.TryGetMinPrices(slot->ItemId, isHq, out minWorld, out minDc);
+                }
+
                 rows.Add(new Row(
                     (short)i,
                     name,
                     (uint)Math.Max(0, slot->Quantity),
-                    (uint)inventoryManager->GetRetainerMarketPrice((short)i)));
+                    (uint)inventoryManager->GetRetainerMarketPrice((short)i))
+                {
+                    SoldState = soldState,
+                    HasSold = hasSold,
+                    SoldUnitPrice = hasSold ? sold.UnitPrice : 0,
+                    SoldAtUtc = hasSold ? sold.SoldAtUtc : DateTime.MinValue,
+                    SoldHq = hasSold && sold.Hq,
+                    SoldWorld = hasSold ? sold.World : string.Empty,
+                    RelistPrice = relistPrice,
+                    MinWorld = minWorld,
+                    MinDc = minDc,
+                    Age = conf.LiveSellListMarketColumns
+                        ? RetainerListingAge.Get(snapshotRetainerId, slot->ItemId, isHq)
+                        : null,
+                });
             }
         }
 
@@ -273,7 +390,12 @@ namespace Marketbuddy
                 ? engine.CurrentSlot
                 : (short)-1;
 
-            if (!ImGui.BeginTable("##mblivesellisttable", 4,
+            // 「重掛後的金額」只有在那個定價方式開著時才有意義，關著時不占版面。
+            var showRelist = conf.RelistUseLastSoldPrice;
+            var showMarket = conf.LiveSellListMarketColumns;
+            var columns = 4 + (showRelist ? 1 : 0) + (showMarket ? 4 : 0);
+
+            if (!ImGui.BeginTable("##mblivesellisttable", columns,
                     ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerH))
                 return;
 
@@ -281,6 +403,16 @@ namespace Marketbuddy
             ImGui.TableSetupColumn("Qty".Loc());
             ImGui.TableSetupColumn("Unit price".Loc());
             ImGui.TableSetupColumn("Total".Loc());
+            if (showMarket)
+            {
+                ImGui.TableSetupColumn("Lowest here".Loc());
+                ImGui.TableSetupColumn("Lowest on DC".Loc());
+                ImGui.TableSetupColumn("Last sale".Loc());
+                ImGui.TableSetupColumn("Listed for".Loc());
+            }
+
+            if (showRelist)
+                ImGui.TableSetupColumn("Relist at".Loc());
             ImGui.TableHeadersRow();
 
             foreach (var row in rows)
@@ -334,9 +466,240 @@ namespace Marketbuddy
 
                 ImGui.TableNextColumn();
                 ImGui.TextUnformatted(((ulong)row.UnitPrice * row.Quantity).ToString("N0"));
+
+                if (showMarket)
+                {
+                    ImGui.TableNextColumn();
+                    DrawMinPriceCell(row, row.MinWorld, forDatacentre: false);
+
+                    ImGui.TableNextColumn();
+                    DrawMinPriceCell(row, row.MinDc, forDatacentre: true);
+
+                    ImGui.TableNextColumn();
+                    DrawLastSaleCell(row);
+
+                    ImGui.TableNextColumn();
+                    DrawAgeCell(row);
+                }
+
+                if (showRelist)
+                {
+                    ImGui.TableNextColumn();
+                    DrawRelistCell(row);
+                }
             }
 
             ImGui.EndTable();
+        }
+
+        /// <summary>
+        /// 「按下重掛會掛出去的金額」那一格。
+        ///
+        /// <para>
+        /// 🔴 「查詢中」與「查不到」是<b>兩種不同的狀態，而且都要在列上看得見</b>：
+        /// 任何一種畫成 0 或空白都會被讀成「這件賣過 0 gil」，而讀不到當成 0 在艦隊裡
+        /// 已經害過一次。所以這裡一律用灰色的 <c>…</c> 與 <c>?</c>，理由放滑鼠提示。
+        /// </para>
+        /// <para>
+        /// 📌 純顯示：這一格不會去改任何價格，改價一律是使用者自己按重掛按鈕。
+        /// </para>
+        /// </summary>
+        private static void DrawRelistCell(in Row row)
+        {
+            if (row.HasSold)
+            {
+                ImGui.TextUnformatted(row.RelistPrice.ToString("N0"));
+                if (!ImGui.IsItemHovered())
+                    return;
+
+                var world = string.IsNullOrEmpty(row.SoldWorld) ? "?" : row.SoldWorld;
+                ImGui.SetTooltip(
+                    "Last sold for ?? gil on ?? (??, ??) - rounded down to ?? gil".Loc(
+                        row.SoldUnitPrice.ToString("N0"),
+                        BatchReprice.FormatSoldAt(row.SoldAtUtc),
+                        row.SoldHq ? "HQ".Loc() : "NQ".Loc(),
+                        world,
+                        row.RelistPrice.ToString("N0")));
+                return;
+            }
+
+            switch (row.SoldState)
+            {
+                case LastSoldState.Unknown:
+                case LastSoldState.Loading:
+                    Grey("...");
+                    Tooltip("Asking Universalis for the most recent sale...".Loc());
+                    break;
+
+                case LastSoldState.Failed:
+                    Grey("!");
+                    Tooltip("Universalis could not be reached. This item keeps its usual pricing until the lookup succeeds.".Loc());
+                    break;
+
+                default:
+                    // Ready 但取不到 = 「不忽略優質」而這個品質沒有成交紀錄；NoData = 完全沒有紀錄。
+                    Grey("?");
+                    Tooltip(
+                        "No sale on record for this item on the data centre, so relisting leaves it on the usual pricing (lowest listing minus your undercut)."
+                            .Loc());
+                    break;
+            }
+        }
+
+        /// <summary>
+        /// 「目前最低價」那一格（本世界／整個資料中心各一欄）。
+        ///
+        /// <para>
+        /// 🔴 沒有資料一律畫成灰色的 <c>?</c>（查詢中是 <c>…</c>）——<b>絕不畫成 0</b>。
+        /// 一個 0 gil 的最低價是合法但荒謬的數字，使用者會照它去決定要不要降價。
+        /// </para>
+        /// <para>
+        /// ⚠️ 這一格照的是<b>這一格自己的品質</b>，與「忽略優質狀態」那個選項無關。
+        /// </para>
+        /// </summary>
+        private static void DrawMinPriceCell(in Row row, MarketPricePoint? point, bool forDatacentre)
+        {
+            if (point is { } value)
+            {
+                ImGui.TextUnformatted(value.UnitPrice.ToString("N0"));
+                if (!ImGui.IsItemHovered())
+                    return;
+
+                var scope = forDatacentre
+                    ? "the whole data centre".Loc()
+                    : "this world".Loc();
+                var where = string.IsNullOrEmpty(value.World) ? "?" : value.World;
+                ImGui.SetTooltip(
+                    "Lowest listing on ?? for this quality: ?? gil (??). Universalis data - only as fresh as the last upload."
+                        .Loc(scope, value.UnitPrice.ToString("N0"), where));
+                return;
+            }
+
+            DrawMissing(row.SoldState,
+                "Nobody has this listed there right now, as far as Universalis knows.".Loc());
+        }
+
+        /// <summary>
+        /// 「最近一次成交」那一格：價格 ＋ 灰色的日期。
+        ///
+        /// <para>
+        /// 🔑 日期畫在<b>列上</b>而不是滑鼠提示：使用者要的就是「什麼時候賣掉的」，
+        /// 一筆三個月前的成交價和昨天的成交價意義完全不同，而那件事不能藏起來。
+        /// </para>
+        /// <para>
+        /// 📌 這個時間是 Universalis 記錄的<b>成交時間</b>（由玩家端上傳），
+        /// 不是我們自己觀察到的「它從架上消失」的時間。
+        /// </para>
+        /// </summary>
+        private static void DrawLastSaleCell(in Row row)
+        {
+            if (!row.HasSold)
+            {
+                DrawMissing(row.SoldState, "No sale on record for this item.".Loc());
+                return;
+            }
+
+            ImGui.TextUnformatted(row.SoldUnitPrice.ToString("N0"));
+            ImGui.SameLine();
+            Grey(row.SoldAtUtc == DateTime.MinValue
+                ? "?"
+                : row.SoldAtUtc.ToLocalTime().ToString("MM-dd"));
+            if (!ImGui.IsItemHovered())
+                return;
+
+            var world = string.IsNullOrEmpty(row.SoldWorld) ? "?" : row.SoldWorld;
+            ImGui.SetTooltip(
+                "Sold for ?? gil on ?? (??, ??). This is the sale time Universalis recorded, not the moment we noticed it."
+                    .Loc(row.SoldUnitPrice.ToString("N0"), BatchReprice.FormatSoldAt(row.SoldAtUtc),
+                        row.SoldHq ? "HQ".Loc() : "NQ".Loc(), world));
+        }
+
+        /// <summary>
+        /// 「已經掛多久了」那一格。
+        ///
+        /// <para>
+        /// 🔴 <b>精確值與暫定值必須看得出差別</b>：暫定值前面加上 <c>~</c>，理由寫在滑鼠提示裡。
+        /// 遊戲不會告訴我們一筆掛售是什麼時候掛上去的，所以只有「我們親眼看著它出現」那一種
+        /// 才是精確的；其餘是拿外掛載入時間暫定的。兩者長得一樣的話，使用者無從判斷該不該相信它。
+        /// </para>
+        /// <para>
+        /// 🔴 完全沒有紀錄時是灰色的 <c>?</c>，<b>不是 0 也不是「剛剛」</b>。
+        /// </para>
+        /// </summary>
+        private static void DrawAgeCell(in Row row)
+        {
+            if (row.Age is not { } age)
+            {
+                Grey("?");
+                Tooltip(
+                    "Not recorded yet. Marketbuddy starts the clock the first time it sees this retainer's sell list."
+                        .Loc());
+                return;
+            }
+
+            var span = DateTime.UtcNow - age.SinceUtc;
+            if (span < TimeSpan.Zero)
+                span = TimeSpan.Zero;
+
+            var text = FormatSpan(span);
+            if (age.Exact)
+            {
+                ImGui.TextUnformatted(text);
+                Tooltip("Listed since ?? (Marketbuddy watched it go up).".Loc(
+                    age.SinceUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")));
+                return;
+            }
+
+            Grey("~" + text);
+            Tooltip(
+                "Approximate: it was already listed when Marketbuddy first looked, so the clock starts from when the plugin loaded (??), not from when you actually listed it."
+                    .Loc(age.SinceUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")));
+        }
+
+        /// <summary>把一段時間寫成「3天」「5小時」「12分」。刻意不進位到「1個月」——那太模糊。</summary>
+        private static string FormatSpan(TimeSpan span)
+        {
+            if (span.TotalDays >= 1)
+                return "??d".Loc((int)span.TotalDays);
+            if (span.TotalHours >= 1)
+                return "??h".Loc((int)span.TotalHours);
+            return "??m".Loc((int)span.TotalMinutes);
+        }
+
+        /// <summary>「查詢中」「連不上」「沒有資料」三種缺席狀態的統一畫法——三種都必須分得出來。</summary>
+        private static void DrawMissing(LastSoldState state, string noDataTooltip)
+        {
+            switch (state)
+            {
+                case LastSoldState.Unknown:
+                case LastSoldState.Loading:
+                    Grey("...");
+                    Tooltip("Asking Universalis for the most recent sale...".Loc());
+                    break;
+
+                case LastSoldState.Failed:
+                    Grey("!");
+                    Tooltip("Universalis could not be reached. This item keeps its usual pricing until the lookup succeeds.".Loc());
+                    break;
+
+                default:
+                    Grey("?");
+                    Tooltip(noDataTooltip);
+                    break;
+            }
+        }
+
+        private static void Grey(string text)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextUnformatted(text);
+            ImGui.PopStyleColor();
+        }
+
+        private static void Tooltip(string text)
+        {
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(text);
         }
     }
 }

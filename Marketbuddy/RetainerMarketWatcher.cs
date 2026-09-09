@@ -571,6 +571,10 @@ namespace Marketbuddy
             // 基準線檔要先讀回來，否則每一位僱員都會被當成「第一次見到」。
             RetainerMarketState.BeginLoad();
             RetainerMarketState.PumpLoad();
+            // 掛售年齡的紀錄同理：沒讀回來就寫暫定值會把既有的起點蓋成今天，
+            // 而那個壞法是靜默的（永遠顯示「剛掛上去」）。見 RetainerListingAge。
+            RetainerListingAge.BeginLoad();
+            RetainerListingAge.PumpLoad();
             if (!RetainerMarketState.Loaded)
                 return;
 
@@ -607,6 +611,12 @@ namespace Marketbuddy
 
             // 連續兩次讀到完全一樣的東西 ＝ 這份快照可以相信了。
             candidate = current;
+
+            // 掛售年齡：與差異事件完全無關的另一份紀錄，所以刻意放在 Commit **外面**
+            // ——Commit 在「跟基準線一模一樣」時會提早返回，而那正是我們需要替
+            // 「這個功能開始看之前就已經在架上」的東西寫暫定值的那一刻。
+            RetainerListingAge.Observe(current);
+
             Commit(current);
         }
 
