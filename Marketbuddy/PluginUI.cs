@@ -1213,6 +1213,18 @@ namespace Marketbuddy
                     .Loc());
             ImGui.PopStyleColor();
 
+            DrawNestIndicator(1);
+            if (ImGui.Checkbox("Also show how often each item has actually sold".Loc(),
+                    ref conf.LiveSellListSalesHistoryColumn))
+                conf.Save();
+
+            DrawNestIndicator(2);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "One extra column: how many times that item has sold, and how many times it came off the board without selling - counted from your own sales records, so no web request and nothing asked of the game. It answers \"is it even worth listing this again\" while you are standing at the sell list. Where there is no basis for an answer - the recording is off, or Marketbuddy has never had that retainer's list open - the cell shows a grey question mark instead of a zero, because \"we never watched\" and \"it never sold\" lead to opposite decisions. Purely informational: nothing is ever delisted or repriced because of these numbers."
+                    .Loc());
+            ImGui.PopStyleColor();
+
             // 重掛面板與即時掛單面板現在是**同一欄**（重掛在上、即時掛單接在下面），
             // 所以位置只留一個滑桿，拖它就是整欄一起動。
             // 範圍是可負值：舊版下限寫死 1，往左／往上微調不了。

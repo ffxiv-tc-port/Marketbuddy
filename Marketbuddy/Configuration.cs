@@ -356,6 +356,30 @@ namespace Marketbuddy
         /// </remarks>
         public bool LiveSellListMarketColumns = false;
 
+        /// <summary>
+        /// 在「即時出售品清單」面板上多畫一欄：這件道具<b>在我們自己的紀錄裡</b>賣出過幾次、
+        /// 被 Marketbuddy 下架過幾次。
+        /// </summary>
+        /// <remarks>
+        /// 📌 <b>預設開啟</b>，理由是它回答的正是「這件到底掛不掛得掉」——那個問題在畫面上
+        /// 本來完全沒有地方回答，而使用者是在出售品視窗前面做這個決定的。
+        /// 資料完全來自本機既有的僱員銷售紀錄檔（<see cref="RetainerSalesLog"/>）：
+        /// <b>零網路、零遊戲內查詢、零封包</b>，也不會多寫任何檔案。
+        /// <para>
+        /// 🔴 <b>純顯示</b>：不會因為「賣不掉」自動下架、自動降價或自動做任何事。
+        /// </para>
+        /// <para>
+        /// 🔴 「沒有資料」與「賣出 0 次」在畫面上<b>一定要分得出來</b>：沒有觀察基礎時
+        /// 畫灰色的 <c>?</c>，絕不畫成 0。判準是
+        /// <see cref="RetainerListingAge.FirstSeen"/>——沒看過那位僱員就沒有根據。
+        /// </para>
+        /// <para>
+        /// ⚠️ 資料來源與「記錄僱員掛售清單少了什麼」（<see cref="RetainerSalesLogEnabled"/>）
+        /// 是同一份，把那一項關掉這一欄就只會顯示 <c>?</c>。
+        /// </para>
+        /// </remarks>
+        public bool LiveSellListSalesHistoryColumn = true;
+
         public int Version { get; set; } = 0;
 
         // the below exist just to make saving/loading less cumbersome

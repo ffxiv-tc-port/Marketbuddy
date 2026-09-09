@@ -155,6 +155,45 @@ namespace Marketbuddy
         }
 
         /// <summary>
+        /// 我們<b>第一次</b>看到這位僱員的出售品清單是什麼時候；<c>null</c>＝從來沒看過。
+        ///
+        /// <para>
+        /// 🔑 這是「我們對這位僱員的觀察從什麼時候開始」的唯一權威來源，也是
+        /// 「這件東西賣掉過嗎」那類統計唯一站得住腳的地基：<b>回 null 時「賣出 0 次」
+        /// 是沒有根據的</b>，畫面上必須畫成灰色的 <c>?</c> 而不是 0——兩者長得一模一樣，
+        /// 而後者會讓使用者做出相反的決定。
+        /// </para>
+        /// </summary>
+        internal static DateTime? FirstSeen(ulong retainerId)
+        {
+            if (retainerId == 0)
+                return null;
+            lock (Gate)
+            {
+                return RetainersSeen.TryGetValue(retainerId, out var at) ? at : null;
+            }
+        }
+
+        /// <summary>
+        /// 所有僱員裡最早的那個「第一次看到」；<c>null</c>＝一位僱員都還沒看過。
+        /// 也就是整份紀錄的<b>觀察起點</b>（下界）。
+        /// </summary>
+        internal static DateTime? EarliestSeen()
+        {
+            lock (Gate)
+            {
+                DateTime? earliest = null;
+                foreach (var at in RetainersSeen.Values)
+                {
+                    if (earliest == null || at < earliest)
+                        earliest = at;
+                }
+
+                return earliest;
+            }
+        }
+
+        /// <summary>
         /// 拿一份「這位僱員此刻架上有什麼」的快照去更新紀錄。
         /// 🔴 只從 framework 執行緒呼叫；<see cref="Loaded"/> 為 false 時直接不做事
         /// （還沒讀完就 seed 會把既有起點蓋成今天）。

@@ -1224,6 +1224,29 @@ namespace Marketbuddy
         /// <summary>我方自己下架的那些列要不要一起顯示。預設不顯示：那不是賣出，只是把帳補平。</summary>
         private bool showOwnDelists;
 
+        /// <summary>
+        /// 「銷售」分頁畫的是時間序事件表（false，既有行為），還是<b>一件一列</b>的彙總（true）。
+        /// 🔑 時間序回答不了「這件到底賣不賣得掉」——那要把同一件道具的所有事件加起來才看得見。
+        /// </summary>
+        private bool salesByItem;
+
+        /// <summary>彙總表的排序方式。</summary>
+        private int salesItemSortMode;
+
+        private static readonly string[] SalesItemSortKeys =
+        [
+            "Came off the board most without ever selling",
+            "Sold the most",
+            "Most recent activity",
+        ];
+
+        /// <summary><see cref="sales"/> 換過幾次內容；彙總拿它判斷要不要重算，免得每幀重算。</summary>
+        private int salesStamp;
+
+        private SalesHistorySnapshot salesAggregate = SalesHistorySnapshot.Empty;
+
+        private int salesAggregateStamp = -1;
+
         /// <summary>畫面上最多列幾列；再多就只是拖慢繪製，檔案裡的東西一列都沒少。</summary>
         private const int MaxSalesRows = 300;
 
@@ -1252,8 +1275,17 @@ namespace Marketbuddy
                     RequestSalesLoad();
             }
 
-            ImGui.Checkbox("Also show what Marketbuddy delisted itself".Loc(), ref showOwnDelists);
-            Tooltip("Those are not sales - they are in the file so the numbers add up.".Loc());
+            // 🔑 一件一列的彙總才回答得了「這件到底掛不掛得掉」；時間序回答的是「剛剛發生了什麼」。
+            ImGui.Checkbox("One row per item instead of a timeline".Loc(), ref salesByItem);
+            Tooltip(
+                "Adds up every entry for the same item so you can see whether it has ever actually sold, instead of listing the events in the order they happened."
+                    .Loc());
+
+            if (!salesByItem)
+            {
+                ImGui.Checkbox("Also show what Marketbuddy delisted itself".Loc(), ref showOwnDelists);
+                Tooltip("Those are not sales - they are in the file so the numbers add up.".Loc());
+            }
 
             ImGui.Spacing();
             DrawSalesSummary();
@@ -1292,7 +1324,10 @@ namespace Marketbuddy
                 return;
             }
 
-            DrawSalesTable();
+            if (salesByItem)
+                DrawSalesByItemTable();
+            else
+                DrawSalesTable();
         }
 
         /// <summary>
@@ -1540,6 +1575,190 @@ namespace Marketbuddy
 
             sales.Clear();
             sales.AddRange(rows);
+            salesStamp++;
+        }
+
+        /// <summary>
+        /// 一件一列的彙總表：這件道具賣掉過幾次、沒賣掉就下架過幾次。
+        ///
+        /// <para>
+        /// 🔴 「賣出」只算高信心（<see cref="RetainerSaleConfidence.Sold"/>）。信心不足的那些
+        /// 有自己的一欄，永遠不併進賣出——把它們加進去等於用一個自信的數字蓋掉「我們其實不知道」。
+        /// </para>
+        /// <para>
+        /// 🔴 表格上方一定要寫出<b>紀錄從什麼時候開始</b>：一張看起來很空的表，可能是
+        /// 「東西都賣不掉」，也可能是「我們才看了兩天」——那兩件事會導出相反的決定。
+        /// </para>
+        /// <para>
+        /// 📌 純顯示：這張表沒有任何會改價或下架的按鈕。
+        /// </para>
+        /// </summary>
+        private void DrawSalesByItemTable()
+        {
+            EnsureSalesAggregate();
+            var snapshot = salesAggregate;
+
+            // 觀察起點。首選是「第一次看到某位僱員的清單」那個時間（掛售年齡紀錄），
+            // 那份還沒讀回來時退而用「紀錄裡最早的一筆事件」——兩者都是下界，都誠實。
+            // 🔴 兩個都拿不到時<b>不可以</b>省略這一行：一張空表若不寫紀錄從何時開始，
+            //    「都賣不掉」與「才剛開始看」看起來一模一樣。
+            var since = RetainerListingAge.EarliestSeen();
+            if (since == null && snapshot.FirstEventUtc != DateTime.MinValue)
+                since = snapshot.FirstEventUtc;
+
+            if (since is { } start)
+            {
+                Grey("Records kept since ?? - only high-confidence sales count as sold.".Loc(
+                    FormatCoverage(start)));
+                Tooltip(
+                    "Nothing that happened before Marketbuddy first had one of your retainers' sell lists open is in these numbers."
+                        .Loc());
+            }
+            else
+            {
+                Grey("No retainer has been looked at yet, so there is no basis for any of these numbers.".Loc());
+            }
+
+            if (snapshot.ByItemAndQuality.Count == 0)
+            {
+                ImGui.Spacing();
+                ImGui.TextWrapped(
+                    "Nothing recorded yet. Open a retainer's sell list once to establish the baseline; anything that has gone from it the next time you look shows up here."
+                        .Loc());
+                return;
+            }
+
+            ImGui.Spacing();
+            ImGui.SetNextItemWidth(300);
+            if (ImGui.BeginCombo("##mbsalesitemsort", SalesItemSortKeys[salesItemSortMode].Loc()))
+            {
+                for (var i = 0; i < SalesItemSortKeys.Length; i++)
+                {
+                    if (ImGui.Selectable(SalesItemSortKeys[i].Loc(), salesItemSortMode == i))
+                        salesItemSortMode = i;
+                }
+
+                ImGui.EndCombo();
+            }
+
+            var list = new List<((uint ItemId, bool Hq) Key, ItemSaleHistory History)>(
+                snapshot.ByItemAndQuality.Count);
+            foreach (var (key, value) in snapshot.ByItemAndQuality)
+                list.Add((key, value));
+
+            list.Sort((a, b) => salesItemSortMode switch
+            {
+                // 賣出過的一律排在沒賣出過的後面，同組再比「沒賣掉就下架」的次數。
+                1 => b.History.SoldEvents != a.History.SoldEvents
+                    ? b.History.SoldEvents.CompareTo(a.History.SoldEvents)
+                    : b.History.SoldQuantity.CompareTo(a.History.SoldQuantity),
+                2 => b.History.LastEventUtc.CompareTo(a.History.LastEventUtc),
+                _ => (a.History.SoldEvents == 0) != (b.History.SoldEvents == 0)
+                    ? (a.History.SoldEvents == 0 ? -1 : 1)
+                    : b.History.OffBoardEvents.CompareTo(a.History.OffBoardEvents),
+            });
+
+            if (list.Count > MaxSalesRows)
+                Grey("Showing ?? of ?? items; sorting picks which ones, the file has them all.".Loc(MaxSalesRows, list.Count));
+
+            const ImGuiTableFlags flags = ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg |
+                                          ImGuiTableFlags.ScrollX | ImGuiTableFlags.SizingFixedFit;
+            if (!ImGui.BeginTable("##mbsalesitemtable", 6, flags))
+                return;
+
+            ImGui.TableSetupColumn("Item".Loc(), ImGuiTableColumnFlags.WidthFixed, 240);
+            ImGui.TableSetupColumn("Sold".Loc(), ImGuiTableColumnFlags.WidthFixed, 60);
+            ImGui.TableSetupColumn("Received".Loc(), ImGuiTableColumnFlags.WidthFixed, 100);
+            ImGui.TableSetupColumn("Delisted".Loc(), ImGuiTableColumnFlags.WidthFixed, 70);
+            ImGui.TableSetupColumn("Gone - unknown".Loc(), ImGuiTableColumnFlags.WidthFixed, 100);
+            ImGui.TableSetupColumn("Last sold".Loc(), ImGuiTableColumnFlags.WidthFixed, 120);
+            ImGui.TableHeadersRow();
+
+            var index = 0;
+            foreach (var (key, history) in list)
+            {
+                if (index >= MaxSalesRows)
+                    break;
+
+                ImGui.TableNextRow();
+                ImGui.PushID(index++);
+
+                ImGui.TableNextColumn();
+                ImGui.TextUnformatted(ItemName(key.ItemId)
+                                      + (key.Hq ? " " + (char)SeIconChar.HighQuality : string.Empty));
+
+                ImGui.TableNextColumn();
+                if (history.SoldEvents > 0)
+                {
+                    ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.HealerGreen);
+                    ImGui.TextUnformatted(history.SoldEvents.ToString("N0"));
+                    ImGui.PopStyleColor();
+                    Tooltip("?? item(s) in total.".Loc(history.SoldQuantity));
+                }
+                else
+                {
+                    Grey("0");
+                    Tooltip("Never seen to sell in the records kept so far.".Loc());
+                }
+
+                ImGui.TableNextColumn();
+                if (history.SoldEvents == 0)
+                {
+                    // 🔑 沒賣出過就沒有「實收」這回事——畫 0 會被讀成「賣掉了但一毛沒拿到」。
+                    Grey("—");
+                }
+                else
+                {
+                    ImGui.TextUnformatted(history.SoldGil.ToString("N0"));
+                    if (history.SoldGilIncomplete)
+                        Tooltip("Some of those sales have no amount, so the total is a lower bound.".Loc());
+                }
+
+                ImGui.TableNextColumn();
+                Grey(history.DelistedEvents.ToString("N0"));
+                Tooltip("Marketbuddy took this off the board itself, so it is not a sale.".Loc());
+
+                ImGui.TableNextColumn();
+                Grey(history.UnknownEvents.ToString("N0"));
+                Tooltip(
+                    "It is no longer listed, but the retainer's gil did not move by the matching amount, so this may just as well have been delisted by hand. Deliberately not counted as income."
+                        .Loc());
+
+                ImGui.TableNextColumn();
+                if (history.LastSoldUtc == DateTime.MinValue)
+                    Grey("—");
+                else
+                    ImGui.TextUnformatted(history.LastSoldUtc.ToLocalTime().ToString("MM-dd HH:mm"));
+
+                ImGui.PopID();
+            }
+
+            ImGui.EndTable();
+        }
+
+        /// <summary>只有 <see cref="sales"/> 換過內容才重算彙總。純計算、零 I/O。</summary>
+        private void EnsureSalesAggregate()
+        {
+            if (salesAggregateStamp == salesStamp)
+                return;
+            salesAggregateStamp = salesStamp;
+            salesAggregate = SalesHistorySnapshot.Build(sales);
+        }
+
+        /// <summary>觀察期：從哪一天起算、到現在多久。</summary>
+        private static string FormatCoverage(DateTime sinceUtc)
+        {
+            var span = DateTime.UtcNow - sinceUtc;
+            if (span < TimeSpan.Zero)
+                span = TimeSpan.Zero;
+
+            var length = span.TotalDays >= 1
+                ? "?? day(s)".Loc((int)span.TotalDays)
+                : span.TotalHours >= 1
+                    ? "?? hour(s)".Loc((int)span.TotalHours)
+                    : "less than an hour".Loc();
+
+            return "?? (??)".Loc(sinceUtc.ToLocalTime().ToString("yyyy-MM-dd"), length);
         }
 
         private static string SafeSalesPath()

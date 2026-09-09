@@ -94,6 +94,32 @@ namespace Marketbuddy
 
             /// <summary>這一批東西掛在架上多久了；<b>null＝完全沒有紀錄</b>（不是 0，也不是「剛剛」）。</summary>
             public ListingAge? Age { get; init; }
+
+            /// <summary>
+            /// 這件道具（<b>這個品質</b>）在我們自己的僱員銷售紀錄裡的彙總。
+            /// ⚠️ <c>IsEmpty</c> 只代表「沒有事件」，<b>不代表「沒有資料」</b>——後者由
+            /// <see cref="LiveSellList.historyState"/> 決定，兩者在畫面上必須分得出來。
+            /// </summary>
+            public ItemSaleHistory History { get; init; }
+
+            /// <summary>同一個道具的<b>另一個品質</b>有沒有紀錄（只給滑鼠提示補一句用）。</summary>
+            public bool HistoryOtherQuality { get; init; }
+        }
+
+        /// <summary>「賣出/下架」那一欄的資料基礎處在什麼狀態。四種在畫面上都要分得出來。</summary>
+        private enum SalesHistoryState
+        {
+            /// <summary>記錄功能是關著的 ⇒ 沒有資料，而且不會有。</summary>
+            Disabled,
+
+            /// <summary>紀錄還在讀 ⇒ 畫「…」，不是「沒有」。</summary>
+            Loading,
+
+            /// <summary>從來沒看過這位僱員的出售品清單 ⇒ 畫「?」，<b>絕不是 0</b>。</summary>
+            NoBaseline,
+
+            /// <summary>有觀察基礎；數字可以相信，但觀察期仍然要在滑鼠提示裡講出來。</summary>
+            Ready,
         }
 
         /// <summary>道具 id 的暫存集合，給「歷史最近賣出價」預取用；重用，不每幀配置。</summary>
@@ -121,6 +147,12 @@ namespace Marketbuddy
         /// 在 framework 執行緒隨快照一起算好，Draw 只讀字串。</summary>
         private string retainerLabel = string.Empty;
 
+        /// <summary>「賣出/下架」那一欄的資料基礎；在 framework 執行緒隨快照算好，Draw 只讀。</summary>
+        private SalesHistoryState historyState = SalesHistoryState.Loading;
+
+        /// <summary>我們是從什麼時候開始看僱員清單的（觀察起點的下界）；MinValue＝不知道。</summary>
+        private DateTime historySinceUtc = DateTime.MinValue;
+
         private Configuration conf => Configuration.GetOrLoad();
 
         public LiveSellList(MarketGuiEventHandler gui, BatchReprice engine)
@@ -145,6 +177,12 @@ namespace Marketbuddy
             //    定價方式關著（預設）時整條路徑一個位元組都不會動。
             if (conf.RelistUseLastSoldPrice && gui.IsRetainerSellListOpen)
                 PrefetchLastSoldPrices();
+
+            // 「這件賣掉過嗎」的彙總：讀檔與統計全部在執行緒池上，這裡只收工作。
+            // 🔴 繪製路徑一個位元組的 I/O 都不做，而且只在那一欄真的會被畫出來時才推進。
+            if (conf.LiveSellListOverlay && conf.LiveSellListSalesHistoryColumn &&
+                conf.RetainerSalesLogEnabled && gui.IsRetainerSellListOpen)
+                RetainerSalesHistory.Pump();
 
             if (!conf.LiveSellListOverlay || !gui.IsRetainerSellListOpen)
             {
@@ -237,6 +275,29 @@ namespace Marketbuddy
                 }
             }
 
+            // 「賣出/下架」那一欄的資料基礎。🔑 這幾個判斷的唯一目的是讓
+            // 「我們沒看過」與「看過但沒賣掉」在畫面上分得出來——兩者長得一模一樣，
+            // 而把前者畫成 0 會讓使用者做出相反的決定。
+            var showHistory = conf.LiveSellListSalesHistoryColumn;
+            var history = SalesHistorySnapshot.Empty;
+            historySinceUtc = DateTime.MinValue;
+            if (!showHistory || !conf.RetainerSalesLogEnabled)
+            {
+                historyState = SalesHistoryState.Disabled;
+            }
+            else if (!RetainerSalesHistory.Ready || !RetainerListingAge.Loaded)
+            {
+                historyState = SalesHistoryState.Loading;
+            }
+            else
+            {
+                history = RetainerSalesHistory.Current;
+                historySinceUtc = RetainerListingAge.EarliestSeen() ?? DateTime.MinValue;
+                historyState = RetainerListingAge.FirstSeen(snapshotRetainerId) == null
+                    ? SalesHistoryState.NoBaseline
+                    : SalesHistoryState.Ready;
+            }
+
             var inventoryManager = InventoryManager.Instance();
             var container = inventoryManager == null
                 ? null
@@ -279,6 +340,18 @@ namespace Marketbuddy
                     LastSoldPriceSource.TryGetMinPrices(slot->ItemId, isHq, out minWorld, out minDc);
                 }
 
+                // 這個品質自己的紀錄；另一個品質只用來在滑鼠提示裡補一句
+                // （優質與普通在市場上是兩件不同的商品，數字刻意不合併）。
+                var itemHistory = default(ItemSaleHistory);
+                var otherQuality = false;
+                if (showHistory && historyState != SalesHistoryState.Disabled)
+                {
+                    itemHistory = history.Get(slot->ItemId, isHq);
+                    var anyQuality = history.GetAnyQuality(slot->ItemId);
+                    otherQuality = anyQuality.SoldEvents > itemHistory.SoldEvents ||
+                                   anyQuality.OffBoardEvents > itemHistory.OffBoardEvents;
+                }
+
                 rows.Add(new Row(
                     (short)i,
                     name,
@@ -297,6 +370,8 @@ namespace Marketbuddy
                     Age = conf.LiveSellListMarketColumns
                         ? RetainerListingAge.Get(snapshotRetainerId, slot->ItemId, isHq)
                         : null,
+                    History = itemHistory,
+                    HistoryOtherQuality = otherQuality,
                 });
             }
         }
@@ -393,7 +468,8 @@ namespace Marketbuddy
             // 「重掛後的金額」只有在那個定價方式開著時才有意義，關著時不占版面。
             var showRelist = conf.RelistUseLastSoldPrice;
             var showMarket = conf.LiveSellListMarketColumns;
-            var columns = 4 + (showRelist ? 1 : 0) + (showMarket ? 4 : 0);
+            var showHistory = conf.LiveSellListSalesHistoryColumn;
+            var columns = 4 + (showRelist ? 1 : 0) + (showMarket ? 4 : 0) + (showHistory ? 1 : 0);
 
             if (!ImGui.BeginTable("##mblivesellisttable", columns,
                     ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerH))
@@ -410,6 +486,10 @@ namespace Marketbuddy
                 ImGui.TableSetupColumn("Last sale".Loc());
                 ImGui.TableSetupColumn("Listed for".Loc());
             }
+
+            // 刻意緊接在「已掛售多久」後面：「掛了 12 天／賣出 0 次」要一起讀才有意義。
+            if (showHistory)
+                ImGui.TableSetupColumn("Sold / off the board".Loc());
 
             if (showRelist)
                 ImGui.TableSetupColumn("Relist at".Loc());
@@ -480,6 +560,12 @@ namespace Marketbuddy
 
                     ImGui.TableNextColumn();
                     DrawAgeCell(row);
+                }
+
+                if (showHistory)
+                {
+                    ImGui.TableNextColumn();
+                    DrawHistoryCell(row);
                 }
 
                 if (showRelist)
@@ -654,6 +740,130 @@ namespace Marketbuddy
             Tooltip(
                 "Approximate: it was already listed when Marketbuddy first looked, so the clock starts from when the plugin loaded (??), not from when you actually listed it."
                     .Loc(age.SinceUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")));
+        }
+
+        /// <summary>
+        /// 「這件東西以前賣掉過嗎」那一格：<c>賣出次數 / 沒賣掉就下架的次數</c>。
+        ///
+        /// <para>
+        /// 🔴 <b>四種「沒有數字」必須互相分得出來，而且一個都不可以畫成 0</b>：
+        /// <list type="bullet">
+        ///   <item><c>?</c>（記錄功能關著）＝沒有資料，而且不會有。</item>
+        ///   <item><c>…</c>（還在讀紀錄）＝等一下就有。</item>
+        ///   <item><c>?</c>（從沒看過這位僱員）＝<b>我們沒看過</b>，不是「賣不掉」。</item>
+        ///   <item><c>—</c>（看過，但這件從來沒有異動）＝它就一直掛在那裡沒動過。</item>
+        /// </list>
+        /// 把前三種畫成 0 會讓使用者讀成「這件賣不掉」而做出相反的決定——
+        /// 「讀不到當成 0」在艦隊裡已經害過一次。
+        /// </para>
+        ///
+        /// <para>
+        /// 🔴 第二個數字裡<b>絕不含賣出</b>：它是「下架＋消失但對不上金幣」。信心不足的那些
+        /// （<see cref="RetainerSaleConfidence.Unknown"/>）一律不算賣出，理由寫在滑鼠提示裡。
+        /// </para>
+        ///
+        /// <para>
+        /// 📌 純顯示：這一格不會因為「賣不掉」自動下架、自動降價或做任何事。
+        /// </para>
+        /// </summary>
+        private void DrawHistoryCell(in Row row)
+        {
+            switch (historyState)
+            {
+                case SalesHistoryState.Disabled:
+                    Grey("?");
+                    Tooltip(
+                        "\"Record what disappears from your retainers' listings\" is off, so there is nothing to count. This means \"not watched\", not \"never sold\"."
+                            .Loc());
+                    return;
+
+                case SalesHistoryState.Loading:
+                    Grey("...");
+                    Tooltip("Reading the sales history...".Loc());
+                    return;
+            }
+
+            var history = row.History;
+            if (history.IsEmpty)
+            {
+                if (historyState == SalesHistoryState.NoBaseline)
+                {
+                    Grey("?");
+                    Tooltip(
+                        "Marketbuddy has never had this retainer's sell list open before, so nothing is known about this item yet. That is not the same as \"it never sells\"."
+                            .Loc());
+                    return;
+                }
+
+                Grey("—");
+                Tooltip(
+                    "Nothing has happened to this item in the records kept since ??: it has just been sitting on the board."
+                        .Loc(FormatHistoryCoverage()));
+                return;
+            }
+
+            ImGui.BeginGroup();
+            if (history.SoldEvents > 0)
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.HealerGreen);
+                ImGui.TextUnformatted(history.SoldEvents.ToString("N0"));
+                ImGui.PopStyleColor();
+            }
+            else
+            {
+                Grey("0");
+            }
+
+            ImGui.SameLine(0, 0);
+            Grey(" / " + history.OffBoardEvents.ToString("N0"));
+            ImGui.EndGroup();
+            Tooltip(BuildHistoryTooltip(row));
+        }
+
+        /// <summary>「賣出/下架」那一格的滑鼠提示。長說明放這裡，列上只留掃視得出來的兩個數字。</summary>
+        private string BuildHistoryTooltip(in Row row)
+        {
+            var history = row.History;
+            var lines = new List<string>
+            {
+                "Records from all your retainers since ??: sold ?? time(s), ?? item(s), ?? gil received."
+                    .Loc(FormatHistoryCoverage(), history.SoldEvents, history.SoldQuantity,
+                        history.SoldGil.ToString("N0")),
+            };
+
+            if (history.SoldGilIncomplete)
+                lines.Add("Some of those sales have no amount, so the total is a lower bound.".Loc());
+
+            if (history.LastSoldUtc != DateTime.MinValue)
+                lines.Add("Last sold ??.".Loc(BatchReprice.FormatSoldAt(history.LastSoldUtc)));
+
+            lines.Add(
+                "Came off the board without a sale ?? time(s): ?? delisted by Marketbuddy, ?? that just went with no matching gil (deliberately never counted as sales)."
+                    .Loc(history.OffBoardEvents, history.DelistedEvents, history.UnknownEvents));
+
+            if (row.HistoryOtherQuality)
+                lines.Add("The other quality of this item has records of its own; these numbers are for this quality only.".Loc());
+
+            return string.Join("\n", lines);
+        }
+
+        /// <summary>觀察期：從什麼時候起算、到現在多久。🔑 少了它，「賣出 0 次」看不出可不可信。</summary>
+        private string FormatHistoryCoverage()
+        {
+            if (historySinceUtc == DateTime.MinValue)
+                return "?";
+
+            var span = DateTime.UtcNow - historySinceUtc;
+            if (span < TimeSpan.Zero)
+                span = TimeSpan.Zero;
+
+            var length = span.TotalDays >= 1
+                ? "?? day(s)".Loc((int)span.TotalDays)
+                : span.TotalHours >= 1
+                    ? "?? hour(s)".Loc((int)span.TotalHours)
+                    : "less than an hour".Loc();
+
+            return "?? (??)".Loc(historySinceUtc.ToLocalTime().ToString("yyyy-MM-dd"), length);
         }
 
         /// <summary>把一段時間寫成「3天」「5小時」「12分」。刻意不進位到「1個月」——那太模糊。</summary>
