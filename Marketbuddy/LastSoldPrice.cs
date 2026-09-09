@@ -157,8 +157,11 @@ namespace Marketbuddy
         private static HappyEyeballsCallback? eyeballs;
         private static CancellationTokenSource? cts;
 
-        /// <summary>世界 id → 名稱。<b>在 framework 執行緒建好</b>之後只讀，供解析用。</summary>
-        private static IReadOnlyDictionary<uint, string> worldNames = new Dictionary<uint, string>();
+        /// <summary>
+        /// 世界 id → 名稱。<b>在 framework 執行緒建好</b>之後只讀，供解析用。
+        /// <c>volatile</c>：寫在 framework 執行緒、讀在執行緒池，發布之後內容不再改動。
+        /// </summary>
+        private static volatile IReadOnlyDictionary<uint, string> worldNames = new Dictionary<uint, string>();
 
         private static int failureLogged;
 
@@ -442,7 +445,16 @@ namespace Marketbuddy
             }
             catch (Exception e)
             {
-                Log.Information(e, "[Marketbuddy] 歷史賣出價：查詢迴圈意外結束。");
+                // 🔴 這裡自己再包一層：外掛卸載時 CancellationTokenSource 已經被釋放，
+                //    連寫 log 都可能擲例外，而那會變成沒人接的 Task 例外。
+                try
+                {
+                    Log.Information(e, "[Marketbuddy] 歷史賣出價：查詢迴圈意外結束。");
+                }
+                catch
+                {
+                    // 記錄失敗絕不能再往外擲。
+                }
             }
             finally
             {

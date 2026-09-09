@@ -126,6 +126,13 @@ namespace Marketbuddy
             /// 落回既有的市場比價流程（見 <see cref="LastSoldWaitMs"/>）。
             /// </summary>
             public DateTime LastSoldWaitStart = DateTime.MinValue;
+
+            /// <summary>
+            /// 「歷史最近賣出價」這條路對這一格已經有結論了（用了它，或放棄改走市場比價）。
+            /// 🔴 少了這個旗標，<see cref="SlotPhase.Throttle"/> 會在等閘門的每一個 tick 重跑一次
+            /// 判斷，於是「改用市場比價」那行 Information 會每幀寫一次——log 被洗掉是靜默的損失。
+            /// </summary>
+            public bool LastSoldDone;
             /// <summary>Diagnostics only: when this slot was first ticked, for total-elapsed reporting.</summary>
             public DateTime StartedAt = DateTime.MinValue;
             /// <summary>send→send gap of the attempt currently in flight; fed back to the gate when it turns out to have been swallowed.</summary>
@@ -571,8 +578,15 @@ namespace Marketbuddy
             AutoRetainerBridge.AcquireSuppression("batch reprice");
             suppressionHeld = true;
 
+            // 🔴 看門狗一到期是**整批中止**，所以它必須蓋得住最壞情況。開了「歷史最近賣出價」
+            //    的時候，一格最壞是「等 Universalis 等到 LastSoldWaitMs 逾時，然後才從頭跑完整條
+            //    市場比價」——那兩段是相加的，不加上去的話網路慢會讓整輪重掛被整批砍掉。
+            var watchdog = TimeSpan.FromSeconds(SlotWatchdogSeconds) +
+                           (conf.RelistUseLastSoldPrice
+                               ? TimeSpan.FromMilliseconds(LastSoldWaitMs)
+                               : TimeSpan.Zero);
             foreach (var job in jobs)
-                queue.Enqueue(job.Name, TimeSpan.FromSeconds(SlotWatchdogSeconds), () => TickSlot(job));
+                queue.Enqueue(job.Name, watchdog, () => TickSlot(job));
         }
 
         private void ReleaseSuppressionIfHeld()
@@ -646,7 +660,8 @@ namespace Marketbuddy
                     // 最前面：命中的話這一格連一次遊戲內市場查詢都不會送出去。
                     // 🔴 查不到的道具**不在這裡處理**，直接往下走既有的市場比價流程
                     //    （不猜、不拿別的來源硬湊）。
-                    if (conf.RelistUseLastSoldPrice && TickLastSoldPricing(job, now) is { } lastSoldResult)
+                    if (conf.RelistUseLastSoldPrice && !job.LastSoldDone &&
+                        TickLastSoldPricing(job, now) is { } lastSoldResult)
                         return lastSoldResult;
 
                     // Fresh cached market data for this item skips the whole
@@ -953,6 +968,7 @@ namespace Marketbuddy
                 }
                 else if ((now - job.LastSoldWaitStart).TotalMilliseconds > LastSoldWaitMs)
                 {
+                    job.LastSoldDone = true;
                     WarnLastSoldFallback(job, "timed out");
                     return null;
                 }
@@ -972,6 +988,7 @@ namespace Marketbuddy
                 FinishPricing(job, newPrice, string.Empty,
                     "[Marketbuddy] ??: last sold for ?? gil (??) → ?? gil".Loc(
                         job.Name, sold.UnitPrice.ToString("N0"), when, newPrice.ToString("N0")));
+                job.LastSoldDone = true;
                 return TickTaskResult.Done;
             }
 
@@ -979,6 +996,7 @@ namespace Marketbuddy
             //   (a) Universalis 沒有這件的成交紀錄；
             //   (b) 查詢失敗；
             //   (c) 有資料，但「不忽略優質」而這個品質剛好沒有成交紀錄。
+            job.LastSoldDone = true;
             if (state == LastSoldState.Failed)
                 WarnLastSoldFallback(job, "lookup failed");
             else
