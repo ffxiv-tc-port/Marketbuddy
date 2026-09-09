@@ -74,6 +74,9 @@ namespace Marketbuddy
             var repriceBottom = DrawRepriceWindow();
             DrawRetainerListOverlay();
             marketbuddy.LiveSellList.Draw(repriceBottom);
+            // 買方那一側的面板貼在市場板搜尋結果視窗旁，與上面那一欄（僱員出售品視窗旁）
+            // 位置互不相干，所以不必參與那個堆疊。
+            marketbuddy.MarketBuyTally.Draw();
         }
 
         /// <summary>
@@ -1224,6 +1227,37 @@ namespace Marketbuddy
                 "One extra column: how many times that item has sold, and how many times it came off the board without selling - counted from your own sales records, so no web request and nothing asked of the game. It answers \"is it even worth listing this again\" while you are standing at the sell list. Where there is no basis for an answer - the recording is off, or Marketbuddy has never had that retainer's list open - the cell shows a grey question mark instead of a zero, because \"we never watched\" and \"it never sold\" lead to opposite decisions. Purely informational: nothing is ever delisted or repriced because of these numbers."
                     .Loc());
             ImGui.PopStyleColor();
+
+            ImGui.Spacing();
+            if (ImGui.Checkbox("Show a running total next to the market board's results".Loc(),
+                    ref conf.MarketBuyTallyOverlay))
+                conf.Save();
+
+            DrawNestIndicator(1);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "Buying one thing off the market board usually means clicking a lot of rows, and the game never tells you where you are up to. This panel keeps the running count and the running gil for the trip, and adds a small table showing what the cheapest few listings add up to, so \"is this enough\" and \"what will this cost\" are answered on screen instead of in your head. Type in how many you want and the row that gets you there is highlighted. It only reads: nothing is ever bought, clicked or queried for you."
+                    .Loc());
+            ImGui.PopStyleColor();
+
+            if (conf.MarketBuyTallyOverlay)
+            {
+                DrawNestIndicator(1);
+                ImGui.SetNextItemWidth(70);
+                if (ImGui.InputInt("rows in the running-total table".Loc() + "##mbbuytallyrows",
+                        ref conf.MarketBuyPreviewRows, 0))
+                {
+                    conf.MarketBuyPreviewRows = Math.Clamp(conf.MarketBuyPreviewRows, 3, 20);
+                    conf.Save();
+                }
+
+                ImGui.Spacing();
+                ImGui.SetNextItemWidth(200);
+                ImGui.DragFloat2("Buy panel position (relative to the results window's top right)".Loc(),
+                    ref conf.MarketBuyPanelOffset, 1f, -4000f, 4000f, "%.0f");
+                if (ImGui.IsItemDeactivatedAfterEdit())
+                    conf.Save();
+            }
 
             // 重掛面板與即時掛單面板現在是**同一欄**（重掛在上、即時掛單接在下面），
             // 所以位置只留一個滑桿，拖它就是整欄一起動。

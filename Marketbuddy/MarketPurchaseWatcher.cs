@@ -61,6 +61,14 @@ namespace Marketbuddy
         private readonly MarketGuiEventHandler gui;
 
         /// <summary>
+        /// 「這一趟買到哪了」的計數面板。
+        /// 🔑 刻意讓它<b>共用這一個偵測器</b>而不是自己再輪詢一次：兩套偵測遲早會對不起來，
+        /// 而「買了幾件」對不起來就是那個面板唯一的價值消失。可為 null（面板建不起來時
+        /// 這裡照舊只送 GilDelta 提示）。
+        /// </summary>
+        internal MarketBuyTally? Tally { get; set; }
+
+        /// <summary>
         /// 上一次看到的那筆購買記錄。<c>ListingId</c> 為 0 代表「還沒取過基準」。
         /// </summary>
         private ulong lastListingId;
@@ -125,6 +133,9 @@ namespace Marketbuddy
                 return;
 
             Remember(last);
+            // 🔴 先記帳再送提示：送提示會呼叫別的外掛的 IPC，那條路上任何一個例外都不該
+            //    把「使用者自己的購買紀錄」弄丟。
+            Tally?.Record(last.ItemId, last.Quantity, last.UnitPrice);
             SendHint(last);
         }
 

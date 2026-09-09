@@ -57,6 +57,12 @@ namespace Marketbuddy
         internal MarketPurchaseWatcher MarketPurchaseWatcher { get; private set; }
 
         /// <summary>
+        /// 「這一趟買到哪了」：貼在市場板搜尋結果視窗旁的計數與累計金額面板。
+        /// 🔴 純顯示——不買東西、不點任何一列、零封包、零 hook、零記憶體寫入。
+        /// </summary>
+        internal MarketBuyTally MarketBuyTally { get; private set; }
+
+        /// <summary>
         /// 僱員銷售紀錄：比較兩次看到的僱員市場容器，把少掉的東西記成帶信心標記的事件清單。
         /// 🔴 純唯讀觀察，不下單、不改價、不下架。
         /// </summary>
@@ -154,6 +160,11 @@ namespace Marketbuddy
                 // 沒裝 GilDelta 時整條路徑是安靜的 no-op。
                 MarketPurchaseWatcher = new MarketPurchaseWatcher(MarketGuiEventHandler);
 
+                // 「這一趟買到哪了」：與上面那個觀察者共用同一個購買偵測（見 MarketBuyTally），
+                // 自己只多讀一份掛單快照。同樣是純顯示，不會替使用者買任何東西。
+                MarketBuyTally = new MarketBuyTally(MarketGuiEventHandler);
+                MarketPurchaseWatcher.Tally = MarketBuyTally;
+
                 // 僱員銷售紀錄：只訂閱 Framework.Update，並且只在「出售品」視窗開著時
                 // 讀僱員的市場容器與錢包。零封包、零 hook、零記憶體寫入。
                 RetainerMarketWatcher = new RetainerMarketWatcher(MarketGuiEventHandler, BatchReprice);
@@ -221,6 +232,7 @@ namespace Marketbuddy
             Safe(() => Common.Dalamud.CommandManager.RemoveHandler(commandName));
             Safe(() => PluginUi?.Dispose());
             Safe(() => RetainerMarketWatcher?.Dispose());
+            Safe(() => MarketBuyTally?.Dispose());
             Safe(() => MarketPurchaseWatcher?.Dispose());
             Safe(() => PendingWorklist?.Dispose());
             Safe(() => LiveSellList?.Dispose());

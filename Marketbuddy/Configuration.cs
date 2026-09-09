@@ -380,6 +380,42 @@ namespace Marketbuddy
         /// </remarks>
         public bool LiveSellListSalesHistoryColumn = true;
 
+        /// <summary>
+        /// 「這一趟買到哪了」：在市場板搜尋結果視窗旁畫一塊面板，顯示本趟已買的件數與金額，
+        /// 以及「最便宜的前 K 列加起來是幾件、多少錢」。
+        /// </summary>
+        /// <remarks>
+        /// 📌 <b>預設開啟</b>。理由與 <see cref="LiveSellListSalesHistoryColumn"/> 相同：它回答的
+        /// 正是使用者站在那扇視窗前、一列一列點下去時心裡在算的兩個問題（「夠了沒」「要花多少」），
+        /// 而畫面上本來完全沒有地方回答。預設關掉等於這個功能不存在。
+        /// <para>
+        /// 🔴 這<b>不是</b>市場自動化，所以不受「市場功能一律預設關」那條的規範：
+        /// 它一件東西都不買、一列都不點、一個查詢都不送。資料全部來自遊戲自己已經填好的欄位
+        /// （<c>InfoProxyItemSearch</c>），零封包、零 hook、零記憶體寫入。
+        /// </para>
+        /// <para>
+        /// 🔴 刻意<b>沒有</b>「一鍵買到 N 件」。那會是「按一下帶出一串市場操作」，而且花的是
+        /// 不可逆的 gil；要做那個必須另外開一次決策，不會夾在這個顯示功能裡。
+        /// </para>
+        /// </remarks>
+        public bool MarketBuyTallyOverlay = true;
+
+        /// <summary>
+        /// 上面那塊面板的累計表要列幾列（3～20，使用範圍外的值會在使用時夾住）。
+        /// </summary>
+        /// <remarks>
+        /// ⚠️ 設了目標件數而「湊夠了」的那一列落在這個範圍之外時，表會<b>自動拉長到蓋住它</b>——
+        /// 看得到「還差 N 件」卻看不到要買到第幾列，等於沒回答。
+        /// </remarks>
+        public int MarketBuyPreviewRows = 8;
+
+        /// <summary>
+        /// 「這一趟買到哪了」面板相對於市場板搜尋結果視窗「右上角」的位移。
+        /// 與出售品視窗旁那一欄（<see cref="LiveSellListOffset"/>）分開存：兩扇視窗可能同時開著，
+        /// 位置互不相干。
+        /// </summary>
+        public Vector2 MarketBuyPanelOffset = new Vector2(4, 0);
+
         public int Version { get; set; } = 0;
 
         // the below exist just to make saving/loading less cumbersome
