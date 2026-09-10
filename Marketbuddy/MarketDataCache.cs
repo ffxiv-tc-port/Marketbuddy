@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using Dalamud.Game.Network.Structures;
 using Dalamud.Plugin.Services;
@@ -85,6 +86,112 @@ namespace Marketbuddy
 
         private static readonly Dictionary<uint, Entry> Cache = new();
 
+        /// <summary>
+        /// 交給**別的外掛**看的唯讀快照。所有欄位在建構後不再改動,所以從任何執行緒讀都安全。
+        /// </summary>
+        /// <remarks>
+        /// 🔴 <b>價格 0 代表「這個品質沒有掛單」</b>,不是「免費」——真實掛單不可能是 0 gil。
+        /// 這樣就不必用可空值型別:CallGate 的 <c>InvokeFunc</c> 對 null 走 <c>(TRet)result</c>,
+        /// 回傳可空**值**型別時會擲一個看起來與 IPC 完全無關的 NullReferenceException。
+        /// <para>
+        /// ⚠️ <c>ListingCount*</c> 是<b>第一頁</b>的筆數,不是「總共有幾件在賣」——
+        /// 後續分頁刻意不覆蓋第一頁(見 <see cref="OnOfferingsReceived"/>)。要當「至少 N 件」讀。
+        /// </para>
+        /// </remarks>
+        internal sealed class PublicSnapshot
+        {
+            /// <summary>道具 ID。</summary>
+            public uint ItemId { get; init; }
+
+            /// <summary>這份資料屬於哪一個**世界**(整份快取隨世界切換清掉,見類別註解)。</summary>
+            public uint WorldId { get; init; }
+
+            /// <summary>看到這筆資料的時間(Unix 毫秒,UTC)。</summary>
+            public long ObservedAtUnixMs { get; init; }
+
+            /// <summary>第一頁裡的普通品掛單筆數。</summary>
+            public int ListingCountNq { get; init; }
+
+            /// <summary>第一頁裡的高品質掛單筆數。</summary>
+            public int ListingCountHq { get; init; }
+
+            /// <summary>普通品最低單價;<b>0 代表沒有普通品掛單</b>。</summary>
+            public uint LowestPriceNq { get; init; }
+
+            /// <summary>高品質最低單價;<b>0 代表沒有高品質掛單</b>。</summary>
+            public uint LowestPriceHq { get; init; }
+
+            /// <summary>
+            /// true 代表**我們自己走完流程確認過「沒人在賣」**(見 <see cref="StoreConfirmedEmpty"/>),
+            /// 而不是「還沒查過」。被動路徑永遠不會寫出 true。
+            /// </summary>
+            public bool ConfirmedEmpty { get; init; }
+        }
+
+        /// <summary>
+        /// <see cref="Cache"/> 的<b>對外鏡像</b>。這不是快取本身,是另一份只放摘要的表。
+        /// </summary>
+        /// <remarks>
+        /// 🔴🔴 <b>為什麼要有兩份。</b><see cref="Cache"/> 是裸 <c>Dictionary</c>,只被遊戲
+        /// 主執行緒碰(<c>OfferingsReceived</c> 是遊戲函式 hook、<c>Framework.Update</c>、
+        /// 以及 ImGui 的繪製,三者都在主執行緒)。而 <b>IPC 端點跑在呼叫端外掛的執行緒上</b>,
+        /// 讓它去讀 <c>Cache</c> 的失敗形式不是「拿到舊值」而是<b>字典本身壞掉</b>,
+        /// 那會連帶弄壞批次改價與查價——而且例外可能被既有的 catch 吞成「這件查不到價」。
+        /// <para>
+        /// ⇒ 這裡另外維護一份 <c>ConcurrentDictionary</c>:<b>寫入端仍然只有那條主執行緒</b>
+        /// (與 <c>Cache</c> 的每一次異動一對一),讀取端可以是任何執行緒。
+        /// <b>既有的 <c>Cache</c> 讀寫路徑一個字都沒有改</b>,所以改價/查價的行為完全不變。
+        /// </para>
+        /// <para>
+        /// 🔴 這裡刻意<b>不用鎖</b>:沒有鎖就不可能發生「鎖內呼叫 ImGui/做 I/O」那類問題,
+        /// 而 <c>PublicSnapshot</c> 不可變 ⇒ 讀到的物件內容不會在讀的過程中被換掉。
+        /// </para>
+        /// </remarks>
+        private static readonly ConcurrentDictionary<uint, PublicSnapshot> Published = new();
+
+        /// <summary>
+        /// IPC 用的唯讀查詢。<b>任何執行緒都可以呼叫</b>——它只碰 <see cref="Published"/>。
+        /// 沒有這筆資料時回 <c>null</c>(參考型別,CallGate 對 null 的參考型別回傳是安全的)。
+        /// </summary>
+        internal static PublicSnapshot? GetPublished(uint itemId)
+            => Published.TryGetValue(itemId, out var snapshot) ? snapshot : null;
+
+        /// <summary>把一次觀察到的掛單摘要成快照放進對外鏡像。只在遊戲主執行緒上被呼叫。</summary>
+        private static void PublishSnapshot(uint itemId,
+            List<(uint Price, bool IsHq, ulong RetainerId)> listings)
+        {
+            uint lowestNq = 0, lowestHq = 0;
+            var countNq = 0;
+            var countHq = 0;
+            foreach (var (price, isHq, _) in listings)
+            {
+                if (isHq)
+                {
+                    countHq++;
+                    if (lowestHq == 0 || price < lowestHq)
+                        lowestHq = price;
+                }
+                else
+                {
+                    countNq++;
+                    if (lowestNq == 0 || price < lowestNq)
+                        lowestNq = price;
+                }
+            }
+
+            Published[itemId] = new PublicSnapshot
+            {
+                ItemId = itemId,
+                WorldId = ownerWorldId,
+                ObservedAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                ListingCountNq = countNq,
+                ListingCountHq = countHq,
+                LowestPriceNq = lowestNq,
+                LowestPriceHq = lowestHq,
+                ConfirmedEmpty = false,
+            };
+        }
+
         // 這份快取屬於哪一個**世界**（刻意不含角色，理由見類別註解）。
         // 只在 Framework tick 裡更新，封包處理器只讀。
         private static uint ownerWorldId;
@@ -111,6 +218,7 @@ namespace Marketbuddy
             Framework.Update -= OnFrameworkUpdate;
             MarketBoard.OfferingsReceived -= OnOfferingsReceived;
             Cache.Clear();
+            Published.Clear();
             ownerWorldId = 0;
         }
 
@@ -121,6 +229,7 @@ namespace Marketbuddy
                 return;
             Log.Information($"{Diag} CACHE-CLEAR reason=manual dropped={Cache.Count}");
             Cache.Clear();
+            Published.Clear();
         }
 
         /// <summary>新鮮度仍在 <paramref name="maxAgeSeconds"/> 以內的道具數（設定畫面顯示用）。</summary>
@@ -174,6 +283,13 @@ namespace Marketbuddy
             if (ownerWorldId == 0)
                 return;
             Cache[itemId] = new Entry { At = DateTime.UtcNow, RequestId = int.MinValue, Listings = [] };
+            Published[itemId] = new PublicSnapshot
+            {
+                ItemId = itemId,
+                WorldId = ownerWorldId,
+                ObservedAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                ConfirmedEmpty = true,
+            };
             // 每一筆查價都會走到這裡，屬於細節而非摘要 -> Debug。
             // 一次查價的 Information 級摘要由 BatchReprice 的 QUERY 那一行負責。
             Log.Debug($"{Diag} CACHE-STORE item={itemId} n=0 source=confirmed-empty total={Cache.Count}");
@@ -206,6 +322,8 @@ namespace Marketbuddy
                 Cache.Clear();
             }
 
+            // 對外鏡像無條件跟著清:它與 Cache 一對一,而世界一換舊資料就一律不能用了。
+            Published.Clear();
             ownerWorldId = worldId;
         }
 
@@ -231,7 +349,10 @@ namespace Marketbuddy
                 return;
 
             foreach (var itemId in stale)
+            {
                 Cache.Remove(itemId);
+                Published.TryRemove(itemId, out _);
+            }
             MarketDiag.Trace($"{Diag} CACHE-PRUNE dropped={stale.Count} remaining={Cache.Count}");
         }
 
@@ -265,6 +386,7 @@ namespace Marketbuddy
             {
                 At = DateTime.UtcNow, RequestId = offerings.RequestId, Listings = captured,
             };
+            PublishSnapshot(itemId, captured);
 
             // 被動處理器：遊戲裡任何一次掛單查詢都會來一次，是 log 的大宗 -> Debug。
             Log.Debug(

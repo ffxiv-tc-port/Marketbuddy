@@ -104,6 +104,43 @@ namespace Marketbuddy
             }
         }
 
+        // ---------------------------------------------------------------
+        // Marketbuddy.MarketCache.*(唯讀,給 PriceInsight 之類的查價外掛用)
+        //
+        // 🔴 新功能一律開**新名字**的端點。既有的 Lock／Unlock／IsLocked 名字與型別一個字
+        //    都沒動——同名改型別是最兇的一種破壞,而且有些方向會靜默成功。
+        // 🔴 這兩個端點跑在**呼叫端外掛的執行緒**上,所以它們只碰 MarketDataCache 的
+        //    ConcurrentDictionary 鏡像(GetPublished),絕不碰那個裸 Dictionary 快取。
+        // 🔴 查不到時回 null,而回傳的是**參考型別**:CallGate 的 InvokeFunc 對 null 走
+        //    `(TRet)result`,參考型別安全;可空**值**型別才會擲一個看起來與 IPC 完全
+        //    無關的 NullReferenceException。
+        // ---------------------------------------------------------------
+
+        /// <summary>
+        /// 快取 IPC 的契約版本。加欄位時遞增。
+        /// 🔑 消費端請用 <c>&gt;=</c> 比對,<b>不要用 <c>==</c></b>——嚴格相等會讓
+        /// 我方合法地遞增版本號時,對方靜默失效。
+        /// </summary>
+        private const int MarketCacheApiVersion = 1;
+
+        internal const string TagMarketCacheVersion = "Marketbuddy.MarketCache.Version";
+        internal const string TagMarketCacheGet = "Marketbuddy.MarketCache.Get";
+
+        /// <summary><c>Marketbuddy.MarketCache.Version</c> 端點的實作。</summary>
+        private static int QueryMarketCacheVersion() => MarketCacheApiVersion;
+
+        /// <summary>
+        /// <c>Marketbuddy.MarketCache.Get</c> 端點的實作:這件道具在**本世界**最近一次
+        /// 看到的真實掛單摘要。沒有資料回 <c>null</c>。
+        /// </summary>
+        /// <remarks>
+        /// 🔴 純讀取,零副作用:不送任何市場查詢、不觸發任何遊戲操作。
+        /// 這與 MarketDataCache「純被動接收」的設計約束一致——對外開放的是**已經看到的東西**,
+        /// 不是「幫你去查一次」。
+        /// </remarks>
+        private static MarketDataCache.PublicSnapshot? QueryMarketCache(uint itemId)
+            => MarketDataCache.GetPublished(itemId);
+
         internal static void Init()
         {
             // 🔴 這裡綁的必須是包裝方法。綁 Locks.Add／Locks.Remove 這種方法群組
@@ -111,6 +148,12 @@ namespace Marketbuddy
             Svc.PluginInterface.GetIpcProvider<string, bool>("Marketbuddy.Lock").RegisterFunc(AddLock);
             Svc.PluginInterface.GetIpcProvider<string, bool>("Marketbuddy.Unlock").RegisterFunc(RemoveLock);
             Svc.PluginInterface.GetIpcProvider<string, bool>("Marketbuddy.IsLocked").RegisterFunc(QueryLocked);
+
+            // 唯讀的市場快取查詢(見上面 MarketCache.* 那段的說明)。
+            Svc.PluginInterface.GetIpcProvider<int>(TagMarketCacheVersion)
+                .RegisterFunc(QueryMarketCacheVersion);
+            Svc.PluginInterface.GetIpcProvider<uint, MarketDataCache.PublicSnapshot?>(TagMarketCacheGet)
+                .RegisterFunc(QueryMarketCache);
         }
 
         internal static void Shutdown()
@@ -118,6 +161,9 @@ namespace Marketbuddy
             Svc.PluginInterface.GetIpcProvider<string, bool>("Marketbuddy.Lock").UnregisterFunc();
             Svc.PluginInterface.GetIpcProvider<string, bool>("Marketbuddy.Unlock").UnregisterFunc();
             Svc.PluginInterface.GetIpcProvider<string, bool>("Marketbuddy.IsLocked").UnregisterFunc();
+            Svc.PluginInterface.GetIpcProvider<int>(TagMarketCacheVersion).UnregisterFunc();
+            Svc.PluginInterface.GetIpcProvider<uint, MarketDataCache.PublicSnapshot?>(TagMarketCacheGet)
+                .UnregisterFunc();
         }
 
         /// <summary>
