@@ -434,11 +434,19 @@ namespace Marketbuddy
             }
 
             ImGui.SameLine();
-            using (Disabled(running))
+
+            // 🔑 武裝中也鎖住：那一輪自己在決定要去哪裡，手動插一腳只會讓它等到逾時
+            //    然後解除武裝——按鈕看起來有反應、結果卻是把整輪弄掉。
+            var armed = survey.IsTourArmed;
+            using (Disabled(running || armed))
             {
                 if (ImGui.Button("Travel there".Loc()))
                     survey.RequestChangeWorld(targets[travelChoice].Name);
             }
+
+            if (armed)
+                Grey("An armed round is choosing the worlds. Disarm it below if you want to travel by hand."
+                    .Loc());
 
             if (survey.IsPaused)
                 Grey("A round is paused on ??. Continue it or stop it before travelling - a paused round cannot be picked up on a different world."
