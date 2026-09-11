@@ -369,6 +369,11 @@ namespace Marketbuddy
         /// ⚠️ 這是「不要去、不要掃」的清單，<b>不會</b>把已經掃到的行情從記錄檔裡刪掉；
         /// 比價與採購兩張表只是不再列那些世界的欄位（而且畫面上會寫明藏了哪幾個）。
         /// </para>
+        /// <para>
+        /// 🔴 <b>定價路徑上有一個例外</b>：掛售發生的那個世界（家世界）永遠不會被排除，
+        /// 見 <see cref="BuildPricingExclusions()"/>。勾了它仍然會讓那個世界從換世界選單、
+        /// 自動續跑、掃描與兩張表上消失，只是「拿哪裡的價來定價」不受影響。
+        /// </para>
         /// </remarks>
         public List<uint> PriceSurveyExcludedWorlds = [];
 
@@ -569,6 +574,62 @@ namespace Marketbuddy
         /// <summary>這個世界在排除清單上嗎。</summary>
         public bool IsWorldExcluded(uint worldId)
             => worldId != 0 && PriceSurveyExcludedWorlds.Contains(worldId);
+
+        /// <summary>
+        /// 掛售發生的那個世界，也就是家世界。0＝還沒登入或讀不到。
+        /// </summary>
+        /// <remarks>
+        /// 🔑 <b>為什麼是家世界而不是目前所在的世界</b>：僱員綁在家世界上，東西一律掛在那裡賣，
+        /// 跑到別的世界只是在看別人的市場。參考價可以來自很多世界，<b>定價的市場只有一個</b>。
+        /// 跨世界的時候兩者不一樣，所以這裡必須說死是哪一個。
+        /// <para>
+        /// 🔴 只從 framework／繪製執行緒呼叫：它讀的是遊戲自己的玩家狀態。
+        /// </para>
+        /// </remarks>
+        public static uint SellingWorldId()
+            => PlayerState.ContentId == 0 ? 0u : PlayerState.HomeWorld.RowId;
+
+        /// <summary>
+        /// 拿來過濾「參考價」的排除清單：設定裡那一份，<b>扣掉掛售所在的那個世界</b>。
+        /// </summary>
+        /// <remarks>
+        /// 🔴 <b>這是「自己掛售的世界永不排除」唯一的實作點。</b>待處理清單的建議價
+        /// （<c>PendingActionsBuilder</c>）與最近成交價重掛（<c>LastSoldPriceSource</c>）
+        /// 都從這裡拿清單，不各自補一個 if —— 那種寫法漏掉一處就是靜默的語意不一致，
+        /// 而且兩條路各自看起來都是對的。
+        /// <para>
+        /// 🔑 為什麼永不排除：那是使用者自己要定價的那一個市場。把它排掉會讓「被壓價」
+        /// 這個判斷本身失去意義，而畫面上只會顯示「查不到價」，完全看不出來是自己勾出來的。
+        /// </para>
+        /// <para>
+        /// ⚠️ 讀不到家世界（還沒登入）時<b>什麼都不扣</b>：那時候本來就算不出建議價，
+        /// 少扣一次不會讓誰被賤賣。
+        /// </para>
+        /// <para>
+        /// ⚠️ 這<b>只</b>管定價。排除清單另外幾個用途——換世界選單、自動續跑、站在上面
+        /// 能不能開始掃描、比價與採購兩張表要不要列那一欄——語意是「不要去、不要掃、不要列」，
+        /// 與「要不要拿它的價來定價」是兩件事，所以那幾處刻意仍然照字面生效。
+        /// </para>
+        /// <para>
+        /// 🔴 只從 framework／繪製執行緒呼叫：它讀那個裸 <c>List</c>，而勾選框是在
+        /// 繪製執行緒上改它的。
+        /// </para>
+        /// </remarks>
+        public HashSet<uint> BuildPricingExclusions()
+            => BuildPricingExclusions(SellingWorldId());
+
+        /// <summary>
+        /// 同上，但由呼叫端指定掛售所在的世界。
+        /// 🔑 存在的理由：呼叫端若要把「這份清單是扣掉哪個世界算的」一起記下來，
+        /// 兩次分開讀玩家狀態可能讀到不同的答案（換角色），那會產生一份自相矛盾的快照。
+        /// </summary>
+        public HashSet<uint> BuildPricingExclusions(uint sellingWorldId)
+        {
+            var set = new HashSet<uint>(PriceSurveyExcludedWorlds);
+            if (sellingWorldId != 0)
+                set.Remove(sellingWorldId);
+            return set;
+        }
 
         /// <summary>把一個世界加進／移出排除清單並存檔。沒有真的改到就什麼都不做。</summary>
         public void SetWorldExcluded(uint worldId, bool excluded)

@@ -345,7 +345,10 @@ namespace Marketbuddy
                 // 🔴 排除清單是一個裸 List，繪製執行緒（勾選框）會改它。
                 //    這裡是 framework 執行緒，當場拍一份快照帶走，
                 //    執行緒池那一段與組清單那一段都只讀快照。
-                new HashSet<uint>(conf.PriceSurveyExcludedWorlds));
+                //    🔴 「自己掛售的那個世界」在這一步就被扣掉了（唯一實作點）。
+                //    ⚠️ ResolveSuggestion 的①②本來就是「家世界不看排除清單」那個結構，
+                //       兩者結論相同；留著是因為那一段的正確性不該依賴清單是怎麼來的。
+                conf.BuildPricingExclusions());
 
             prepareRequest = request;
             StatusText = "Recomputing...".Loc();

@@ -99,6 +99,12 @@ namespace Marketbuddy
     /// 🔴 刻意<b>不</b>用 <c>ECommons.Throttlers.EzThrottler</c>（本外掛也根本沒有 ECommons 相依）：
     /// 節流是這裡自己的 <see cref="MinRequestGapMs"/> ＋ <see cref="Gate"/>。
     /// </para>
+    /// <para>
+    /// 🔴 <b>例外只有一個</b>：掛售發生的那個世界（家世界）<b>永遠不會</b>被排除，
+    /// 即使使用者把它勾進清單裡（見 <see cref="Configuration.BuildPricingExclusions()"/>）。
+    /// 那是自己要定價的那一個市場，把它排掉之後畫面上只會顯示「查不到成交」，
+    /// 使用者看不出來那是自己勾出來的。
+    /// </para>
     /// </summary>
     internal static class LastSoldPriceSource
     {
@@ -193,7 +199,7 @@ namespace Marketbuddy
 
             /// <summary>
             /// 這筆答案是照哪一版排除清單算出來的
-            /// （<see cref="Configuration.WorldExclusionRevision"/>）。
+            /// （<see cref="ExclusionSnapshot.Revision"/>）。
             /// 🔴 在解析時過濾等於<b>把過濾結果寫進快取</b>，所以少了這個版號，
             /// 使用者把一個世界勾回來之後拿到的還是舊的過濾結果——而且完全無聲。
             /// </summary>
@@ -217,9 +223,30 @@ namespace Marketbuddy
         /// 會出現「拿到新清單卻配到舊版號」那種對不上的組合。
         /// </para>
         /// </summary>
-        internal sealed class ExclusionSnapshot(int revision, IReadOnlySet<uint> worlds)
+        internal sealed class ExclusionSnapshot(
+            int configRevision, uint sellingWorldId, IReadOnlySet<uint> worlds)
         {
-            public int Revision { get; } = revision;
+            private static int stampCounter;
+
+            /// <summary>
+            /// 這份快照的編號。🔴 <b>設定的版號或掛售所在的世界任一變了就是新的一號</b>，
+            /// 所以快取裡的答案只要編號對不上就一律作廢重問。
+            /// <para>
+            /// ⚠️ 這<b>不是</b> <see cref="Configuration.WorldExclusionRevision"/>：換成一個
+            /// 家世界不同的角色時那個版號不會動，但「該扣掉哪個世界」變了——只比版號會拿到
+            /// 一份對不上的舊答案，而那種壞法是靜默的。
+            /// </para>
+            /// </summary>
+            public int Revision { get; } = Interlocked.Increment(ref stampCounter);
+
+            /// <summary>拍這份快照時設定裡的版號（只拿來判斷要不要重拍，以及寫 log）。</summary>
+            public int ConfigRevision { get; } = configRevision;
+
+            /// <summary>
+            /// 拍這份快照時掛售發生在哪個世界（已經從 <see cref="Worlds"/> 裡扣掉了）。
+            /// 0＝當時還沒登入，那一份什麼都沒扣。
+            /// </summary>
+            public uint SellingWorldId { get; } = sellingWorldId;
 
             private IReadOnlySet<uint> Worlds { get; } = worlds;
 
@@ -248,7 +275,7 @@ namespace Marketbuddy
         /// （出廠排除是上一次遊戲期間套用並存檔的，本次啟動版號仍是 0）。
         /// </para>
         /// </summary>
-        private static volatile ExclusionSnapshot exclusion = new(-1, new HashSet<uint>());
+        private static volatile ExclusionSnapshot exclusion = new(-1, 0, new HashSet<uint>());
 
         /// <summary>🔴 只在持有這把鎖時碰 <see cref="Queue"/>／<see cref="queueWorldId"/>。鎖內不做 I/O、不寫 log、不碰 ImGui。</summary>
         private static readonly object Gate = new();
@@ -412,11 +439,19 @@ namespace Marketbuddy
                 return current;
             }
 
-            if (current.Revision == conf.WorldExclusionRevision)
+            // 🔴 兩個條件都要成立才可以沿用舊快照：設定版號沒變，但換成一個家世界不同的
+            //    角色時「該扣掉哪個世界」就變了。只比版號會拿到一份對不上的清單，
+            //    而失敗形式是靜默的——價格照算，只是多算或少算了一個世界。
+            var selling = Configuration.SellingWorldId();
+            if (current.ConfigRevision == conf.WorldExclusionRevision &&
+                current.SellingWorldId == selling)
                 return current;
 
-            var worlds = new HashSet<uint>(conf.PriceSurveyExcludedWorlds);
-            var next = new ExclusionSnapshot(conf.WorldExclusionRevision, worlds);
+            // 🔴 清單一律走這條唯一實作點拿：掛售發生的那個世界永遠不在裡面。
+            //    id 用上面讀好的那一個，不讓它自己再讀一次——兩次讀到不同答案時
+            //    會產生「清單扣掉 A、快照卻說扣掉 B」那種自相矛盾的組合。
+            var worlds = conf.BuildPricingExclusions(selling);
+            var next = new ExclusionSnapshot(conf.WorldExclusionRevision, selling, worlds);
             exclusion = next;
 
             // 要使用者回報的診斷一律寫 Information。
@@ -425,9 +460,20 @@ namespace Marketbuddy
                 : string.Join("、", worlds.Select(x =>
                     worldNames.TryGetValue(x, out var n) ? $"{n}({x})" : x.ToString()));
             Log.Information(
-                $"[Marketbuddy] 歷史賣出價：套用世界排除清單（第 {next.Revision} 版，{worlds.Count} 個）：{names}。" +
+                $"[Marketbuddy] 歷史賣出價：套用世界排除清單（第 {next.ConfigRevision} 版，{worlds.Count} 個）：{names}。" +
                 "這些世界的成交紀錄不會被拿來當「最近成交價重掛」的價格；" +
                 "已經查到的答案會照新清單重新查一次。");
+            if (selling != 0 && conf.IsWorldExcluded(selling))
+            {
+                var sellingLabel = worldNames.TryGetValue(selling, out var sellingName)
+                    ? $"{sellingName}({selling})"
+                    : selling.ToString();
+                Log.Information(
+                    $"[Marketbuddy] 歷史賣出價：掛售所在的世界（{sellingLabel}）在排除清單上，" +
+                    "但定價一律不排除它——那是你自己要定價的那一個市場。" +
+                    "勾選仍然會讓它從換世界選單、自動續跑、掃描與比價／採購兩張表上消失。");
+            }
+
             return next;
         }
 

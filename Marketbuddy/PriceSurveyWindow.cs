@@ -343,10 +343,20 @@ namespace Marketbuddy
                 ImGui.TextUnformatted("Excluded: ??".Loc(string.Join(", ", names)));
             }
 
+            // 🔴 「掛售所在的世界被勾進去了」必須在列上看得見，不能只靠 tooltip：
+            //    定價不理會那個勾，但換世界、掃描與兩張表仍然照勾的算——看不見的話
+            //    使用者會以為自己勾錯了，或以為定價也跟著排除了。
+            var sellingWorldId = Configuration.SellingWorldId();
+            if (sellingWorldId != 0 && conf.IsWorldExcluded(sellingWorldId))
+                Grey("?? is where your own items are listed, so pricing still reads it.".Loc(
+                    WorldNameOf(sellingWorldId)));
+
             Tooltip(
                 "An excluded world is left out of the travel list, is never picked by automatic world hopping, and cannot be scanned even while you stand on it. Rows already in the log files are kept - the compare and shopping tables just stop showing those columns, and say so.\nRamuh (4034) ships excluded because that world is shut down on this service, so travelling there always fails. That is a normal setting rather than a hard-coded rule: if it ever comes back, untick it here."
                     .Loc() + "\n" +
                 "Excluded worlds are also left out of the pending list's suggested prices and of the most-recent-sale relist price, so a world that shut down cannot set your prices any more. Items whose only sales are on those worlds are left on their usual pricing instead of being given a made-up price."
+                    .Loc() + "\n" +
+                "The one exception is the world your own items are listed on: pricing always reads that world, even while it is ticked here. Ticking it still keeps that world out of the travel list, out of automatic world hopping, out of scanning, and out of the compare and shopping tables."
                     .Loc());
 
             if (!ImGui.CollapsingHeader("Choose which worlds to leave out".Loc() + "###mbsurveyexclude"))
@@ -364,10 +374,13 @@ namespace Marketbuddy
                 if (ImGui.Checkbox(name + "##mbsurveyexclude" + worldId, ref isExcluded))
                     conf.SetWorldExcluded(worldId, isExcluded);
 
-                if (worldId != survey.CurrentWorldId)
-                    continue;
-                ImGui.SameLine();
-                Grey("(you are here)".Loc());
+                if (worldId == survey.CurrentWorldId)
+                {
+                    ImGui.SameLine();
+                    Grey("(you are here)".Loc());
+                }
+
+                DrawSellingWorldNote(worldId, sellingWorldId, isExcluded);
             }
 
             // 🔑 排除清單上但不在這個資料中心的世界也要列得出來，否則使用者換了資料中心
@@ -381,7 +394,24 @@ namespace Marketbuddy
                     conf.SetWorldExcluded(worldId, isExcluded);
                 ImGui.SameLine();
                 Grey("(not on this data centre)".Loc());
+                DrawSellingWorldNote(worldId, sellingWorldId, isExcluded);
             }
+        }
+
+        /// <summary>
+        /// 勾起來的是「自己掛售的那個世界」時，在那一列上寫明定價不受影響。
+        /// 🔑 靜默忽略使用者的勾選是最糟的一種處置：他看得到勾勾、看不到它對定價沒作用。
+        /// </summary>
+        private static void DrawSellingWorldNote(uint worldId, uint sellingWorldId, bool isExcluded)
+        {
+            if (worldId == 0 || worldId != sellingWorldId || !isExcluded)
+                return;
+
+            ImGui.SameLine();
+            Grey("(pricing still reads this world)".Loc());
+            Tooltip(
+                "This is where your own items are listed, so the pending list's suggested price and the most-recent-sale relist price always read this world. The tick still keeps it out of the travel list, out of automatic world hopping, out of scanning, and out of the compare and shopping tables."
+                    .Loc());
         }
 
         /// <summary>
