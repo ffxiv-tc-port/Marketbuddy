@@ -1180,6 +1180,17 @@ namespace Marketbuddy
                 return;
             }
 
+            // 🔴 進度記錄檔還沒讀回來就挑，「資料最舊」會靜默退化成「名字排最前面」——
+            //    每一個世界都會被當成「從來沒掃過」。那不是錯誤訊息，是一個看起來正常的錯答案。
+            if (!PriceSurveyWorldLog.Loaded)
+            {
+                if (DateTime.UtcNow > tourDeadline)
+                    DisarmTour("the world progress file never finished loading".Loc());
+                else
+                    TourStatus = "Reading the world progress file...".Loc();
+                return;
+            }
+
             uint bestId = 0;
             var bestName = string.Empty;
             var bestAt = DateTime.MaxValue;
