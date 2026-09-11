@@ -1321,7 +1321,7 @@ namespace Marketbuddy
             DrawNestIndicator(1);
             ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
             ImGui.TextWrapped(
-                "Take your own listings around the worlds and look up what each of them is going for, one item at a time, then compare. Nothing happens on its own: you press a button once per world, and travelling to the next world is a separate button. It only ever sends the same market query the game's own search sends - no price is changed, nothing is listed or delisted. Results are appended to price_survey.csv in this plugin's config folder."
+                "Take your own listings around the worlds and look up what each of them is going for, one item at a time, then compare. Nothing happens on its own: you press a button once per world, and travelling to the next world is a separate button - unless you arm a round yourself in the survey window, which is off by default. It only ever sends the same market query the game's own search sends - no price is changed, nothing is listed or delisted. Results are appended to price_survey.csv in this plugin's config folder."
                     .Loc());
             ImGui.PopStyleColor();
 

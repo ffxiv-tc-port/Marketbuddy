@@ -12,6 +12,21 @@ namespace Marketbuddy
         [NonSerialized] public const int MIN_PRICE = 1;
         [NonSerialized] public const int MAX_PRICE = 999999999;
 
+        /// <summary>
+        /// 台服的拉姆（4034）。<b>出廠就在排除清單裡</b>：那個世界已經停止營運，
+        /// Lifestream 送不過去。
+        /// </summary>
+        /// <remarks>
+        /// 🔴 這個常數只被 <see cref="SeedClosedWorldExclusions"/> 用來<b>塞一次</b>初始值，
+        /// <b>不是</b>寫死的判斷式：判「要不要排除」一律讀
+        /// <see cref="PriceSurveyExcludedWorlds"/>，所以日後台服再關／再開別的世界，
+        /// 使用者自己在畫面上勾一下就好，不必等改版。
+        /// </remarks>
+        [NonSerialized] public const uint CLOSED_WORLD_RAMUH = 4034;
+
+        /// <summary>一輪自動續跑最多換幾個世界的硬上限（台服只有八個世界）。</summary>
+        [NonSerialized] public const int MAX_TOUR_WORLDS = 8;
+
         public bool HoldShiftToStop = true;
         public bool AutoOpenComparePrices = true;
         public bool AutoOpenHistory = true;
@@ -202,7 +217,12 @@ namespace Marketbuddy
         /// <remarks>
         /// 🔴 <b>預設關閉</b>，而且開著也只是「顯示這個功能的視窗」——真的要跑一定要
         /// 使用者自己在巡檢視窗上按「掃描這個世界」。它不掛任何自動觸發：
-        /// 沒有 AutoRetainer 事件、沒有 addon 事件、掃完一個世界就停、不會自己換世界。
+        /// 沒有 AutoRetainer 事件、沒有 addon 事件、掃完一個世界就停。
+        /// <para>
+        /// ⚠️ <b>唯一會跨世界接下去的</b>是使用者自己武裝的那一輪
+        /// （<see cref="PriceSurveyAutoTour"/>，另一個預設關的開關 ＋ 一顆要親手按的
+        /// 「武裝一輪」按鈕）。沒有打開它、或沒有按那顆按鈕，行為與以前一模一樣。
+        /// </para>
         /// <para>🔴 整條路徑只讀不寫：只送遊戲自己的市場查詢，不改任何價格、不掛售、不下架。</para>
         /// </remarks>
         public bool PriceSurveyEnabled = false;
@@ -272,8 +292,9 @@ namespace Marketbuddy
         /// <c>errorCode=0x70000003</c>），所以「多花多久」是使用者要自己決定的事。
         /// 打開之前畫面會先說「這會多查幾件、大約多花幾分鐘」。
         /// <para>
-        /// 🔴 打開它<b>不會</b>讓任何事情自己開始跑：巡檢仍然只有「掃描這個世界」那顆按鈕
-        /// 一個入口，仍然掃完一個世界就停，仍然不會自己換世界。
+        /// 🔴 打開它<b>不會</b>讓任何事情自己開始跑：它只是讓已經在跑的那一輪多查幾件，
+        /// 不會新增任何觸發來源，也不會讓巡檢自己換世界
+        /// （那要另外打開 <see cref="PriceSurveyAutoTour"/> 並親手武裝）。
         /// </para>
         /// <para>
         /// 🔴 <b>純查價，不買。</b>這條路徑只送遊戲自己的市場查詢，沒有任何購買動作、
@@ -284,6 +305,59 @@ namespace Marketbuddy
         /// </para>
         /// </remarks>
         public bool PriceSurveyShoppingList = false;
+
+        /// <summary>
+        /// 巡檢不要碰的世界（世界 id）。<b>三個用途共用這一份，只有這一份</b>：
+        /// 換世界選單不列它、自動續跑不選它、站在它上面也不准開始掃描。
+        /// </summary>
+        /// <remarks>
+        /// 🔴 <b>初始式刻意是空的。</b>Dalamud 的設定反序列化沒有設
+        /// <c>ObjectCreationHandling</c>（走 Newtonsoft 的預設 <c>Auto</c>），而那對
+        /// 「可讀、而且現值不是 null」的集合成員是<b>把 JSON 的內容加進現有的集合</b>，
+        /// 不是替換掉它。初始式若寫成 <c>[4034]</c>，使用者把 4034 勾掉之後
+        /// 下次啟動又會被加回來，而且完全無聲。出廠要排除的世界一律走
+        /// <see cref="SeedClosedWorldExclusions"/> 那條一次性的路。
+        /// <para>
+        /// ⚠️ 這是「不要去、不要掃」的清單，<b>不會</b>把已經掃到的行情從記錄檔裡刪掉；
+        /// 比價與採購兩張表只是不再列那些世界的欄位（而且畫面上會寫明藏了哪幾個）。
+        /// </para>
+        /// </remarks>
+        public List<uint> PriceSurveyExcludedWorlds = [];
+
+        /// <summary>
+        /// 出廠排除清單套用過了沒。🔴 <b>一次性</b>：套用過就把這個旗標存起來，
+        /// 使用者之後把那個世界勾掉就永遠不會再被塞回去。
+        /// </summary>
+        public bool PriceSurveyExcludedWorldsSeeded = false;
+
+        /// <summary>
+        /// 允許「一個世界掃完之後自動切到資料最舊的世界接著掃」。
+        /// </summary>
+        /// <remarks>
+        /// 🔴 <b>預設關。</b>而且打開它<b>也不會</b>讓任何事情自己開始跑：它只是讓
+        /// 巡檢視窗上那顆「武裝一輪」按鈕可以按。真正的連鎖一定要使用者按下武裝，
+        /// 而武裝狀態<b>刻意不存檔</b>——重開遊戲、重載外掛一律回到解除狀態。
+        /// <para>
+        /// 🔴 整條鏈仍然只讀不寫：換世界走 Lifestream 的具名 IPC 端點（<b>絕不</b>用
+        /// 空參數的 <c>/li</c> 聊天指令，那等於跨世界傳送），到了之後送的還是
+        /// 遊戲自己的市場查詢，不改價、不掛售、不下架。
+        /// </para>
+        /// </remarks>
+        public bool PriceSurveyAutoTour = false;
+
+        /// <summary>一輪武裝最多換幾個世界。</summary>
+        /// <remarks>
+        /// 🔴 這是防無限迴圈的兩道閘之一（另一道是「同一輪裡每個世界最多去一次」）。
+        /// 夾在 1..<see cref="MAX_TOUR_WORLDS"/>。
+        /// </remarks>
+        public int PriceSurveyAutoTourMaxWorlds = MAX_TOUR_WORLDS;
+
+        /// <summary>
+        /// 排除清單改過幾次（<b>只在記憶體裡</b>，不存檔）。
+        /// 巡檢與畫面拿它當「這份清單變了，該重建了」的訊號——少了它，
+        /// 勾掉一個世界之後換世界選單會維持舊內容直到下一次換世界。
+        /// </summary>
+        [NonSerialized] public int WorldExclusionRevision;
 
         /// <summary>
         /// 跨世界價格巡檢正常跑完一個世界之後，自動重新計算「待處理」清單。
@@ -444,6 +518,72 @@ namespace Marketbuddy
         // the below exist just to make saving/loading less cumbersome
         [NonSerialized] private static Configuration? _cachedConfig;
 
+        /// <summary>這個世界在排除清單上嗎。</summary>
+        public bool IsWorldExcluded(uint worldId)
+            => worldId != 0 && PriceSurveyExcludedWorlds.Contains(worldId);
+
+        /// <summary>把一個世界加進／移出排除清單並存檔。沒有真的改到就什麼都不做。</summary>
+        public void SetWorldExcluded(uint worldId, bool excluded)
+        {
+            if (worldId == 0)
+                return;
+
+            bool changed;
+            if (excluded)
+            {
+                changed = !PriceSurveyExcludedWorlds.Contains(worldId);
+                if (changed)
+                    PriceSurveyExcludedWorlds.Add(worldId);
+            }
+            else
+            {
+                changed = PriceSurveyExcludedWorlds.Remove(worldId);
+            }
+
+            if (!changed)
+                return;
+
+            WorldExclusionRevision++;
+            Save();
+        }
+
+        /// <summary>
+        /// 出廠就該排除的世界：台服的拉姆（<see cref="CLOSED_WORLD_RAMUH"/>）已經停止營運，切不過去。
+        /// </summary>
+        /// <remarks>
+        /// 🔑 <b>為什麼走這條一次性的路，而不是寫進欄位初始式</b>：Dalamud 的設定反序列化會把
+        /// JSON 的內容<b>加進</b>初始式建好的集合（Newtonsoft 預設的
+        /// <c>ObjectCreationHandling.Auto</c>），所以寫在初始式裡的東西使用者拿不掉。
+        /// <para>
+        /// 🔴 <b>離線資料表證明不了「哪個世界還在營運」</b>：<c>World</c> 表裡 4034 仍然存在
+        /// （<c>TcRamuh</c>／「拉姆」），而台服每一個世界的 <c>IsPublic</c> 都是 false，
+        /// 照它篩會得到空清單。這一筆是實機試過去不了才知道的事實，所以只能寫成
+        /// 「出廠預設」，不能寫成「從資料表推出來的判斷」。
+        /// </para>
+        /// </remarks>
+        private void SeedClosedWorldExclusions()
+        {
+            if (PriceSurveyExcludedWorldsSeeded)
+                return;
+
+            PriceSurveyExcludedWorldsSeeded = true;
+            var added = !PriceSurveyExcludedWorlds.Contains(CLOSED_WORLD_RAMUH);
+            if (added)
+            {
+                PriceSurveyExcludedWorlds.Add(CLOSED_WORLD_RAMUH);
+                WorldExclusionRevision++;
+            }
+
+            Save();
+
+            // 要使用者回報的診斷一律寫 Information。
+            Log.Information(
+                $"[Marketbuddy] 巡檢：套用出廠世界排除清單（這次有沒有新增={added}）——" +
+                $"拉姆（{CLOSED_WORLD_RAMUH}）已停止營運、切不過去，所以不列進換世界選單、" +
+                "不會被自動續跑選中，也不能在那裡開始掃描。這是一次性的：" +
+                "在畫面上把它勾掉之後不會再被加回來。");
+        }
+
         public void Save()
         {
             PluginInterface.SavePluginConfig(this);
@@ -480,7 +620,15 @@ namespace Marketbuddy
                 conf.MarketDataCacheSeconds = Math.Clamp(conf.MarketDataCacheSeconds, 0, 3600);
                 conf.PriceSurveyCacheSeconds = Math.Clamp(conf.PriceSurveyCacheSeconds, 0, 3600);
                 conf.PriceSurveySkipHours = Math.Clamp(conf.PriceSurveySkipHours, 0, 168);
+                // 舊設定檔沒有這個鍵時欄位初始值（空清單）會留著；只有檔案裡明寫 null
+                // 才會變成 null，而那之後每一個 Contains 都會 NRE。
+                conf.PriceSurveyExcludedWorlds ??= [];
+                conf.PriceSurveyAutoTourMaxWorlds =
+                    Math.Clamp(conf.PriceSurveyAutoTourMaxWorlds, 1, MAX_TOUR_WORLDS);
             }
+
+            // 🔴 兩條路（全新設定檔／既有設定檔）都要經過，而且只會真的動一次。
+            conf.SeedClosedWorldExclusions();
 
             _cachedConfig = conf;
             return _cachedConfig;

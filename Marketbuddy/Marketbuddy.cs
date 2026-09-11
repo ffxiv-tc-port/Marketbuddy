@@ -135,7 +135,9 @@ namespace Marketbuddy
                 MarketGuiEventHandler.DelistEngine = BatchDelist;
 
                 // 跨世界價格巡檢：只訂閱 Framework.Update 與市場封包事件並等待。
-                // 🔴 它沒有任何自動觸發來源——使用者不去按那顆按鈕，這個物件什麼都不會做。
+                // 🔴 它沒有任何自動觸發來源——使用者不去按按鈕，這個物件什麼都不會做。
+                //    「掃完自動換世界」也一樣：那要使用者先打開一個預設關的設定、
+                //    再親手按「武裝一輪」，而且武裝狀態不存檔（載入時一律是解除的）。
                 PriceSurvey = new PriceSurvey(MarketGuiEventHandler);
                 MarketGuiEventHandler.Survey = PriceSurvey;
 

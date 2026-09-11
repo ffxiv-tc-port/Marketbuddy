@@ -14,15 +14,27 @@ namespace Marketbuddy
     ///
     /// <para>
     /// 「帶著自己正在賣的清單，站在某一個世界的市場前面，把每一件的行情逐一問過一遍並記下來」。
-    /// 跑完一個世界就停；要換世界是**另一顆按鈕**，換到之後仍然要使用者再按一次「掃描這個世界」。
+    /// 預設跑完一個世界就停；要換世界是**另一顆按鈕**，換到之後仍然要使用者再按一次「掃描這個世界」。
     /// </para>
     ///
     /// <para>
-    /// 🔴 <b>一律手動觸發。</b>唯一的入口是巡檢視窗上的按鈕（<see cref="RequestStart"/>）。
+    /// 🔴 <b>一律手動觸發。</b>啟動的入口只有兩個，兩個都是使用者按的按鈕：
+    /// 「掃描這個世界」（<see cref="RequestStart"/>），以及「武裝一輪」
+    /// （<see cref="RequestArmTour"/>，2026-09-11 新增的自動續跑）。
     /// 這個類別**沒有**訂閱 AutoRetainer 的任何事件、**沒有**訂閱任何 addon 生命週期事件，
     /// 也**不會**在 <c>Framework.Update</c> 裡因為任何遊戲狀態自己開始跑
-    /// （<see cref="OnFrameworkUpdate"/> 在閒置時的唯一副作用是把 <see cref="startRequested"/>
-    /// 這個「使用者按了按鈕」的旗標消費掉）。
+    /// （<see cref="OnFrameworkUpdate"/> 在閒置時的唯一副作用，就是把那兩個
+    /// 「使用者按了按鈕」的旗標消費掉）。
+    /// </para>
+    ///
+    /// <para>
+    /// 🔴 <b>自動續跑（武裝）只在「使用者手動武裝的那一輪」裡有效。</b>
+    /// 武裝要 <c>PriceSurveyAutoTour</c> 這個<b>預設關</b>的設定先打開，武裝狀態
+    /// <b>刻意不存檔</b>（重開遊戲、重載外掛一律回到解除狀態），而且有三道停止閘：
+    /// ①同一輪裡每個世界最多去一次 ②一輪最多換 <c>PriceSurveyAutoTourMaxWorlds</c> 個世界
+    /// ③只有「這個世界的清單整份掃完」才會續跑——逾時、使用者按停、關視窗、離開遊戲世界、
+    /// 世界被動改變、讓路給重掛／下架，一律當場解除武裝並說明原因。
+    /// 換世界一律走 Lifestream 的具名 IPC 端點，<b>絕不</b>用空參數的 <c>/li</c> 聊天指令。
     /// </para>
     ///
     /// <para>
@@ -67,6 +79,18 @@ namespace Marketbuddy
         /// <summary>準備階段最多等採購清單重讀這麼久；超過就用上一份繼續，不卡住。</summary>
         private const double ShoppingReloadWaitSeconds = 5;
 
+        /// <summary>武裝中：請 Lifestream 送過去之後最多等這麼久，還沒到就解除武裝。</summary>
+        private const double TourTravelTimeoutSeconds = 300;
+
+        /// <summary>武裝中：抵達之後先站定這麼久再開始掃描（讓 Lifestream 把它自己的收尾做完）。</summary>
+        private const double TourSettleSeconds = 8;
+
+        /// <summary>
+        /// 武裝中：等「現在可以動了」最多等這麼久（別的引擎在用市場、AR 忙、Lifestream 還在忙）。
+        /// 🔴 一定要有上限：沒有的話它會安安靜靜地永遠等下去，而使用者看不出它其實卡住了。
+        /// </summary>
+        private const double TourWaitSeconds = 120;
+
         private const string Diag = "[MBDIAG]";
 
         internal enum SurveyState
@@ -98,6 +122,29 @@ namespace Marketbuddy
             Throttle,
             Request,
             Wait,
+        }
+
+        /// <summary>
+        /// 自動續跑（武裝一輪）走到哪一步。
+        /// ⚠️ 刻意給 <see cref="Off"/> 明確的 0：沒有零值的列舉會讓 <c>default</c>
+        /// 落在一個有意義的值上，而那種壞法是靜默的。
+        /// </summary>
+        internal enum TourPhase
+        {
+            /// <summary>沒有武裝。</summary>
+            Off = 0,
+
+            /// <summary>正在（或即將）掃這個世界，等它收場。</summary>
+            Scanning = 1,
+
+            /// <summary>這個世界收場了，正在挑下一個世界。</summary>
+            Choosing = 2,
+
+            /// <summary>已經請 Lifestream 送過去，等抵達。</summary>
+            Travelling = 3,
+
+            /// <summary>到了，站定一下再開始掃描。</summary>
+            Settling = 4,
         }
 
         private readonly MarketGuiEventHandler gui;
@@ -163,12 +210,58 @@ namespace Marketbuddy
         private int firstItemNoResponseStreak;
 
         // ---- 換世界（Lifestream）------------------------------------------
-        // 🔴 這一整組刻意與掃描完全分離：換世界不會開始掃描、掃描也不會換世界。
-        //    「到了下一個世界」之後仍然要使用者自己再按一次「掃描這個世界」。
+        // 🔴 手動那條路刻意與掃描完全分離：按「前往」不會開始掃描。
+        //    「到了下一個世界」之後仍然要使用者自己再按一次「掃描這個世界」——
+        //    唯一的例外是使用者自己武裝過的那一輪自動續跑（見下面那一組）。
         private string? travelRequestWorld;
         private readonly List<(uint WorldId, string Name)> travelTargets = [];
         private uint travelTargetsBuiltFor = uint.MaxValue;
+
+        /// <summary>上一次建 <see cref="travelTargets"/> 時看到的排除清單修訂號。</summary>
+        private int travelTargetsExclusionRevision = -1;
+
         private bool lifestreamMissing;
+
+        /// <summary>
+        /// 這個資料中心的全部世界（含目前所在的這一個，<b>不</b>套用排除清單）。
+        /// 畫面上的「哪些世界不要碰」勾選清單就是它。
+        /// </summary>
+        /// <remarks>
+        /// 🔴 <b>整份換掉，不就地改</b>：這份清單在 framework 執行緒上重建、由繪製執行緒讀，
+        /// 組好一份新的再把參考換過去，繪製執行緒就永遠拿到一份完整的清單，
+        /// 不會在別人 <c>Clear()</c> 到一半的時候去列舉它。
+        /// </remarks>
+        private IReadOnlyList<(uint WorldId, string Name)> dataCentreWorlds = [];
+
+        // ---- 自動續跑（使用者手動武裝的那一輪）------------------------------
+        // 🔴 這一整組都不存檔：重開遊戲、重載外掛一律回到解除狀態。
+        private bool tourArmed;
+        private TourPhase tourPhase;
+        private bool armTourRequested;
+        private string? disarmTourRequested;
+
+        /// <summary>這一輪已經去過（或正要去）的世界：同一輪裡每個世界最多去一次。</summary>
+        private readonly HashSet<uint> tourVisited = [];
+
+        private int tourWorldsChanged;
+        private int tourMaxWorlds;
+        private uint tourTravelTargetId;
+        private string tourTravelTargetName = string.Empty;
+
+        /// <summary>目前這一步的耐心上限；<see cref="DateTime.MaxValue"/>＝這一步沒有上限。</summary>
+        private DateTime tourDeadline = DateTime.MaxValue;
+
+        /// <summary>抵達之後要站到什麼時候才開始掃描。</summary>
+        private DateTime tourSettleUntil;
+
+        /// <summary>這個世界收場了而且可以往下一個走。</summary>
+        private bool tourAdvancePending;
+
+        /// <summary>
+        /// 這一輪收場的理由是「這個世界該問的都在保留時間內問過了」。
+        /// 🔑 那不是失敗，所以武裝中可以往下一個世界走（見 <see cref="Finish"/>）。
+        /// </summary>
+        private bool nothingLeftOnThisWorld;
 
         // ---- 市場封包接收（形狀逐字比照 BatchReprice，只是不驅動任何改價）------
         // 🔑 這裡比 BatchReprice 多帶一個 Quantity：採購清單要回答「這個世界買得到幾個」。
@@ -253,14 +346,39 @@ namespace Marketbuddy
         /// </summary>
         internal bool LastRunLookedUnsupported { get; private set; }
 
-        /// <summary>同一個資料中心裡、Lifestream 說去得了的世界（不含目前這一個）。</summary>
+        /// <summary>
+        /// 同一個資料中心裡、Lifestream 說去得了、<b>而且不在排除清單上</b>的世界
+        /// （不含目前這一個）。換世界選單與自動續跑<b>共用這一份</b>——
+        /// 🔑 一份真值，所以選單上看得到的世界就是自動續跑可能選到的世界，反之亦然。
+        /// </summary>
         internal IReadOnlyList<(uint WorldId, string Name)> TravelTargets => travelTargets;
+
+        /// <summary>這個資料中心的全部世界（含目前這一個、含被排除的）；畫面上的勾選清單用。</summary>
+        internal IReadOnlyList<(uint WorldId, string Name)> DataCentreWorlds => dataCentreWorlds;
 
         /// <summary>問過 Lifestream 但它不在（或 IPC 還沒好）。畫面要說的話與「沒有可去的世界」不同。</summary>
         internal bool LifestreamMissing => lifestreamMissing;
 
         /// <summary>上一次換世界請求的結果，顯示在按鈕旁邊。</summary>
         internal string TravelStatus { get; private set; } = string.Empty;
+
+        /// <summary>自動續跑武裝中嗎。</summary>
+        internal bool IsTourArmed => tourArmed;
+
+        /// <summary>自動續跑走到哪一步（沒武裝時是 <see cref="TourPhase.Off"/>）。</summary>
+        internal TourPhase TourState => tourPhase;
+
+        /// <summary>這一輪武裝已經換過幾個世界。</summary>
+        internal int TourWorldsChanged => tourWorldsChanged;
+
+        /// <summary>這一輪武裝最多換幾個世界（武裝當下抄的，中途改設定不影響這一輪）。</summary>
+        internal int TourMaxWorlds => tourMaxWorlds;
+
+        /// <summary>正在前往的世界名（沒有在前往時是空字串）。</summary>
+        internal string TourTravelTargetName => tourTravelTargetName;
+
+        /// <summary>自動續跑那一行狀態文字（已在地化）。</summary>
+        internal string TourStatus { get; private set; } = string.Empty;
 
         internal int OkCount => okCount;
         internal int EmptyCount => emptyCount;
@@ -295,6 +413,14 @@ namespace Marketbuddy
             Framework.Update -= OnFrameworkUpdate;
             MarketBoard.HistoryReceived -= OnHistoryReceived;
             MarketBoard.OfferingsReceived -= OnOfferingsReceived;
+            // 🔴 卸載一律回到解除武裝，而且安靜地做：這條路不一定在 framework 執行緒上，
+            //    不可以往聊天視窗印字（所以不走 DisarmTour）。
+            tourArmed = false;
+            tourPhase = TourPhase.Off;
+            tourAdvancePending = false;
+            armTourRequested = false;
+            disarmTourRequested = null;
+
             // 卸載時安靜地收手；不重設 InfoProxy 以外的任何東西。
             if (State != SurveyState.Idle)
                 ResetRun();
@@ -328,6 +454,75 @@ namespace Marketbuddy
                 return;
             travelRequestWorld = world;
             TravelStatus = string.Empty;
+        }
+
+        /// <summary>
+        /// 🔴 <b>「武裝一輪自動續跑」的唯一入口</b>，只由巡檢視窗上那顆按鈕呼叫。
+        /// 這裡只立旗標：真正的武裝（以及它會不會被拒絕）發生在 framework 執行緒上，
+        /// 因為它要讀遊戲狀態、還要往聊天視窗印一行。
+        /// </summary>
+        internal void RequestArmTour()
+        {
+            if (tourArmed)
+                return;
+            armTourRequested = true;
+        }
+
+        /// <summary>
+        /// 🔴 <b>解除武裝的唯一入口</b>（使用者按「解除武裝」）。同樣只立旗標。
+        /// </summary>
+        internal void RequestDisarmTour(string reason)
+        {
+            if (!tourArmed)
+                return;
+            disarmTourRequested = reason;
+        }
+
+        /// <summary>
+        /// 現在能不能武裝。回 false 時 <paramref name="reason"/> 是給使用者看的一句話。
+        /// 🔴 這個方法每一幀都被繪製執行緒呼叫（按鈕要不要變灰），所以只讀 framework 執行緒
+        /// 拍好的快照與設定，<b>不</b>碰 <c>PlayerState</c> 的原生指標、<b>不</b>改任何狀態。
+        /// </summary>
+        internal bool CanArmTour(out string reason)
+        {
+            reason = string.Empty;
+            if (tourArmed)
+            {
+                reason = "Already armed".Loc();
+                return false;
+            }
+
+            if (!conf.PriceSurveyEnabled)
+            {
+                reason = "This feature is not enabled yet".Loc();
+                return false;
+            }
+
+            if (!conf.PriceSurveyAutoTour)
+            {
+                reason = "Automatic world hopping is turned off".Loc();
+                return false;
+            }
+
+            if (IsPaused)
+            {
+                reason = "A price survey is paused - continue it or stop it first".Loc();
+                return false;
+            }
+
+            if (!LoggedIn || CurrentWorldId == 0)
+            {
+                reason = "Not logged in".Loc();
+                return false;
+            }
+
+            if (lifestreamMissing)
+            {
+                reason = "Lifestream is not installed".Loc();
+                return false;
+            }
+
+            return true;
         }
 
         /// <summary>
@@ -419,6 +614,16 @@ namespace Marketbuddy
                 return false;
             }
 
+            // 🔴 排除清單的第三個用途：站在被排除的世界上也不准開始掃描。
+            //    ⚠️ 刻意<b>不</b>套用在 CanResume 上——暫停中的那一輪已經收了一半的資料，
+            //    讓它跑完永遠比把它擱在那裡好；要丟掉有「停止並放棄」那顆按鈕。
+            if (conf.IsWorldExcluded(CurrentWorldId))
+            {
+                reason = "?? is on your excluded list".Loc(
+                    CurrentWorldName.Length > 0 ? CurrentWorldName : $"#{CurrentWorldId}");
+                return false;
+            }
+
             return true;
         }
 
@@ -505,6 +710,10 @@ namespace Marketbuddy
             // 🔴 沒有人要求重讀時這兩行都是 no-op；它們不會讓任何事情開始跑。
             ShoppingList.BeginLoad();
             ShoppingList.PumpLoad();
+
+            // 🔴 武裝／解除武裝的旗標在<b>任何</b>狀態下都要收得到：使用者掃到一半按
+            //    「解除武裝」時，這個類別正在 Running，TickIdle 根本不會跑。
+            TourConsumeRequests();
 
             if (State == SurveyState.Idle)
             {
@@ -611,7 +820,7 @@ namespace Marketbuddy
         /// </summary>
         private void TickIdle()
         {
-            if (CurrentWorldId != 0 && CurrentWorldId != travelTargetsBuiltFor)
+            if (CurrentWorldId != 0 && !TravelTargetsAreFresh())
                 RebuildTravelTargets(CurrentWorldId);
 
             if (travelRequestWorld is { } destination)
@@ -620,12 +829,26 @@ namespace Marketbuddy
                 ChangeWorldOnce(destination);
             }
 
+            // 🔴 只有使用者自己武裝過的那一輪，這一步才會做事；沒武裝時它整個是 no-op。
+            //    刻意排在「重建可前往世界清單」之後、「消費開始旗標」之前：
+            //    它挑世界要用剛建好的那一份，而它要求開始掃描的方式就是立同一個旗標。
+            TourTick();
+
             // 🔴 沒有任何遊戲狀態可以讓巡檢自己開始跑：只有這個旗標。
             if (!startRequested)
                 return;
             startRequested = false;
             BeginRun();
         }
+
+        /// <summary>
+        /// 「可前往世界清單」還算不算數。
+        /// 🔑 除了換世界之外，<b>排除清單改過也要重建</b>——少了後面那個條件，
+        /// 勾掉一個世界之後選單會維持舊內容直到下一次換世界，而那是靜默的。
+        /// </summary>
+        private bool TravelTargetsAreFresh()
+            => CurrentWorldId == travelTargetsBuiltFor &&
+               travelTargetsExclusionRevision == conf.WorldExclusionRevision;
 
         /// <summary>
         /// 重建「這裡去得了哪些世界」的下拉選單內容。
@@ -638,6 +861,7 @@ namespace Marketbuddy
         {
             travelTargets.Clear();
             travelTargetsBuiltFor = currentWorldId;
+            travelTargetsExclusionRevision = conf.WorldExclusionRevision;
             lifestreamMissing = false;
 
             var currentRow = PlayerState.CurrentWorld.ValueNullable;
@@ -653,12 +877,33 @@ namespace Marketbuddy
             if (sheet == null)
                 return;
 
+            // ① 先把這個資料中心的世界整份列出來（含目前所在的、含被排除的）。
+            //    🔑 這一份要完整：畫面上的勾選清單靠它，而下面問 Lifestream 的迴圈
+            //    可能中途就 return（沒裝），半份清單會讓被排除的世界從畫面上消失，
+            //    使用者就再也勾不掉它了。
+            var everyWorld = new List<(uint WorldId, string Name)>();
             foreach (var row in sheet)
             {
-                if (row.RowId == currentWorldId || row.DataCenter.RowId != dataCentre)
+                if (row.DataCenter.RowId != dataCentre)
                     continue;
                 var name = row.Name.ExtractText();
                 if (name.Length == 0)
+                    continue;
+                everyWorld.Add((row.RowId, name));
+            }
+
+            everyWorld.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
+            dataCentreWorlds = everyWorld;
+
+            // ② 再篩出「去得了、而且使用者沒排除」的。
+            foreach (var (worldId, name) in everyWorld)
+            {
+                if (worldId == currentWorldId)
+                    continue;
+
+                // 🔴 排除清單在這裡就把世界拿掉，所以換世界選單與自動續跑一次搞定：
+                //    兩邊讀的都是 travelTargets，不可能只有一邊漏掉。
+                if (conf.IsWorldExcluded(worldId))
                     continue;
 
                 var reachable = IPCManager.CanLifestreamVisit(name);
@@ -671,33 +916,36 @@ namespace Marketbuddy
                 }
 
                 if (reachable == true)
-                    travelTargets.Add((row.RowId, name));
+                    travelTargets.Add((worldId, name));
             }
 
             travelTargets.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
         }
 
         /// <summary>
-        /// 🔴 <b>按一次只換一次。</b>沒有重試、沒有排程，抵達之後也不會自己開始掃描。
+        /// 🔴 <b>呼叫一次只換一次。</b>沒有重試、沒有排程。
+        /// 抵達之後<b>不會</b>自己開始掃描——除非使用者武裝了自動續跑，那時候是
+        /// <see cref="TourTickSettling"/> 在抵達之後另外立一次開始旗標。
         /// </summary>
-        private void ChangeWorldOnce(string destination)
+        /// <returns>Lifestream 收下這次請求了才是 true。</returns>
+        private bool ChangeWorldOnce(string destination)
         {
             if (IPCManager.IsLocked)
             {
                 TravelStatus = "Halted by another plugin via IPC".Loc();
-                return;
+                return false;
             }
 
             if (AutoRetainerBridge.IsBusy)
             {
                 TravelStatus = "AutoRetainer is busy (or MultiMode is enabled), stop it first".Loc();
-                return;
+                return false;
             }
 
             if (IPCManager.IsLifestreamBusy())
             {
                 TravelStatus = "Lifestream is busy right now.".Loc();
-                return;
+                return false;
             }
 
             var accepted = IPCManager.LifestreamChangeWorld(destination);
@@ -706,7 +954,390 @@ namespace Marketbuddy
                 : "Lifestream did not accept that request (it may be busy, or that world is not reachable right now).".Loc();
             Log.Information(
                 $"[Marketbuddy] 巡檢：向 Lifestream 請求前往 {destination}，接受={accepted}。" +
-                "這次呼叫只換一次世界，抵達之後不會自己開始掃描。");
+                $"這次呼叫只換一次世界，自動續跑武裝中={tourArmed}。");
+            return accepted;
+        }
+
+        // =====================================================================
+        //  自動續跑（使用者手動武裝的那一輪）
+        //
+        //  🔴 三道停止閘，缺一不可：
+        //     ①同一輪裡每個世界最多去一次（tourVisited）
+        //     ②一輪最多換 tourMaxWorlds 個世界
+        //     ③只有「整份掃完」或「這個世界該問的都在保留時間內問過了」才往下走
+        //  🔴 換世界一律走 Lifestream 的具名 IPC 端點，絕不用空參數的 /li 聊天指令。
+        //  🔴 每一種收場都會寫一行 Information 並往聊天視窗印一句：
+        //     使用者永遠看得出「它為什麼沒有繼續」。
+        // =====================================================================
+
+        /// <summary>消費使用者的武裝／解除武裝旗標。🔴 任何狀態下每幀都跑。</summary>
+        private void TourConsumeRequests()
+        {
+            if (disarmTourRequested is { } disarmReason)
+            {
+                disarmTourRequested = null;
+                armTourRequested = false;
+                DisarmTour(disarmReason);
+            }
+
+            if (!armTourRequested)
+                return;
+            armTourRequested = false;
+            ArmTour();
+        }
+
+        /// <summary>
+        /// 武裝一輪。🔴 只從 framework 執行緒呼叫（<see cref="TourConsumeRequests"/>）。
+        /// </summary>
+        private void ArmTour()
+        {
+            if (tourArmed)
+                return;
+
+            if (!CanArmTour(out var why))
+            {
+                TourStatus = "Cannot arm: ??".Loc(why);
+                return;
+            }
+
+            tourArmed = true;
+            tourVisited.Clear();
+
+            // 🔴 起點也算「去過了」：同一輪裡不會再繞回來。
+            tourVisited.Add(CurrentWorldId);
+            tourWorldsChanged = 0;
+            tourMaxWorlds = Math.Clamp(conf.PriceSurveyAutoTourMaxWorlds, 1, Configuration.MAX_TOUR_WORLDS);
+            tourAdvancePending = false;
+            tourTravelTargetId = 0;
+            tourTravelTargetName = string.Empty;
+            EnterTourPhase(TourPhase.Scanning, 0);
+
+            string opening;
+            if (IsRunning)
+            {
+                // 已經在掃了：等它收場，Finish 會接手。
+                opening = "the scan already running";
+            }
+            else if (conf.IsWorldExcluded(CurrentWorldId))
+            {
+                // 站在被排除的世界上：這裡不掃，直接去挑下一個。
+                tourAdvancePending = true;
+                opening = "travelling on (this world is excluded)";
+            }
+            else
+            {
+                // 🔴 走既有的唯一啟動入口，同一格稍後就會被 TickIdle 消費掉。
+                startRequested = true;
+                opening = "scanning this world";
+            }
+
+            TourStatus = "Automatic world hopping armed: up to ?? world(s) this round.".Loc(tourMaxWorlds);
+            Log.Information(
+                $"[Marketbuddy] 巡檢自動續跑武裝：起點 {CurrentWorldName}({CurrentWorldId})，" +
+                $"上限 {tourMaxWorlds} 個世界，開場動作={opening}。" +
+                "武裝狀態不存檔；只有「整份掃完」才會往下一個世界走，其餘任何收場都會當場解除武裝。");
+            ChatGui.Print("[Marketbuddy] " + TourStatus);
+        }
+
+        /// <summary>
+        /// 解除武裝並說清楚為什麼。
+        /// 🔴 只從 framework 執行緒呼叫（它會往聊天視窗印字）。
+        /// </summary>
+        private void DisarmTour(string reason)
+        {
+            if (!tourArmed)
+            {
+                tourPhase = TourPhase.Off;
+                return;
+            }
+
+            tourArmed = false;
+            tourPhase = TourPhase.Off;
+            tourAdvancePending = false;
+            tourTravelTargetId = 0;
+            tourTravelTargetName = string.Empty;
+            tourDeadline = DateTime.MaxValue;
+
+            TourStatus = "Automatic world hopping stopped: ??".Loc(reason);
+            Log.Information(
+                $"[Marketbuddy] 巡檢自動續跑解除武裝（{reason}）：" +
+                $"本輪換了 {tourWorldsChanged}/{tourMaxWorlds} 個世界，去過 {tourVisited.Count} 個。");
+            ChatGui.Print("[Marketbuddy] " + TourStatus);
+        }
+
+        private void EnterTourPhase(TourPhase phase, double timeoutSeconds)
+        {
+            tourPhase = phase;
+            tourDeadline = timeoutSeconds > 0
+                ? DateTime.UtcNow.AddSeconds(timeoutSeconds)
+                : DateTime.MaxValue;
+        }
+
+        /// <summary>
+        /// 自動續跑的一格。🔴 只在 <see cref="SurveyState.Idle"/> 時被呼叫
+        /// （<see cref="TickIdle"/>）——掃描中什麼都不必做，收場時 <see cref="Finish"/> 會接手。
+        /// </summary>
+        private void TourTick()
+        {
+            if (!tourArmed)
+                return;
+
+            // 使用者中途把設定關掉＝他不要這個功能了，當場解除。
+            if (!conf.PriceSurveyEnabled || !conf.PriceSurveyAutoTour)
+            {
+                DisarmTour("the setting was turned off".Loc());
+                return;
+            }
+
+            switch (tourPhase)
+            {
+                case TourPhase.Scanning:
+                    TourTickScanning();
+                    return;
+                case TourPhase.Choosing:
+                    TourChooseNextWorld();
+                    return;
+                case TourPhase.Travelling:
+                    TourTickTravelling();
+                    return;
+                case TourPhase.Settling:
+                    TourTickSettling();
+                    return;
+            }
+        }
+
+        /// <summary>
+        /// 掃描那一步：只有兩種合法結果——收場時 <see cref="Finish"/> 立了
+        /// <see cref="tourAdvancePending"/>，或者開始旗標還沒被消費掉。
+        /// </summary>
+        /// <remarks>
+        /// 🔑 其餘情況表示這一輪<b>根本沒開始</b>（<see cref="BeginRun"/> 的
+        /// <see cref="CanStart"/> 擋下了它，那條路不會走到 <see cref="Finish"/>）。
+        /// 沒有這道守衛的話武裝會安安靜靜地永遠掛在那裡。
+        /// </remarks>
+        private void TourTickScanning()
+        {
+            if (tourAdvancePending)
+            {
+                tourAdvancePending = false;
+                EnterTourPhase(TourPhase.Choosing, TourWaitSeconds);
+                TourChooseNextWorld();
+                return;
+            }
+
+            if (startRequested)
+                return;
+
+            DisarmTour(StatusText.Length > 0
+                ? "the scan did not start (??)".Loc(StatusText)
+                : "the scan did not start".Loc());
+        }
+
+        /// <summary>
+        /// 挑下一個世界：<b>資料最舊的優先</b>，從來沒掃過的算最舊。
+        /// </summary>
+        /// <remarks>
+        /// 🔑 候選就是換世界選單那一份（<see cref="travelTargets"/>）——已經濾掉排除清單、
+        /// 濾掉 Lifestream 說去不了的，所以「選單上看得到的」與「自動續跑可能選到的」
+        /// 是同一組，不可能一邊漏掉。
+        /// <para>
+        /// 🔑 「最舊」讀的是 <see cref="PriceSurveyWorldLog"/> 現成的 <c>AtUtc</c>，
+        /// 不另外存一份時間——兩份時間遲早會不一致，而不一致是靜默的。
+        /// </para>
+        /// </remarks>
+        private void TourChooseNextWorld()
+        {
+            if (tourWorldsChanged >= tourMaxWorlds)
+            {
+                DisarmTour("this round's limit of ?? world(s) was reached".Loc(tourMaxWorlds));
+                return;
+            }
+
+            if (lifestreamMissing)
+            {
+                DisarmTour("Lifestream is not installed".Loc());
+                return;
+            }
+
+            // 讓路條件：這些都是「現在不行」，所以等一下再看，但不是無限期地等。
+            if (!TourCanProceed(out var blocked))
+            {
+                if (DateTime.UtcNow > tourDeadline)
+                {
+                    DisarmTour(blocked);
+                    return;
+                }
+
+                TourStatus = "Waiting before travelling on: ??".Loc(blocked);
+                return;
+            }
+
+            // 可前往世界清單還沒為現在這個世界建好（剛換完世界的那幾格）：下一格再挑。
+            if (!TravelTargetsAreFresh())
+            {
+                if (DateTime.UtcNow > tourDeadline)
+                    DisarmTour("the list of worlds you can travel to never became available".Loc());
+                return;
+            }
+
+            uint bestId = 0;
+            var bestName = string.Empty;
+            var bestAt = DateTime.MaxValue;
+            foreach (var (worldId, name) in travelTargets)
+            {
+                // 🔴 同一輪裡每個世界最多去一次。
+                if (tourVisited.Contains(worldId))
+                    continue;
+
+                // 🔴 排除清單其實已經在 RebuildTravelTargets 濾掉了；這裡再擋一次，
+                //    成本是零，而漏掉的代價是把角色送去一個去不了的世界。
+                if (conf.IsWorldExcluded(worldId))
+                    continue;
+
+                // 從來沒掃過＝最舊。
+                var at = PriceSurveyWorldLog.TryGet(worldId, out var row) ? row.AtUtc : DateTime.MinValue;
+                if (bestId != 0 && at >= bestAt)
+                    continue;
+
+                bestId = worldId;
+                bestName = name;
+                bestAt = at;
+            }
+
+            if (bestId == 0)
+            {
+                DisarmTour("every world you can travel to has been visited this round".Loc());
+                return;
+            }
+
+            // 🔴 先記成「去過」再請它送人：這樣連請求失敗都不會變成反覆重試同一個世界。
+            tourVisited.Add(bestId);
+            tourTravelTargetId = bestId;
+            tourTravelTargetName = bestName;
+
+            Log.Information(
+                $"[Marketbuddy] 巡檢自動續跑：挑中 {bestName}({bestId})，" +
+                $"它的巡檢資料時間＝{(bestAt == DateTime.MinValue ? "從來沒掃過" : bestAt.ToString("u"))}，" +
+                $"這是本輪第 {tourWorldsChanged + 1}/{tourMaxWorlds} 次換世界。");
+
+            if (!ChangeWorldOnce(bestName))
+            {
+                DisarmTour(TravelStatus.Length > 0
+                    ? TravelStatus
+                    : "Lifestream did not accept the travel request".Loc());
+                return;
+            }
+
+            tourWorldsChanged++;
+            EnterTourPhase(TourPhase.Travelling, TourTravelTimeoutSeconds);
+            TourStatus = "Travelling to ?? (?? / ?? world(s) this round)".Loc(
+                bestName, tourWorldsChanged, tourMaxWorlds);
+        }
+
+        /// <summary>前往中：等抵達，或等到不耐煩。</summary>
+        private void TourTickTravelling()
+        {
+            if (LoggedIn && CurrentWorldId == tourTravelTargetId)
+            {
+                EnterTourPhase(TourPhase.Settling, TourWaitSeconds);
+                tourSettleUntil = DateTime.UtcNow.AddSeconds(TourSettleSeconds);
+                TourStatus = "Arrived at ??, waiting a moment before scanning".Loc(tourTravelTargetName);
+                Log.Information(
+                    $"[Marketbuddy] 巡檢自動續跑：已抵達 {tourTravelTargetName}({tourTravelTargetId})，" +
+                    $"先站定 {TourSettleSeconds:F0} 秒再開始掃描。");
+                return;
+            }
+
+            if (DateTime.UtcNow > tourDeadline)
+                DisarmTour("travelling to ?? took too long".Loc(tourTravelTargetName));
+        }
+
+        /// <summary>到了：站定一下、確認沒有人在用市場，然後立開始旗標。</summary>
+        private void TourTickSettling()
+        {
+            // 使用者自己先按了「掃描這個世界」也算數，跟著它走就好。
+            if (IsRunning)
+            {
+                EnterTourPhase(TourPhase.Scanning, 0);
+                return;
+            }
+
+            if (DateTime.UtcNow < tourSettleUntil)
+                return;
+
+            if (CurrentWorldId != tourTravelTargetId)
+            {
+                DisarmTour("the world changed while waiting to scan".Loc());
+                return;
+            }
+
+            // 🔴 Lifestream 可能還在做它自己的收尾（走去市場、關視窗）。
+            if (IPCManager.IsLifestreamBusy())
+            {
+                if (DateTime.UtcNow > tourDeadline)
+                    DisarmTour("Lifestream was still busy after arriving".Loc());
+                return;
+            }
+
+            // 🔴 與批次改價／下架共用同一個市場請求槽，所以要確認那道互斥仍然成立。
+            if (!CanStart(out var why))
+            {
+                if (DateTime.UtcNow > tourDeadline)
+                    DisarmTour(why);
+                else
+                    TourStatus = "Waiting before scanning ??: ??".Loc(tourTravelTargetName, why);
+                return;
+            }
+
+            startRequested = true;
+            EnterTourPhase(TourPhase.Scanning, 0);
+            TourStatus = "Scanning ?? automatically (?? / ?? world(s) this round)".Loc(
+                tourTravelTargetName, tourWorldsChanged, tourMaxWorlds);
+            Log.Information(
+                $"[Marketbuddy] 巡檢自動續跑：在 {tourTravelTargetName}({tourTravelTargetId}) 自動開始掃描" +
+                $"（本輪第 {tourWorldsChanged}/{tourMaxWorlds} 次換世界）。");
+        }
+
+        /// <summary>
+        /// 自動續跑現在可不可以動。
+        /// 🔑 這一組與 <see cref="CanStart"/> 的讓路條件是同一組，
+        /// 只是少了「登入後才有的那些」——換世界之前本來就不必問得起掃描。
+        /// </summary>
+        private bool TourCanProceed(out string reason)
+        {
+            reason = string.Empty;
+
+            if (IPCManager.IsLocked)
+            {
+                reason = "Halted by another plugin via IPC".Loc();
+                return false;
+            }
+
+            if (AutoRetainerBridge.IsBusy)
+            {
+                reason = "AutoRetainer is busy (or MultiMode is enabled), stop it first".Loc();
+                return false;
+            }
+
+            if (gui.BatchEngine?.IsRunning == true)
+            {
+                reason = "A relist is running".Loc();
+                return false;
+            }
+
+            if (gui.DelistEngine?.IsRunning == true)
+            {
+                reason = "A delist is running".Loc();
+                return false;
+            }
+
+            if (!LoggedIn || CurrentWorldId == 0)
+            {
+                reason = "Not logged in".Loc();
+                return false;
+            }
+
+            return true;
         }
 
         /// <summary>
@@ -818,6 +1449,7 @@ namespace Marketbuddy
 
             State = SurveyState.Preparing;
             LastRunLookedUnsupported = false;
+            nothingLeftOnThisWorld = false;
             PauseReason = string.Empty;
             pauseRequested = null;
             resumeRequested = false;
@@ -900,8 +1532,13 @@ namespace Marketbuddy
 
             if (itemQueue.Count == 0)
             {
+                // 🔑 「整份都在保留時間內問過了」＝這個世界該問的都問完了，那不是失敗，
+                //    所以武裝中的自動續跑可以接著往下一個世界走（見 Finish）。
+                //    ⚠️ 另一條（篩選之後什麼都不剩）刻意<b>不</b>算：那是篩選的結果，
+                //    不是「這個世界掃完了」。
+                nothingLeftOnThisWorld = skippedAlreadyDone + shoppingSkippedAlreadyDone > 0;
                 Finish(
-                    skippedAlreadyDone + shoppingSkippedAlreadyDone > 0
+                    nothingLeftOnThisWorld
                         ? "Everything on this world's list was already surveyed within the keep-for window (?? item(s)).".Loc(
                             skippedAlreadyDone + shoppingSkippedAlreadyDone)
                         : "No item matches the current filters.".Loc(),
@@ -1422,6 +2059,12 @@ namespace Marketbuddy
 
             MarketRequestGate.LogSummary("price survey paused");
             NoteWorldProgress();
+
+            // 🔴 暫停＝有人介入了（使用者按的、視窗關了、別的引擎要用市場）。
+            //    自動續跑<b>只</b>在「整份掃完」之後接續，所以這裡一律當場解除武裝，
+            //    不可以讓它在暫停後面等著、然後在使用者已經忘記的時候突然自己換世界。
+            if (tourArmed)
+                DisarmTour("the survey was paused (??)".Loc(reason));
         }
 
         /// <summary>
@@ -1564,6 +2207,29 @@ namespace Marketbuddy
                 RunSerial++;
             }
 
+            // 🔴 自動續跑的分岔就在這裡，而且<b>只有兩條路會往下一個世界走</b>：
+            //    ①completed＝這個世界的清單整份掃到最後
+            //    ②nothingLeftOnThisWorld＝該問的都在保留時間內問過了（空佇列，不是失敗）
+            //    其餘一律當場解除武裝：逾時、使用者按停、離開遊戲世界、世界被動改變、
+            //    讓路給重掛／下架、清單建不起來、篩選之後什麼都不剩。
+            //    🔴 這裡在 framework 執行緒上（Finish 的每個呼叫點都在 OnFrameworkUpdate 的鏈上），
+            //    所以直接呼叫，不必 marshal。
+            if (tourArmed)
+            {
+                if ((completed && wasRunning) || nothingLeftOnThisWorld)
+                {
+                    tourAdvancePending = true;
+                    tourPhase = TourPhase.Scanning;
+                    Log.Information(
+                        $"[Marketbuddy] 巡檢自動續跑：{worldName}({worldId}) 收場（{reason}），" +
+                        $"整份掃完={completed}，沒有需要掃的={nothingLeftOnThisWorld}，接著去挑資料最舊的世界。");
+                }
+                else
+                {
+                    DisarmTour(reason);
+                }
+            }
+
             ResetRun();
         }
 
@@ -1572,6 +2238,7 @@ namespace Marketbuddy
             State = SurveyState.Idle;
             prepareTask = null;
             currentItemId = 0;
+            nothingLeftOnThisWorld = false;
             PauseReason = string.Empty;
             pauseRequested = null;
             resumeRequested = false;

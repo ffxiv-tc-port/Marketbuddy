@@ -14,8 +14,11 @@ namespace Marketbuddy
     /// 跨世界價格巡檢的操作介面：一個獨立視窗，兩個分頁。
     ///
     /// <list type="bullet">
-    ///   <item><b>掃描</b>：這個世界要掃什麼、按下去開始、跑起來的進度。
-    ///         🔴 這裡的「掃描這個世界」是整個功能<b>唯一</b>的啟動入口。</item>
+    ///   <item><b>掃描</b>：這個世界要掃什麼、按下去開始、跑起來的進度，
+    ///         以及「哪些世界不要碰」與「掃完自動去資料最舊的世界」兩塊。
+    ///         🔴 啟動入口只有兩個，兩個都是使用者按的按鈕：「掃描這個世界」與
+    ///         「武裝一輪」。後者要先打開一個<b>預設關</b>的設定才按得下去，
+    ///         武裝狀態不存檔，而且只有「整份掃完」才會往下一個世界走。</item>
     ///   <item><b>比價</b>：把記錄檔讀回來，一件一列、每個世界一欄，看誰在壓價。</item>
     ///   <item><b>待處理</b>：把「掛在上限價還沒定價」「被壓價」「該下架」三桶列成一張
     ///         有按鈕的工作清單，並且<b>存進檔案</b>，跨工作階段活著。
@@ -66,6 +69,18 @@ namespace Marketbuddy
         /// <summary>每個世界最後一次被掃到的時間（下拉選單上標「還沒掃過」用）。</summary>
         private readonly Dictionary<uint, DateTime> worldLatest = new();
 
+        /// <summary>
+        /// 比價表裡因為被排除而沒列出來的世界名。
+        /// 🔑 <b>一定要畫在畫面上</b>：欄位靜靜地少一個跟「那個世界沒有資料」長得一模一樣。
+        /// </summary>
+        private readonly SortedSet<string> hiddenExcludedWorlds = new(StringComparer.Ordinal);
+
+        /// <summary>採購表裡因為被排除而沒列出來的世界名。</summary>
+        private readonly SortedSet<string> shoppingHiddenExcludedWorlds = new(StringComparer.Ordinal);
+
+        /// <summary>上一次重整表格時看到的排除清單修訂號；變了就重讀。</summary>
+        private int lastSeenExclusionRevision = -1;
+
         /// <summary>比價分頁的排序方式。</summary>
         private int sortMode;
 
@@ -107,6 +122,16 @@ namespace Marketbuddy
             if (serial != lastSeenRunSerial)
             {
                 lastSeenRunSerial = serial;
+                RequestLoad();
+                RequestShoppingLoad();
+            }
+
+            // 🔑 排除清單改了也要重讀：兩張表的欄位是在整理資料那一步就決定的，
+            //    不重讀的話勾掉一個世界之後它的欄位會留在畫面上直到下一次掃描。
+            var exclusionRevision = conf.WorldExclusionRevision;
+            if (exclusionRevision != lastSeenExclusionRevision)
+            {
+                lastSeenExclusionRevision = exclusionRevision;
                 RequestLoad();
                 RequestShoppingLoad();
             }
@@ -270,10 +295,11 @@ namespace Marketbuddy
         }
 
         /// <summary>
-        /// 「去下一個世界」。
-        /// 🔴 這顆按鈕<b>只換世界</b>：按下去請 Lifestream 送你過去，抵達之後什麼都不會發生，
-        /// 要掃描得自己回到上面再按一次「掃描這個世界」。刻意不串起來——
-        /// 一顆按鈕就跑完八個世界那種東西是無人值守的自動化，不是這個功能要做的事。
+        /// 「去下一個世界」：排除清單、手動換世界、自動續跑三塊。
+        /// 🔴 「前往」那顆按鈕<b>只換世界</b>：按下去請 Lifestream 送你過去，抵達之後什麼
+        /// 都不會發生，要掃描得自己回到上面再按一次「掃描這個世界」。
+        /// 會自己串起來的<b>只有</b>最底下那塊「自動續跑」，而它要使用者先打開一個預設關的
+        /// 設定、再親手按「武裝一輪」，而且一輪跑完（或任何一種意外）就自己解除。
         /// </summary>
         private void DrawTravelSection(bool running)
         {
@@ -281,8 +307,98 @@ namespace Marketbuddy
             ImGui.Separator();
             ImGui.Spacing();
             ImGui.TextUnformatted("Travel to another world".Loc());
-            Grey("Travelling never starts a scan by itself - press the scan button again once you get there.".Loc());
+            Grey("Pressing Travel never starts a scan by itself - press the scan button again once you get there. Only a round you arm yourself (below) carries on across worlds."
+                .Loc());
 
+            // 🔴 排除清單一律畫：Lifestream 沒裝的時候更需要看得見它，
+            //    否則使用者連「為什麼少了一個世界」都查不到。
+            DrawWorldExclusions();
+            DrawTravelPicker(running);
+            DrawAutoTour();
+        }
+
+        /// <summary>
+        /// 「哪些世界不要碰」。<b>排除清單只有一份真值</b>（設定裡那一份），
+        /// 換世界選單、自動續跑、能不能在這裡開始掃描三個用途全部讀它。
+        /// </summary>
+        private void DrawWorldExclusions()
+        {
+            // 🔴 先抄一份：下面的核取方塊會改設定裡那個 List，邊改邊列舉會擲例外。
+            var excluded = new List<uint>(conf.PriceSurveyExcludedWorlds);
+            if (excluded.Count == 0)
+            {
+                Grey("No world is excluded.".Loc());
+            }
+            else
+            {
+                var names = new List<string>(excluded.Count);
+                foreach (var worldId in excluded)
+                    names.Add(WorldNameOf(worldId));
+                ImGui.TextUnformatted("Excluded: ??".Loc(string.Join(", ", names)));
+            }
+
+            Tooltip(
+                "An excluded world is left out of the travel list, is never picked by automatic world hopping, and cannot be scanned even while you stand on it. Rows already in the log files are kept - the compare and shopping tables just stop showing those columns, and say so.\nRamuh (4034) ships excluded because that world is shut down on this service, so travelling there always fails. That is a normal setting rather than a hard-coded rule: if it ever comes back, untick it here."
+                    .Loc());
+
+            if (!ImGui.CollapsingHeader("Choose which worlds to leave out".Loc() + "###mbsurveyexclude"))
+                return;
+
+            var worldsHere = survey.DataCentreWorlds;
+            if (worldsHere.Count == 0)
+                Grey("The world list is built once you are logged in.".Loc());
+
+            var listed = new HashSet<uint>();
+            foreach (var (worldId, name) in worldsHere)
+            {
+                listed.Add(worldId);
+                var isExcluded = conf.IsWorldExcluded(worldId);
+                if (ImGui.Checkbox(name + "##mbsurveyexclude" + worldId, ref isExcluded))
+                    conf.SetWorldExcluded(worldId, isExcluded);
+
+                if (worldId != survey.CurrentWorldId)
+                    continue;
+                ImGui.SameLine();
+                Grey("(you are here)".Loc());
+            }
+
+            // 🔑 排除清單上但不在這個資料中心的世界也要列得出來，否則使用者換了資料中心
+            //    之後就再也勾不掉它——那會變成一個看得見卻改不動的設定。
+            foreach (var worldId in excluded)
+            {
+                if (listed.Contains(worldId))
+                    continue;
+                var isExcluded = true;
+                if (ImGui.Checkbox(WorldNameOf(worldId) + "##mbsurveyexclude" + worldId, ref isExcluded))
+                    conf.SetWorldExcluded(worldId, isExcluded);
+                ImGui.SameLine();
+                Grey("(not on this data centre)".Loc());
+            }
+        }
+
+        /// <summary>
+        /// 世界 id → 看得懂的名字。查不到就畫成 <c>#id</c>——
+        /// 🔑 那是誠實的「我只知道 id」，不是假裝知道名字。
+        /// </summary>
+        private string WorldNameOf(uint worldId)
+        {
+            foreach (var (id, name) in survey.DataCentreWorlds)
+            {
+                if (id == worldId)
+                    return name;
+            }
+
+            foreach (var world in worlds)
+            {
+                if (world.WorldId == worldId && world.Name.Length > 0)
+                    return world.Name;
+            }
+
+            return "#" + worldId;
+        }
+
+        private void DrawTravelPicker(bool running)
+        {
             if (survey.LifestreamMissing)
             {
                 Grey("Lifestream is not installed, so this plugin cannot move you between worlds. Travel by hand, then press the scan button again."
@@ -325,6 +441,80 @@ namespace Marketbuddy
 
             if (survey.TravelStatus.Length > 0)
                 ImGui.TextWrapped(survey.TravelStatus);
+        }
+
+        /// <summary>
+        /// 「掃完就自動去資料最舊的世界接著掃」。
+        /// </summary>
+        /// <remarks>
+        /// 🔴 兩道人為閘門：設定<b>預設關</b>（打開也只是讓按鈕可按），以及一定要使用者
+        /// 親手按「武裝一輪」。武裝狀態不存檔，而且只有「整份掃完」才會往下一個世界走。
+        /// </remarks>
+        private void DrawAutoTour()
+        {
+            var armed = survey.IsTourArmed;
+
+            ImGui.Spacing();
+            ImGui.TextUnformatted("Carry on with the world that has the oldest data".Loc());
+
+            using (Disabled(armed))
+            {
+                if (ImGui.Checkbox("Allow automatic world hopping".Loc(), ref conf.PriceSurveyAutoTour))
+                    conf.Save();
+            }
+
+            Tooltip(
+                "Off by default, and turning it on only makes the Arm button clickable - nothing starts on its own.\nOnce armed, finishing a world's list makes this plugin ask Lifestream to travel to the world whose survey data is the oldest (never surveyed counts as oldest) and start scanning there. Excluded worlds are never picked, each world is visited at most once per round, and the round stops at the limit below.\nArming is never remembered: reloading the plugin or restarting the game always leaves it disarmed. Anything other than finishing a world - a pause, a stop, closing this window, a timeout, AutoRetainer or a relist taking over, Lifestream refusing - disarms it on the spot and says why."
+                    .Loc());
+
+            if (conf.PriceSurveyAutoTour)
+            {
+                using (Disabled(armed))
+                {
+                    ImGui.SetNextItemWidth(200);
+                    if (ImGui.SliderInt("At most this many worlds per round".Loc(),
+                            ref conf.PriceSurveyAutoTourMaxWorlds, 1, Configuration.MAX_TOUR_WORLDS))
+                        conf.Save();
+                }
+
+                Tooltip("A hard cap on one armed round, on top of \"each world at most once\". There are only eight worlds here, so eight means \"every world I can reach\"."
+                    .Loc());
+            }
+
+            if (!armed)
+            {
+                var canArm = survey.CanArmTour(out var why);
+                using (Disabled(!canArm))
+                {
+                    if (ImGui.Button("Arm one round".Loc(), new Vector2(180, 0)))
+                        survey.RequestArmTour();
+                }
+
+                if (!canArm && conf.PriceSurveyAutoTour)
+                {
+                    ImGui.SameLine();
+                    ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudOrange);
+                    ImGui.TextUnformatted(why);
+                    ImGui.PopStyleColor();
+                }
+            }
+            else
+            {
+                if (ImGui.Button("Disarm".Loc(), new Vector2(180, 0)))
+                    survey.RequestDisarmTour("Disarmed by the user".Loc());
+
+                ImGui.SameLine();
+                ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudYellow);
+                ImGui.TextUnformatted("Armed: ?? / ?? world change(s) used".Loc(
+                    survey.TourWorldsChanged, survey.TourMaxWorlds));
+                ImGui.PopStyleColor();
+
+                if (survey.TourTravelTargetName.Length > 0)
+                    Grey("Target world: ??".Loc(survey.TourTravelTargetName));
+            }
+
+            if (survey.TourStatus.Length > 0)
+                ImGui.TextWrapped(survey.TourStatus);
         }
 
         /// <summary>
@@ -613,6 +803,16 @@ namespace Marketbuddy
             else
                 Grey("?? row(s), ?? item(s), ?? world(s)".Loc(totalRowsLoaded, entries.Count, worlds.Count));
 
+            // 🔑 藏了東西就要說出來：少一個欄位跟「那個世界沒資料」在畫面上分不出來。
+            if (hiddenExcludedWorlds.Count > 0)
+            {
+                ImGui.SameLine();
+                Grey("(?? excluded: ??)".Loc(
+                    hiddenExcludedWorlds.Count, string.Join(", ", hiddenExcludedWorlds)));
+                Tooltip("Those worlds are on your excluded list, so their columns are left out of this table and out of the cheapest/undercut numbers. Their rows are still in the log file - untick the world to bring them back."
+                    .Loc());
+            }
+
             ImGui.SameLine();
             ImGui.SetNextItemWidth(200);
             if (ImGui.BeginCombo("##mbsurveysort", SortModeKeys[sortMode].Loc()))
@@ -899,6 +1099,15 @@ namespace Marketbuddy
                 Grey("?? row(s), ?? item(s), ?? world(s)".Loc(
                     shoppingTotalRowsLoaded, shoppingEntries.Count, shoppingWorlds.Count));
 
+            if (shoppingHiddenExcludedWorlds.Count > 0)
+            {
+                ImGui.SameLine();
+                Grey("(?? excluded: ??)".Loc(
+                    shoppingHiddenExcludedWorlds.Count, string.Join(", ", shoppingHiddenExcludedWorlds)));
+                Tooltip("Those worlds are on your excluded list, so their columns are left out of this table and out of the cheapest/spread numbers. Their rows are still in the log file - untick the world to bring them back."
+                    .Loc());
+            }
+
             ImGui.SameLine();
             ImGui.SetNextItemWidth(240);
             if (ImGui.BeginCombo("##mbshoppingsort", ShoppingSortModeKeys[shoppingSortMode].Loc()))
@@ -1100,6 +1309,7 @@ namespace Marketbuddy
         {
             shoppingEntries.Clear();
             shoppingWorlds.Clear();
+            shoppingHiddenExcludedWorlds.Clear();
             shoppingTotalRowsLoaded = rows.Count;
 
             var latestPerWorld = new Dictionary<uint, (string Name, DateTime At)>();
@@ -1107,6 +1317,15 @@ namespace Marketbuddy
 
             foreach (var row in rows)
             {
+                // 🔴 被排除的世界整列不算。這一張表的用途就是「出發前決定要去哪個世界買」，
+                //    列一個去不了的世界而且說它最便宜，比不列它糟得多。
+                if (conf.IsWorldExcluded(row.WorldId))
+                {
+                    shoppingHiddenExcludedWorlds.Add(
+                        row.WorldName.Length > 0 ? row.WorldName : "#" + row.WorldId);
+                    continue;
+                }
+
                 if (!latestPerWorld.TryGetValue(row.WorldId, out var w) || row.AtUtc > w.At)
                     latestPerWorld[row.WorldId] = (row.WorldName, row.AtUtc);
 
@@ -1289,6 +1508,7 @@ namespace Marketbuddy
             entries.Clear();
             worlds.Clear();
             worldLatest.Clear();
+            hiddenExcludedWorlds.Clear();
             totalRowsLoaded = rows.Count;
 
             var latestPerWorld = new Dictionary<uint, (string Name, DateTime At)>();
@@ -1296,6 +1516,15 @@ namespace Marketbuddy
 
             foreach (var row in rows)
             {
+                // 🔴 被排除的世界整列不算：欄位、最低價、壓價幅度、排序全部跟著一致，
+                //    不會出現「欄位藏起來了但最便宜的還是它」那種自相矛盾的畫面。
+                //    ⚠️ 記錄檔<b>沒有</b>被改動，勾回來就整份回來了。
+                if (conf.IsWorldExcluded(row.WorldId))
+                {
+                    hiddenExcludedWorlds.Add(row.WorldName.Length > 0 ? row.WorldName : "#" + row.WorldId);
+                    continue;
+                }
+
                 if (!latestPerWorld.TryGetValue(row.WorldId, out var w) || row.AtUtc > w.At)
                     latestPerWorld[row.WorldId] = (row.WorldName, row.AtUtc);
 
