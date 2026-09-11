@@ -87,6 +87,21 @@ namespace Marketbuddy
 
         internal uint HomeWorldId { get; private set; }
 
+        /// <summary>
+        /// 上一次重算時，<b>記錄檔裡真的有資料、卻因為在排除清單上
+        /// 而沒有被拿來當建議價</b>的那些世界（名字，已排序）。
+        /// </summary>
+        /// <remarks>
+        /// 🔑 <b>藏了東西就要說出來</b>：少掉一個世界的建議價，
+        /// 與「那件東西真的沒人在賣」在畫面上長得一模一樣。
+        /// <para>
+        /// 繪製執行緒只讀它；每次重算都是<b>整份換掉</b>，不會被就地改。
+        /// 它反映的是<b>上一次重算當下</b>的排除清單，勾選有變要等下一次
+        /// 重算才會跟上——這與旁邊那些建議價本來就是同一個時間點的東西。
+        /// </para>
+        /// </remarks>
+        internal IReadOnlyList<string> ExcludedWorldsInLog { get; private set; } = [];
+
         public PendingActionsBuilder(MarketGuiEventHandler gui)
         {
             this.gui = gui;
@@ -238,7 +253,8 @@ namespace Marketbuddy
             int UndercutPercent,
             int UndercutAmount,
             int MinPrice,
-            string? CsvPath);
+            string? CsvPath,
+            IReadOnlySet<uint> ExcludedWorlds);
 
         /// <summary>執行緒池那一段的產出：純資料，沒有任何遊戲指標。</summary>
         private sealed class Prepared
@@ -247,6 +263,9 @@ namespace Marketbuddy
             public required List<Placement> CsvPlacements;
             public required int SurveyRowsRead;
             public required HashSet<uint> Worlds;
+
+            /// <summary>世界 id → 記錄檔裡最後看到的名字；只給畫面用，比對一律用 id。</summary>
+            public required Dictionary<uint, string> WorldNames;
         }
 
         private void PumpRecompute()
@@ -278,6 +297,7 @@ namespace Marketbuddy
             }
 
             var rows = Assemble(prepared, prepareRequest);
+            ExcludedWorldsInLog = CollectExcludedWorldsInLog(prepared, prepareRequest);
             PendingActions.ReplaceComputed(rows);
             snapshot = PendingActions.Snapshot();
             LastComputedAt = DateTime.UtcNow;
@@ -313,7 +333,11 @@ namespace Marketbuddy
                 conf.UndercutPercent,
                 conf.UndercutPrice,
                 conf.BatchMinPrice,
-                PriceSurveyItemSource.InventoryToolsCsvPath());
+                PriceSurveyItemSource.InventoryToolsCsvPath(),
+                // 🔴 排除清單是一個裸 List，繪製執行緒（勾選框）會改它。
+                //    這裡是 framework 執行緒，當場拍一份快照帶走，
+                //    執行緒池那一段與組清單那一段都只讀快照。
+                new HashSet<uint>(conf.PriceSurveyExcludedWorlds));
 
             prepareRequest = request;
             StatusText = "Recomputing...".Loc();
@@ -327,9 +351,12 @@ namespace Marketbuddy
             var rows = PriceSurveyLog.LoadAll();
             var latest = new Dictionary<(uint, bool, uint), PriceSurveyRow>();
             var worlds = new HashSet<uint>();
+            var worldNames = new Dictionary<uint, string>();
             foreach (var row in rows)
             {
                 worlds.Add(row.WorldId);
+                if (row.WorldName.Length > 0)
+                    worldNames[row.WorldId] = row.WorldName;
                 var key = (row.ItemId, row.Hq, row.WorldId);
                 if (latest.TryGetValue(key, out var existing) && existing.AtUtc >= row.AtUtc)
                     continue;
@@ -342,11 +369,36 @@ namespace Marketbuddy
                 CsvPlacements = PriceSurveyItemSource.ReadPlacementsFromCsv(request.CsvPath),
                 SurveyRowsRead = rows.Count,
                 Worlds = worlds,
+                WorldNames = worldNames,
             };
         }
 
         /// <summary>建議價與它的出處。價格 -1＝沒有任何可用的參考價。</summary>
         private readonly record struct Suggestion(long Price, string Source, string World, DateTime At);
+
+        /// <summary>
+        /// 巡檢記錄裡有資料、但被排除清單擋下來的那些世界的名字（已排序）。
+        /// </summary>
+        /// <remarks>
+        /// 🔑 只列<b>記錄檔裡真的有</b>的世界：清單上勾著、卻從來沒掃過的
+        /// 世界說出來只是雜訊。家世界不算——它從來就不受排除清單影響
+        /// （見 <see cref="ResolveSuggestion"/>）。
+        /// </remarks>
+        private static List<string> CollectExcludedWorldsInLog(Prepared prepared, Request request)
+        {
+            var names = new List<string>();
+            foreach (var worldId in prepared.Worlds)
+            {
+                if (worldId == request.HomeWorldId || !request.ExcludedWorlds.Contains(worldId))
+                    continue;
+                names.Add(prepared.WorldNames.TryGetValue(worldId, out var name) && name.Length > 0
+                    ? name
+                    : "#" + worldId);
+            }
+
+            names.Sort(StringComparer.Ordinal);
+            return names;
+        }
 
         /// <summary>
         /// 第二段：回到 framework 執行緒才組清單。
@@ -448,6 +500,19 @@ namespace Marketbuddy
         /// </list>
         /// 三條都沒有就回 -1（＝不知道）。<b>絕不回 0</b>：0 在價格欄是一個合法但荒謬的值。
         /// <para>
+        /// 🔴 <b>第③條會跳過排除清單上的世界</b>（台服的拉姆已經停止營運、
+        /// 切不過去）：拿一個到不了的市場的殘留行情來調價，
+        /// 等於照著一個不存在的市場定價。
+        /// ⚠️ 只是<b>不拿來建議</b>——巡檢記錄檔一個 byte 都沒動，
+        /// 把世界勾回來就又算得進去。
+        /// </para>
+        /// <para>
+        /// 🔴 <b>①②（家世界）刻意不套排除清單。</b>那是使用者自己要定價的
+        /// 那一個市場，把它排掉會讓「被壓價」這個判斷本身失去意義。
+        /// 排除清單的語意是「不要去、不要掃、不要拿它的價當參考」，
+        /// 不是「不要幫我在這裡定價」。
+        /// </para>
+        /// <para>
         /// 📌 沒有 Universalis 這一條：本外掛對使用者的承諾是「不自己連任何網站」
         /// （巡檢分頁上那一句），而艦隊裡唯一有 Universalis 客戶端的 PriceInsight
         /// 沒有開任何 IPC 端點（2026-09-08 實查）。要加只能等對方開端點。
@@ -476,6 +541,12 @@ namespace Marketbuddy
             long best = -1;
             var bestWorld = string.Empty;
             var bestAt = DateTime.MinValue;
+            // 被排除的世界裡最便宜的那一筆。
+            // 🔑 只拿來說明「為什麼沒有建議價」，絕不會變成建議價本身
+            //    ——價格永遠是 -1。
+            long excludedBest = -1;
+            var excludedWorld = string.Empty;
+            var excludedAt = DateTime.MinValue;
             foreach (var worldId in prepared.Worlds)
             {
                 if (worldId == request.HomeWorldId)
@@ -487,6 +558,19 @@ namespace Marketbuddy
                 var price = row.LowestForQuality;
                 if (price < 0)
                     continue;
+                if (request.ExcludedWorlds.Contains(worldId))
+                {
+                    // 排除清單上的世界：記下來只是為了讓畫面說得出原因，不參與比價。
+                    if (excludedBest < 0 || price < excludedBest)
+                    {
+                        excludedBest = price;
+                        excludedWorld = row.WorldName.Length > 0 ? row.WorldName : "#" + worldId;
+                        excludedAt = row.AtUtc;
+                    }
+
+                    continue;
+                }
+
                 if (best >= 0 && price >= best)
                     continue;
                 best = price;
@@ -494,8 +578,14 @@ namespace Marketbuddy
                 bestAt = row.AtUtc;
             }
 
-            return best >= 0
-                ? new Suggestion(ApplyUndercut(best, request), "survey-other", bestWorld, bestAt)
+            if (best >= 0)
+                return new Suggestion(ApplyUndercut(best, request), "survey-other", bestWorld, bestAt);
+
+            // 🔑 「不知道」與「知道但故意不用」在畫面上必須分得出來。
+            //    後者照樣回 -1（絕不回 0），但帶著出處，UI 才畫得出
+            //    「只有某個世界有資料，而那個世界被你排除了」。
+            return excludedBest >= 0
+                ? new Suggestion(-1, "survey-excluded", excludedWorld, excludedAt)
                 : new Suggestion(-1, string.Empty, string.Empty, DateTime.MinValue);
         }
 

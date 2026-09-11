@@ -1678,6 +1678,15 @@ namespace Marketbuddy
             Tooltip(SafePendingPath());
             Grey("A grey ? means \"not known\" - never 0 gil. A suggested price from another world is a reference only: that is a different market."
                 .Loc());
+            // 🔑 藏了東西就要說出來：拿掉一個世界的建議價，
+            //    與「那件東西真的沒人在賣」在畫面上分不出來。
+            if (pending.ExcludedWorldsInLog.Count > 0)
+            {
+                Grey("?? excluded world(s) not used for suggestions: ??".Loc(
+                    pending.ExcludedWorldsInLog.Count, string.Join(", ", pending.ExcludedWorldsInLog)));
+                Tooltip("Those worlds are on your excluded list, so their prices are never used as a suggested price here. Nothing was deleted - the survey log still has every row, and unticking a world brings it back on the next recalculation. Your own world is never excluded from its own pricing."
+                    .Loc());
+            }
 
             ImGui.Spacing();
             ImGui.Separator();
@@ -1857,7 +1866,10 @@ namespace Marketbuddy
             {
                 // 🔴 絕不畫成 0：那是一個合法但荒謬的價格。
                 Grey("?");
-                Tooltip("No usable reference price was found for this item.".Loc());
+                Tooltip(row.SuggestionSource == "survey-excluded"
+                    ? "The only price known for this item is on a world you excluded, so nothing is suggested. The source column says which world."
+                        .Loc()
+                    : "No usable reference price was found for this item.".Loc());
                 return;
             }
 
@@ -1894,6 +1906,16 @@ namespace Marketbuddy
                 case "survey":
                     ImGui.TextUnformatted("survey  ??  ??".Loc(world, age));
                     Tooltip("From the cross-world survey log, the row for your own world.".Loc());
+                    return;
+                case "survey-excluded":
+                    // 🔑 「知道但故意不用」要看得見，而且要看得見是哪一個世界——
+                    //    否則它跟「真的沒資料」在畫面上是同一個灰色問號。
+                    ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+                    ImGui.TextUnformatted("excluded  ??  ??".Loc(world, age));
+                    ImGui.PopStyleColor();
+                    Tooltip(
+                        "The only price known for this item is on ??, which is on your excluded list, so it was not used. Untick that world and recalculate to use it again."
+                            .Loc(world));
                     return;
                 default:
                     ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudOrange);

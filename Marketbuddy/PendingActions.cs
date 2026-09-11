@@ -56,6 +56,10 @@ namespace Marketbuddy
     /// <param name="SuggestionSource">
     /// 建議價的來源：<c>live</c>＝本世界的即時市場快取、<c>survey</c>＝巡檢記錄（同一個世界）、
     /// <c>survey-other</c>＝巡檢記錄（別的世界，只能當參考）、空＝沒有來源。
+    /// <c>survey-excluded</c>＝只有被排除的世界有資料，
+    /// 所以沒有建議價：此時 <paramref name="SuggestedPrice"/> 是 -1，
+    /// 而 <paramref name="SuggestionWorld"/> 是那個被排除的世界，
+    /// 畫面才說得出「為什麼沒有」。
     /// </param>
     /// <param name="SuggestionWorld">建議價是哪一個世界的行情；空＝不知道。</param>
     /// <param name="SuggestionAtUtc">建議價的資料時間；<see cref="DateTime.MinValue"/>＝不知道。</param>
