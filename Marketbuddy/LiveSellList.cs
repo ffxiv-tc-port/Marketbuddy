@@ -83,6 +83,13 @@ namespace Marketbuddy
             /// </summary>
             public bool HasSold { get; init; }
 
+            /// <summary>
+            /// 有成交紀錄，但能用的那幾筆全部來自被排除的世界（所以這一件不定價）。
+            /// 🔑 與「從來沒賣過」<b>在列上就要分得出來</b>：處置相同、原因不同，
+            /// 而只有這一種是「把那個世界勾回來就有價了」。
+            /// </summary>
+            public bool SoldExcluded { get; init; }
+
             /// <summary>按下重掛會掛出去的價格（成交價無條件捨去到百位）。</summary>
             public uint RelistPrice { get; init; }
 
@@ -326,6 +333,7 @@ namespace Marketbuddy
                 var isHq = (slot->Flags & InventoryItem.ItemFlags.HighQuality) != 0;
                 var soldState = LastSoldState.Unknown;
                 var hasSold = false;
+                var soldExcluded = false;
                 LastSoldEntry sold = default;
                 uint relistPrice = 0;
                 MarketPricePoint? minWorld = null;
@@ -337,6 +345,11 @@ namespace Marketbuddy
                         conf.RelistLastSoldIgnoreQuality, out sold);
                     if (hasSold)
                         relistPrice = LastSoldPriceSource.RoundDownToHundred(sold.UnitPrice);
+                    else
+                        // 🔑 只有取不到價格時才問原因：取到了的話「某個品質被排除」
+                        //    不是使用者要看的事。
+                        soldExcluded = LastSoldPriceSource.IsSaleExcluded(
+                            slot->ItemId, isHq, conf.RelistLastSoldIgnoreQuality);
                     LastSoldPriceSource.TryGetMinPrices(slot->ItemId, isHq, out minWorld, out minDc);
                 }
 
@@ -360,6 +373,7 @@ namespace Marketbuddy
                 {
                     SoldState = soldState,
                     HasSold = hasSold,
+                    SoldExcluded = soldExcluded,
                     SoldUnitPrice = hasSold ? sold.UnitPrice : 0,
                     SoldAtUtc = hasSold ? sold.SoldAtUtc : DateTime.MinValue,
                     SoldHq = hasSold && sold.Hq,
@@ -623,7 +637,19 @@ namespace Marketbuddy
                     break;
 
                 default:
-                    // Ready 但取不到 = 「不忽略優質」而這個品質沒有成交紀錄；NoData = 完全沒有紀錄。
+                    // Ready 但取不到有三種：①「不忽略優質」而這個品質沒有成交紀錄
+                    // ②NoData＝完全沒有紀錄 ③有紀錄但全部來自被排除的世界。
+                    // 🔴 ③ 要用不一樣的符號：三種都畫成 ? 的話，使用者無從知道
+                    //    「把那個世界勾回來就有價了」。
+                    if (row.SoldExcluded)
+                    {
+                        Grey("×");
+                        Tooltip(
+                            "The only sales on record for this item are on worlds you excluded, so no relist price is suggested. Untick that world in the price survey window to use them again."
+                                .Loc());
+                        break;
+                    }
+
                     Grey("?");
                     Tooltip(
                         "No sale on record for this item on the data centre, so relisting leaves it on the usual pricing (lowest listing minus your undercut)."
@@ -681,7 +707,8 @@ namespace Marketbuddy
         {
             if (!row.HasSold)
             {
-                DrawMissing(row.SoldState, "No sale on record for this item.".Loc());
+                DrawMissing(row.SoldState, "No sale on record for this item.".Loc(),
+                    row.SoldExcluded);
                 return;
             }
 
@@ -876,8 +903,16 @@ namespace Marketbuddy
             return "??m".Loc((int)span.TotalMinutes);
         }
 
-        /// <summary>「查詢中」「連不上」「沒有資料」三種缺席狀態的統一畫法——三種都必須分得出來。</summary>
-        private static void DrawMissing(LastSoldState state, string noDataTooltip)
+        /// <summary>
+        /// 「查詢中」「連不上」「沒有資料」「全部來自被排除的世界」四種缺席狀態的統一畫法
+        /// ——四種都必須分得出來。
+        /// </summary>
+        /// <param name="excludedWorldOnly">
+        /// 有紀錄，但能用的那幾筆全部落在排除清單上的世界。⚠️ 預設 false：
+        /// 最低掛售價那兩欄刻意不套排除清單，所以它們不傳這個參數。
+        /// </param>
+        private static void DrawMissing(LastSoldState state, string noDataTooltip,
+            bool excludedWorldOnly = false)
         {
             switch (state)
             {
@@ -893,6 +928,15 @@ namespace Marketbuddy
                     break;
 
                 default:
+                    if (excludedWorldOnly)
+                    {
+                        Grey("×");
+                        Tooltip(
+                            "The only sales on record for this item are on worlds you excluded, so they are not shown. Untick that world in the price survey window to use them again."
+                                .Loc());
+                        break;
+                    }
+
                     Grey("?");
                     Tooltip(noDataTooltip);
                     break;

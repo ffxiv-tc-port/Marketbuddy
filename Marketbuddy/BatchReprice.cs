@@ -992,17 +992,24 @@ namespace Marketbuddy
                 return TickTaskResult.Done;
             }
 
-            // 走到這裡有三種情形，處置相同：這一格落回它原本的定價方式（市場比價）。
+            // 走到這裡有四種情形，處置相同：這一格落回它原本的定價方式（市場比價）。
             //   (a) Universalis 沒有這件的成交紀錄；
             //   (b) 查詢失敗；
-            //   (c) 有資料，但「不忽略優質」而這個品質剛好沒有成交紀錄。
+            //   (c) 有資料，但「不忽略優質」而這個品質剛好沒有成交紀錄；
+            //   (d) 有成交紀錄，但全部來自世界排除清單上的世界（拉姆已停止營運那條）。
+            //     🔴 這一種刻意<b>不</b>拿別的來源代打：沒有成交紀錄的往往正是稀有的東西，
+            //     湊一個價出來會賤賣。所以照樣落回市場比價，並在 log 裡標明是這個原因。
             job.LastSoldDone = true;
             if (state == LastSoldState.Failed)
                 WarnLastSoldFallback(job, "lookup failed");
             else
                 Log.Information(
                     $"{Diag} LASTSOLD-MISS item={job.ItemId} '{job.Name}' state={state} " +
-                    $"hq={job.IsHq} ignoreQuality={conf.RelistLastSoldIgnoreQuality}; falling back to market pricing");
+                    $"hq={job.IsHq} ignoreQuality={conf.RelistLastSoldIgnoreQuality} " +
+                    "excludedWorldOnly=" +
+                    LastSoldPriceSource.IsSaleExcluded(
+                        job.ItemId, job.IsHq, conf.RelistLastSoldIgnoreQuality) +
+                    "; falling back to market pricing");
 
             return null;
         }

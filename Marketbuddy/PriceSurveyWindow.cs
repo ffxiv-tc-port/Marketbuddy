@@ -324,7 +324,8 @@ namespace Marketbuddy
 
         /// <summary>
         /// 「哪些世界不要碰」。<b>排除清單只有一份真值</b>（設定裡那一份），
-        /// 換世界選單、自動續跑、能不能在這裡開始掃描三個用途全部讀它。
+        /// 換世界選單、自動續跑、能不能在這裡開始掃描、待處理清單的建議價、
+        /// 以及「最近成交價重掛」全部讀它。
         /// </summary>
         private void DrawWorldExclusions()
         {
@@ -344,6 +345,8 @@ namespace Marketbuddy
 
             Tooltip(
                 "An excluded world is left out of the travel list, is never picked by automatic world hopping, and cannot be scanned even while you stand on it. Rows already in the log files are kept - the compare and shopping tables just stop showing those columns, and say so.\nRamuh (4034) ships excluded because that world is shut down on this service, so travelling there always fails. That is a normal setting rather than a hard-coded rule: if it ever comes back, untick it here."
+                    .Loc() + "\n" +
+                "Excluded worlds are also left out of the pending list's suggested prices and of the most-recent-sale relist price, so a world that shut down cannot set your prices any more. Items whose only sales are on those worlds are left on their usual pricing instead of being given a made-up price."
                     .Loc());
 
             if (!ImGui.CollapsingHeader("Choose which worlds to leave out".Loc() + "###mbsurveyexclude"))

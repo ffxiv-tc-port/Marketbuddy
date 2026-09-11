@@ -307,9 +307,14 @@ namespace Marketbuddy
         public bool PriceSurveyShoppingList = false;
 
         /// <summary>
-        /// 巡檢不要碰的世界（世界 id）。<b>三個用途共用這一份，只有這一份</b>：
-        /// 換世界選單不列它、自動續跑不選它、站在它上面也不准開始掃描。
+        /// 不要碰的世界（世界 id）。<b>所有用途共用這一份，只有這一份</b>：
+        /// 換世界選單不列它、自動續跑不選它、站在它上面也不准開始掃描、
+        /// 待處理清單不採用它的行情、<b>「最近成交價重掛」也不採用它的成交紀錄</b>。
         /// </summary>
+        /// <remarks>
+        /// 🔑 刻意不在這裡數「幾個用途」：每加一個用途就要回來改一個數字的註解，
+        /// 而沒改的那次會變成一句看起來權威但是錯的話。
+        /// </remarks>
         /// <remarks>
         /// 🔴 <b>初始式刻意是空的。</b>Dalamud 的設定反序列化沒有設
         /// <c>ObjectCreationHandling</c>（走 Newtonsoft 的預設 <c>Auto</c>），而那對

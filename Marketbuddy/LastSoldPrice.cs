@@ -66,6 +66,18 @@ namespace Marketbuddy
     /// <c>recentPurchase</c>。
     ///
     /// <para>
+    /// 🔴 <b>範圍是「整個資料中心，但扣掉世界排除清單上的世界」</b>，不是整個資料中心。
+    /// 理由是實機事實：台服的拉姆（4034）已經停止營運，而一件道具只要自它關閉之後在其他
+    /// 世界都沒賣出過，它留下的舊成交價就會變成重掛的定價依據。清單用的是設定裡
+    /// <b>既有</b>那一份（<see cref="Configuration.PriceSurveyExcludedWorlds"/>），
+    /// 這裡不另外判斷哪個世界該不該用。
+    /// </para>
+    /// <para>
+    /// ⚠️ 被排除之後<b>不會</b>拿別的來源代打：查不到可用的成交就不定這一件，
+    /// 呼叫端落回它原本的市場比價。沒有成交紀錄的往往正是稀有的東西，拿別的來源湊會賤賣。
+    /// </para>
+    ///
+    /// <para>
     /// 🔴 <b>完全不碰遊戲內的市場查詢。</b>這條路徑不送 <c>InfoProxyItemSearch.RequestData()</c>、
     /// 不開任何原生視窗、不掛 hook、不碰任何封包——只有一個對公開 HTTP API 的 GET。
     /// 因此它也天生避開了台服「查詢被拒絕時完全靜默」那個已知問題。
@@ -169,7 +181,53 @@ namespace Marketbuddy
 
             public MarketPricePoint? MinDcHq;
 
+            /// <summary>
+            /// 普通品<b>有</b>成交紀錄，但可以用的那幾筆全部落在被排除的世界上。
+            /// 🔑 與「從來沒賣過」必須分得出來：兩者都不定價，但原因不同，
+            /// 而只有知道原因的使用者才決定得了要不要把那個世界勾回來。
+            /// </summary>
+            public bool ExcludedNq;
+
+            /// <summary>優質品同上。</summary>
+            public bool ExcludedHq;
+
+            /// <summary>
+            /// 這筆答案是照哪一版排除清單算出來的
+            /// （<see cref="Configuration.WorldExclusionRevision"/>）。
+            /// 🔴 在解析時過濾等於<b>把過濾結果寫進快取</b>，所以少了這個版號，
+            /// 使用者把一個世界勾回來之後拿到的還是舊的過濾結果——而且完全無聲。
+            /// </summary>
+            public int ExclusionRevision;
+
             public DateTime StampUtc;
+        }
+
+        /// <summary>
+        /// 排除清單的一份不可變快照。
+        ///
+        /// <para>
+        /// 🔴 <see cref="Configuration.PriceSurveyExcludedWorlds"/> 是一個裸
+        /// <c>List&lt;uint&gt;</c>，勾選框在<b>繪製執行緒</b>上改它，而這裡的解析跑在
+        /// 執行緒池上 ⇒ <b>絕不</b>從背景執行緒直接讀那個 List。作法與待處理清單重算
+        /// （<c>PendingActionsBuilder</c>）同一個形狀：在 framework 執行緒當場拍一份快照，
+        /// 之後全程只讀快照。
+        /// </para>
+        /// <para>
+        /// 🔑 清單與版號綁在<b>同一個物件</b>裡：兩個分開的 volatile 欄位讀起來不是原子的，
+        /// 會出現「拿到新清單卻配到舊版號」那種對不上的組合。
+        /// </para>
+        /// </summary>
+        internal sealed class ExclusionSnapshot(int revision, IReadOnlySet<uint> worlds)
+        {
+            public int Revision { get; } = revision;
+
+            private IReadOnlySet<uint> Worlds { get; } = worlds;
+
+            /// <summary>排除清單是空的（＝這次不做任何過濾）。</summary>
+            public bool IsEmpty => Worlds.Count == 0;
+
+            /// <summary>0＝不知道是哪個世界；<b>不知道一律當成沒被排除</b>。</summary>
+            public bool IsExcluded(uint worldId) => worldId != 0 && Worlds.Contains(worldId);
         }
 
         private static readonly JsonSerializerOptions JsonOptions = new()
@@ -179,6 +237,18 @@ namespace Marketbuddy
 
         /// <summary>道具 id → 目前知道的事。發布之後不再修改，換值一律整個換掉一個新實例。</summary>
         private static readonly ConcurrentDictionary<uint, ItemEntry> Cache = new();
+
+        /// <summary>
+        /// 目前生效的排除清單快照。
+        ///
+        /// <para>
+        /// 🔴 初始版號刻意是 <c>-1</c>（<see cref="Configuration.WorldExclusionRevision"/> 最小是 0）：
+        /// 這樣第一次 <see cref="Request"/> 一定會去同步一次。寫成 0 會把「還沒問過設定」
+        /// 誤當成「清單是空的」——而使用者的清單在版號 0 的時候就可能已經有內容了
+        /// （出廠排除是上一次遊戲期間套用並存檔的，本次啟動版號仍是 0）。
+        /// </para>
+        /// </summary>
+        private static volatile ExclusionSnapshot exclusion = new(-1, new HashSet<uint>());
 
         /// <summary>🔴 只在持有這把鎖時碰 <see cref="Queue"/>／<see cref="queueWorldId"/>。鎖內不做 I/O、不寫 log、不碰 ImGui。</summary>
         private static readonly object Gate = new();
@@ -323,9 +393,57 @@ namespace Marketbuddy
             }
         }
 
-        /// <summary>這件道具目前是什麼狀態。任何執行緒都可以呼叫。</summary>
+        /// <summary>
+        /// 把排除清單同步成一份新快照（版號沒變就沿用舊的那一份，不重新配置）。
+        /// 🔴 只從 framework 執行緒呼叫：它會讀設定裡那個裸 <c>List</c>。
+        /// </summary>
+        private static ExclusionSnapshot SyncExclusions()
+        {
+            var current = exclusion;
+            Configuration conf;
+            try
+            {
+                conf = Configuration.GetOrLoad();
+            }
+            catch (Exception e)
+            {
+                // 讀不到設定時沿用現行快照：寧可少過濾一次，也不要讓整條查價路徑掛掉。
+                Log.Information(e, "[Marketbuddy] 歷史賣出價：讀取世界排除清單失敗，沿用上一份快照。");
+                return current;
+            }
+
+            if (current.Revision == conf.WorldExclusionRevision)
+                return current;
+
+            var worlds = new HashSet<uint>(conf.PriceSurveyExcludedWorlds);
+            var next = new ExclusionSnapshot(conf.WorldExclusionRevision, worlds);
+            exclusion = next;
+
+            // 要使用者回報的診斷一律寫 Information。
+            var names = worlds.Count == 0
+                ? "（空）"
+                : string.Join("、", worlds.Select(x =>
+                    worldNames.TryGetValue(x, out var n) ? $"{n}({x})" : x.ToString()));
+            Log.Information(
+                $"[Marketbuddy] 歷史賣出價：套用世界排除清單（第 {next.Revision} 版，{worlds.Count} 個）：{names}。" +
+                "這些世界的成交紀錄不會被拿來當「最近成交價重掛」的價格；" +
+                "已經查到的答案會照新清單重新查一次。");
+            return next;
+        }
+
+        /// <summary>
+        /// 這件道具目前是什麼狀態。任何執行緒都可以呼叫。
+        ///
+        /// <para>
+        /// 🔴 照<b>舊版</b>排除清單算出來的答案一律回 <see cref="LastSoldState.Unknown"/>。
+        /// 那不是「沒有資料」：呼叫端看到 Unknown 會自己補排一次查詢，所以這條路的語意是
+        /// 「重新問一次」，而落在中間的那幾幀畫面上顯示的是「查詢中」而不是某個舊價。
+        /// </para>
+        /// </summary>
         internal static LastSoldState StateOf(uint itemId)
-            => Cache.TryGetValue(itemId, out var entry) ? entry.State : LastSoldState.Unknown;
+            => Cache.TryGetValue(itemId, out var entry) && entry.ExclusionRevision == exclusion.Revision
+                ? entry.State
+                : LastSoldState.Unknown;
 
         /// <summary>
         /// 取這件道具的「歷史最近賣出價」。
@@ -338,7 +456,8 @@ namespace Marketbuddy
         internal static bool TryGet(uint itemId, bool hq, bool ignoreQuality, out LastSoldEntry entry)
         {
             entry = default;
-            if (!Cache.TryGetValue(itemId, out var item) || item.State != LastSoldState.Ready)
+            if (!Cache.TryGetValue(itemId, out var item) || item.State != LastSoldState.Ready ||
+                item.ExclusionRevision != exclusion.Revision)
                 return false;
 
             var mine = hq ? item.Hq : item.Nq;
@@ -370,6 +489,34 @@ namespace Marketbuddy
         }
 
         /// <summary>
+        /// 這件道具「<b>有</b>成交紀錄，但能用的那幾筆全部來自被排除的世界」嗎。
+        ///
+        /// <para>
+        /// 🔑 存在的理由只有一個：它與「從來沒賣過」<b>必須在畫面上分得出來</b>。
+        /// 兩者的處置相同（都不定價、落回原本的市場比價），但原因完全不同——
+        /// 前者只要把那個世界勾回來就有價格了，後者勾什麼都沒用。
+        /// 把兩件事畫成同一個符號等於叫使用者去猜。
+        /// </para>
+        /// <para>
+        /// ⚠️ 只有在 <see cref="TryGet"/> 回 false 的時候問這個才有意義：
+        /// 「忽略優質狀態」開著而另一個品質有可用成交時，<see cref="TryGet"/> 會給出價格，
+        /// 這時本旗標仍可能為 true（某一個品質被排除了），但那並不是使用者要看的事。
+        /// </para>
+        /// </summary>
+        internal static bool IsSaleExcluded(uint itemId, bool hq, bool ignoreQuality)
+        {
+            if (!Cache.TryGetValue(itemId, out var item) ||
+                item.ExclusionRevision != exclusion.Revision)
+                return false;
+
+            var mine = hq ? item.ExcludedHq : item.ExcludedNq;
+            if (!ignoreQuality)
+                return mine;
+
+            return mine || (hq ? item.ExcludedNq : item.ExcludedHq);
+        }
+
+        /// <summary>
         /// 這件道具目前的最低掛售價：本世界一個、整個資料中心一個。
         ///
         /// <para>
@@ -378,6 +525,13 @@ namespace Marketbuddy
         /// <para>
         /// ⚠️ 這裡<b>一律照這一格自己的品質</b>取，不受「忽略優質狀態」影響：
         /// 那個選項的用途是找「最近賣出價」，而拿自己的優質品去跟普通品的最低價比是錯的比較。
+        /// </para>
+        /// <para>
+        /// 📌 <b>這兩個值刻意不套世界排除清單</b>，而且也不受清單版號影響。
+        /// 排除清單的用途是「不要拿這個世界的價格幫你定價」，而最低掛售價是純顯示的現況
+        /// （使用者拿它判斷要不要降價），把它藏起來只會讓畫面少講一件正在發生的事。
+        /// ⚠️ 而且資料中心那一半是 Universalis <b>伺服器端算好的單一最小值</b>，
+        /// 手上沒有原始清單，過濾不掉——只過濾得到的那一半會變成「時對時錯而且分不出來」。
         /// </para>
         /// </summary>
         internal static bool TryGetMinPrices(uint itemId, bool hq,
@@ -430,6 +584,7 @@ namespace Marketbuddy
                 return;
 
             EnsureWorldNames();
+            var snapshot = SyncExclusions();
 
             if (worldId != cacheWorldId)
             {
@@ -461,7 +616,11 @@ namespace Marketbuddy
                     if (itemId == 0)
                         continue;
 
-                    if (Cache.TryGetValue(itemId, out var existing))
+                    // 🔴 排除清單改過之後，照舊清單過濾出來的答案一律作廢重問。
+                    //    不重問的話它會在快取裡放到 TTL 到期（最長 30 分鐘），
+                    //    使用者把一個世界勾回來卻要等半小時才看得到變化。
+                    if (Cache.TryGetValue(itemId, out var existing) &&
+                        existing.ExclusionRevision == snapshot.Revision)
                     {
                         if (existing.State == LastSoldState.Loading)
                             continue;
@@ -480,7 +639,12 @@ namespace Marketbuddy
                         continue;
 
                     // 一排進佇列就標成「查詢中」，畫面立刻分得出「還在問」與「問不到」。
-                    Cache[itemId] = new ItemEntry { State = LastSoldState.Loading, StampUtc = now };
+                    Cache[itemId] = new ItemEntry
+                    {
+                        State = LastSoldState.Loading,
+                        StampUtc = now,
+                        ExclusionRevision = snapshot.Revision,
+                    };
                     added = true;
                 }
             }
@@ -589,6 +753,10 @@ namespace Marketbuddy
 
             Interlocked.Exchange(ref lastRequestTicks, DateTime.UtcNow.Ticks);
 
+            // 🔴 整批只讀這一次 volatile：中途換快照會讓同一批裡的道具用不同版號過濾，
+            //    而版號是寫進快取的，那會變成一批答案裡有些永遠被判成過期。
+            var ex = exclusion;
+
             try
             {
                 var url = "https://universalis.app/api/v2/aggregated/" + worldId + "/" +
@@ -628,13 +796,15 @@ namespace Marketbuddy
                 }
                 else
                 {
-                    await ParseAggregatedAsync(response, batch, unresolved, token).ConfigureAwait(false);
+                    await ParseAggregatedAsync(response, batch, unresolved, worldId, ex, token)
+                        .ConfigureAwait(false);
                 }
 
                 HashSet<uint> recovered;
                 try
                 {
-                    recovered = await ResolveWithOverviewAsync(worldId, unresolved, token).ConfigureAwait(false);
+                    recovered = await ResolveWithOverviewAsync(worldId, unresolved, ex, token)
+                        .ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
@@ -651,7 +821,12 @@ namespace Marketbuddy
                 foreach (var itemId in unresolved)
                 {
                     if (!recovered.Contains(itemId))
-                        Cache[itemId] = new ItemEntry { State = LastSoldState.NoData, StampUtc = stamp };
+                        Cache[itemId] = new ItemEntry
+                        {
+                            State = LastSoldState.NoData,
+                            StampUtc = stamp,
+                            ExclusionRevision = ex.Revision,
+                        };
                 }
 
                 Volatile.Write(ref failureLogged, 0);
@@ -679,7 +854,8 @@ namespace Marketbuddy
         /// 並把「這個端點答不出來」的道具收進 <paramref name="unresolved"/>。
         /// </summary>
         private static async Task ParseAggregatedAsync(
-            HttpResponseMessage response, List<uint> batch, HashSet<uint> unresolved, CancellationToken token)
+            HttpResponseMessage response, List<uint> batch, HashSet<uint> unresolved,
+            uint worldId, ExclusionSnapshot ex, CancellationToken token)
         {
             await using var stream = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
             var json = await JsonSerializer
@@ -698,8 +874,8 @@ namespace Marketbuddy
 
             foreach (var result in json.results ?? [])
             {
-                var nq = Pick(result.nq, false);
-                var hq = Pick(result.hq, true);
+                var nq = Pick(result.nq, false, ex, worldId, out var nqExcluded);
+                var hq = Pick(result.hq, true, ex, worldId, out var hqExcluded);
                 var minWorldNq = PickMin(result.nq?.minListing?.world);
                 var minWorldHq = PickMin(result.hq?.minListing?.world);
                 var minDcNq = PickMin(result.nq?.minListing?.dc);
@@ -707,9 +883,13 @@ namespace Marketbuddy
 
                 // 🔑 「有答案」不等於「有成交紀錄」：只有掛售、從來沒賣出過的道具也算 Ready，
                 // 否則最低價那兩欄會跟著「沒賣過」一起消失。哪一種資料缺席由各自的取值函式回報。
+                // 🔑 「唯一的成交紀錄被排除掉」也算問到了答案（Ready）：
+                //    標成 NoData 會讓畫面說出「這件從來沒賣過」——那是錯的，
+                //    而且它會抹掉「把那個世界勾回來就有價了」這個唯一有用的提示。
                 var anything = nq != null || hq != null ||
                                minWorldNq != null || minWorldHq != null ||
-                               minDcNq != null || minDcHq != null;
+                               minDcNq != null || minDcHq != null ||
+                               nqExcluded || hqExcluded;
 
                 Cache[result.itemId] = new ItemEntry
                 {
@@ -720,6 +900,9 @@ namespace Marketbuddy
                     MinWorldHq = minWorldHq,
                     MinDcNq = minDcNq,
                     MinDcHq = minDcHq,
+                    ExcludedNq = nqExcluded,
+                    ExcludedHq = hqExcluded,
+                    ExclusionRevision = ex.Revision,
                     StampUtc = now,
                 };
                 handled.Add(result.itemId);
@@ -740,8 +923,14 @@ namespace Marketbuddy
         private static void Mark(IEnumerable<uint> itemIds, LastSoldState state)
         {
             var now = DateTime.UtcNow;
+            var revision = exclusion.Revision;
             foreach (var itemId in itemIds)
-                Cache[itemId] = new ItemEntry { State = state, StampUtc = now };
+                Cache[itemId] = new ItemEntry
+                {
+                    State = state,
+                    StampUtc = now,
+                    ExclusionRevision = revision,
+                };
         }
 
         /// <summary>
@@ -816,7 +1005,8 @@ namespace Marketbuddy
         /// </para>
         /// </summary>
         private static async Task<HashSet<uint>> ResolveWithOverviewAsync(
-            uint worldId, IReadOnlyCollection<uint> itemIds, CancellationToken token)
+            uint worldId, IReadOnlyCollection<uint> itemIds, ExclusionSnapshot ex,
+            CancellationToken token)
         {
             var recovered = new HashSet<uint>();
             if (itemIds.Count == 0)
@@ -838,7 +1028,7 @@ namespace Marketbuddy
                 {
                     try
                     {
-                        var entry = await FetchOverviewAsync(client, worldList, worldId, itemId, token)
+                        var entry = await FetchOverviewAsync(client, worldList, worldId, itemId, ex, token)
                             .ConfigureAwait(false);
                         return (ItemId: itemId, Entry: entry);
                     }
@@ -869,7 +1059,8 @@ namespace Marketbuddy
         }
 
         private static async Task<ItemEntry?> FetchOverviewAsync(
-            HttpClient client, string worldList, uint worldId, uint itemId, CancellationToken token)
+            HttpClient client, string worldList, uint worldId, uint itemId,
+            ExclusionSnapshot ex, CancellationToken token)
         {
             var url = "https://universalis.app/api/v3/market/overview/" + worldList + "/" + itemId;
             using var response = await SendWithRetryAsync(client, url, token).ConfigureAwait(false);
@@ -883,7 +1074,7 @@ namespace Marketbuddy
             if (overview == null)
                 return null;
 
-            var entry = BuildFromOverview(overview, worldId);
+            var entry = BuildFromOverview(overview, worldId, ex);
             if (entry != null)
                 Volatile.Write(ref overviewFailureLogged, 0);
             return entry;
@@ -966,20 +1157,25 @@ namespace Marketbuddy
         /// 所以這裡一個都不算。
         /// </para>
         /// </summary>
-        private static ItemEntry? BuildFromOverview(OverviewDto overview, uint worldId)
+        private static ItemEntry? BuildFromOverview(OverviewDto overview, uint worldId,
+            ExclusionSnapshot ex)
         {
             var listings = overview.listings ?? [];
             var sales = overview.sales ?? [];
 
-            var nq = MostRecentSale(sales, false);
-            var hq = MostRecentSale(sales, true);
+            // 🔑 這條路手上有<b>原始</b>成交清單，所以過濾的結果是真的
+            //    「排除清單以外的最近一次成交」，不是退一步的近似值。
+            var nq = MostRecentSale(sales, false, ex, out var nqExcluded);
+            var hq = MostRecentSale(sales, true, ex, out var hqExcluded);
+
+            // 📌 最低掛售價刻意不過濾（理由寫在 TryGetMinPrices 上）。
             var minWorldNq = CheapestListing(listings, false, worldId);
             var minWorldHq = CheapestListing(listings, true, worldId);
             var minDcNq = CheapestListing(listings, false, null);
             var minDcHq = CheapestListing(listings, true, null);
 
             if (nq == null && hq == null && minWorldNq == null && minWorldHq == null &&
-                minDcNq == null && minDcHq == null)
+                minDcNq == null && minDcHq == null && !nqExcluded && !hqExcluded)
                 return null;
 
             return new ItemEntry
@@ -991,24 +1187,49 @@ namespace Marketbuddy
                 MinWorldHq = minWorldHq,
                 MinDcNq = minDcNq,
                 MinDcHq = minDcHq,
+                ExcludedNq = nqExcluded,
+                ExcludedHq = hqExcluded,
+                ExclusionRevision = ex.Revision,
                 StampUtc = DateTime.UtcNow,
             };
         }
 
-        /// <summary>這個品質最近成交的那一筆；一筆都沒有就回 null，<b>絕不回 0</b>。</summary>
-        internal static LastSoldEntry? MostRecentSale(List<OverviewSaleDto> sales, bool hq)
+        /// <summary>
+        /// 這個品質最近成交的那一筆；一筆都沒有就回 null，<b>絕不回 0</b>。
+        ///
+        /// <para>
+        /// 🔴 被排除的世界一筆都不看。這裡與 aggregated 那條路的差別是：這裡拿得到
+        /// <b>原始</b>成交清單，所以挑出來的真的是「排除清單以外的最近一次成交」。
+        /// </para>
+        /// </summary>
+        /// <param name="excludedOnly">
+        /// true＝這個品質有成交紀錄，但<b>每一筆</b>都落在被排除的世界上。
+        /// </param>
+        internal static LastSoldEntry? MostRecentSale(List<OverviewSaleDto> sales, bool hq,
+            ExclusionSnapshot ex, out bool excludedOnly)
         {
+            excludedOnly = false;
             OverviewSaleDto? best = null;
+            var dropped = false;
             foreach (var sale in sales)
             {
                 if (sale.hq != hq || sale.price is not > 0m)
                     continue;
+                if (ex.IsExcluded(sale.world ?? 0u))
+                {
+                    dropped = true;
+                    continue;
+                }
+
                 if (best == null || (sale.saleTime ?? 0L) > (best.saleTime ?? 0L))
                     best = sale;
             }
 
             if (best == null)
+            {
+                excludedOnly = dropped;
                 return null;
+            }
 
             var world = string.Empty;
             if (best.world is { } soldWorld && worldNames.TryGetValue(soldWorld, out var name))
@@ -1105,19 +1326,97 @@ namespace Marketbuddy
                 "補查成功一次之後會再回報下一次失敗。");
         }
 
-        private static LastSoldEntry? Pick(AggregateDto? aggregate, bool hq)
+        /// <summary>
+        /// aggregated 端點回來的「最近一次成交」——這是實機上絕大多數道具真正走的那條路。
+        /// </summary>
+        /// <param name="queriedWorldId">這一次是拿哪個世界的 id 去問的（<c>world</c> 範圍就是它）。</param>
+        /// <param name="excludedOnly">
+        /// true＝這個品質<b>有</b>成交紀錄，但能用的那幾筆都落在被排除的世界上。
+        /// 🔑 與「從來沒賣過」分開回報，否則畫面上兩件事長得一模一樣。
+        /// </param>
+        private static LastSoldEntry? Pick(AggregateDto? aggregate, bool hq,
+            ExclusionSnapshot ex, uint queriedWorldId, out bool excludedOnly)
         {
+            excludedOnly = false;
+            var purchase = aggregate?.recentPurchase;
+            if (purchase == null)
+                return null;
+
             // 🔑 使用者要的是「整個資料中心」的成交，所以先取 dc；dc 沒有時才退回本世界
             // （dc 的範圍涵蓋本世界，所以這個退路只會多給資料，不會少給）。
-            var entry = aggregate?.recentPurchase?.dc ?? aggregate?.recentPurchase?.world;
-            if (entry?.price is not > 0)
+            // 🔴 但排除清單上的世界一筆都不採用：拉姆（4034）已經停止營運，而一件道具
+            //    只要「自它關閉之後在其他世界都沒賣出過」，重掛就會照拉姆留下的舊價定價。
+            // ⚠️ dc 被擋掉時退回 world 範圍<b>不是</b>「找別的價來湊」：那仍然是一筆真的
+            //    成交紀錄（本世界自己的），只是範圍比較窄；這個退路本來就存在。
+            //    兩個範圍都沒有可用的成交時就回 null，呼叫端落回原本的市場比價。
+            var dropped = false;
+            var entry = UsablePurchase(purchase.dc, ex, 0u, ref dropped)
+                        ?? UsablePurchase(purchase.world, ex, queriedWorldId, ref dropped);
+            // 🔑 價格用模式比對取出來，不要寫 entry.price.Value：
+            //    UsablePurchase 已經保證 price > 0，但那是跨方法的不變式，編譯器看不到
+            //    ⇒ 寫 .Value 會留一個 CS8629，而那個警告指的正是「這裡看不出來」。
+            if (entry?.price is not { } unitPrice)
+            {
+                excludedOnly = dropped;
                 return null;
+            }
 
             var world = string.Empty;
             if (entry.worldId is { } worldId && worldNames.TryGetValue(worldId, out var name))
                 world = name;
 
-            return new LastSoldEntry(entry.price.Value, ToUtc(entry.timestamp), hq, world);
+            return new LastSoldEntry(unitPrice, ToUtc(entry.timestamp), hq, world);
+        }
+
+        /// <summary>
+        /// 一筆 <c>recentPurchase</c> 能不能用：有價格，而且成交的世界不在排除清單上。
+        ///
+        /// <para>
+        /// ⚠️ <paramref name="fallbackWorldId"/> ＝「回應沒帶 <c>worldId</c> 時當成哪個世界」。
+        /// <c>world</c> 範圍就是這次查詢的世界；<c>dc</c> 範圍<b>沒有</b>合理的替代值 ⇒ 傳 0，
+        /// 而 0 一律當成「不知道」＝不排除。
+        /// </para>
+        /// <para>
+        /// 🔴 那是本次過濾唯一一個縫。Universalis 對 <c>dc</c> 範圍照 schema 一定帶
+        /// <c>worldId</c>（同一個欄位這裡本來就在讀，用來顯示成交世界），真的缺了的話
+        /// <see cref="NoteWorldlessDc"/> 會寫一行讓它<b>看得見</b>，而不是靜默照用。
+        /// </para>
+        /// </summary>
+        private static EntryDto? UsablePurchase(EntryDto? entry, ExclusionSnapshot ex,
+            uint fallbackWorldId, ref bool dropped)
+        {
+            if (entry?.price is not > 0)
+                return null;
+
+            var worldId = entry.worldId ?? fallbackWorldId;
+            if (worldId == 0)
+            {
+                NoteWorldlessDc(ex);
+                return entry;
+            }
+
+            if (!ex.IsExcluded(worldId))
+                return entry;
+
+            dropped = true;
+            return null;
+        }
+
+        private static int worldlessDcLogged;
+
+        /// <summary>
+        /// 成交紀錄沒有帶 <c>worldId</c> ⇒ 判斷不了它是不是來自被排除的世界。
+        /// 只在排除清單非空時報告（清單空的時候這件事沒有後果），而且整個遊戲期間只報一次。
+        /// </summary>
+        private static void NoteWorldlessDc(ExclusionSnapshot ex)
+        {
+            if (ex.IsEmpty || Interlocked.Exchange(ref worldlessDcLogged, 1) != 0)
+                return;
+
+            Log.Information(
+                "[Marketbuddy] 歷史賣出價：Universalis 回了一筆沒有帶 worldId 的成交紀錄，" +
+                "所以確認不了它是不是來自被排除的世界——這一筆照用了。" +
+                "如果重掛價看起來像來自已停止營運的世界，這一行就是原因。");
         }
 
         /// <summary>一個「最低掛售價」資料點；<b>沒有就回 null，絕不回 0</b>。</summary>
