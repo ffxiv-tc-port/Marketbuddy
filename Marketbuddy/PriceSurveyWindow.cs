@@ -186,6 +186,11 @@ namespace Marketbuddy
         public void OnClosed()
         {
             survey.RequestPause("The survey window was closed".Loc());
+
+            // 🔴 掃描中的那條路徑已經由暫停連帶解除武裝了，但「武裝著卻正在換世界」
+            //    的時候沒有東西在跑、暫停是 no-op ⇒ 少了這一行，關掉視窗之後那條鏈
+            //    會在看不見的地方繼續換世界、繼續開始掃描。
+            survey.RequestDisarmTour("The survey window was closed".Loc());
         }
 
         // =====================================================================
