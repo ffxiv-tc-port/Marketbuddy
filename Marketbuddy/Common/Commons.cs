@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Dalamud.Game;
@@ -12,6 +11,7 @@ using Dalamud.Game.NativeWrapper;
 using Dalamud.Game.Text.SeStringHandling;
 using Dalamud.Hooking;
 using Dalamud.Logging;
+using Dalamud.Memory;
 using Dalamud.Plugin;
 using FFXIVClientStructs.FFXIV.Client.System.String;
 using FFXIVClientStructs.FFXIV.Component.GUI;
@@ -82,10 +82,17 @@ namespace Marketbuddy.Common
             return tcs.Task;
         }
         
+        // Decodes through SeString instead of a raw UTF-8 read, so text that
+        // carries payloads (an item link on the retainer sell window's item
+        // name, for instance) yields the displayed text rather than the raw
+        // payload bytes. For payload-free input SeString.Parse produces a
+        // single TextPayload whose Text is Encoding.UTF8.GetString over the
+        // very same byte range, so the numeric call sites (quantity, unit
+        // price) keep returning exactly what they returned before.
         public static unsafe string Utf8StringToString(Utf8String str) {
-            if (str.IsEmpty || str.BufUsed <= 1)
+            if (str.IsEmpty || str.BufUsed <= 1 || str.StringPtr.Value == null)
                 return string.Empty;
-            return Encoding.UTF8.GetString(str.StringPtr, (int)str.BufUsed - 1);
+            return MemoryHelper.ReadSeString(&str).TextValue;
         }
 
         public static unsafe AtkUnitBase* GetUnitBase(string name, int index = 1)

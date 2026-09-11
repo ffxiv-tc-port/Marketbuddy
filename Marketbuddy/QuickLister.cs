@@ -6,6 +6,7 @@ using Dalamud.Game.Addon.Lifecycle.AddonArgTypes;
 using Dalamud.Game.ClientState.Keys;
 using Dalamud.Game.Text;
 using Dalamud.Hooking;
+using Dalamud.Memory;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI;
@@ -316,7 +317,16 @@ namespace Marketbuddy
                 var param = agent->EventParams[agent->ContexItemStartIndex + i];
                 if (param.Type != ValueType.String)
                     continue;
-                if (param.GetValueAsString() != putUpForSaleText)
+                // GetValueAsString() decodes the string pointer as raw UTF-8, so
+                // an entry that carries SeString payloads never compares equal to
+                // the plain sheet text. Decode through SeString and compare
+                // TextValue, which puts this side on the same basis as
+                // putUpForSaleText (Addon row 99, already ExtractText()ed).
+                if (param.String.Value == null)
+                    continue;
+                var entryText = MemoryHelper
+                    .ReadSeStringNullTerminated((nint)param.String.Value).TextValue;
+                if (entryText != putUpForSaleText)
                     continue;
                 if (agent->IsContextItemDisabled(i))
                 {
