@@ -1102,6 +1102,54 @@ namespace Marketbuddy
             }
 
             DrawNestIndicator(1);
+            if (ImGui.Checkbox("Do not follow a price that looks mistyped".Loc(),
+                    ref conf.AnomalyGuardEnabled))
+                conf.Save();
+
+            DrawNestIndicator(2);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "When the cheapest listing (or the last sale) is far below what every other seller is asking, it is usually somebody who dropped a zero - and following it down would give your item away. Those slots are left exactly as they are, nothing is changed, and each one is listed under \"Left alone\" on the pending tab with the numbers it was judged on. The test compares one seller against the next seller along, not against what the item used to cost, so an item everybody is dumping still gets repriced normally."
+                    .Loc());
+            ImGui.PopStyleColor();
+
+            DrawNestIndicator(2);
+            if (!conf.AnomalyGuardEnabled) PushStyleDisabled();
+            ImGui.TextUnformatted("only when the normal price is at least".Loc());
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(110);
+            if (ImGui.InputInt("gil or more (0 = off)".Loc() + "##mbanomalymin",
+                    ref conf.AnomalyGuardMinNormalPrice, 0))
+            {
+                if (conf.AnomalyGuardMinNormalPrice < 0)
+                    conf.AnomalyGuardMinNormalPrice = 0;
+                conf.Save();
+            }
+
+            DrawNestIndicator(2);
+            ImGui.TextUnformatted("and the cheap price is at least".Loc());
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(45);
+            if (ImGui.InputInt("times cheaper than that".Loc() + "##mbanomalyratio",
+                    ref conf.AnomalyGuardRatio, 0))
+                conf.Save();
+            if (!conf.AnomalyGuardEnabled) PopStyleDisabled();
+
+            // 🔑 「設成這樣等於沒開」必須在畫面上看得見：靜靜地不作用與「開著」長得一模一樣。
+            if (conf.AnomalyGuardEnabled
+                && (conf.AnomalyGuardRatio < PriceAnomalyGuard.MinRatio
+                    || conf.AnomalyGuardRatio > PriceAnomalyGuard.MaxRatio
+                    || conf.AnomalyGuardMinNormalPrice <= 0))
+            {
+                DrawNestIndicator(2);
+                ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudOrange);
+                ImGui.TextWrapped(
+                    "With these numbers the protection never does anything: the multiplier has to be between ?? and ??, and the gil threshold above 0."
+                        .Loc(PriceAnomalyGuard.MinRatio, PriceAnomalyGuard.MaxRatio));
+                ImGui.PopStyleColor();
+            }
+
+            DrawNestIndicator(1);
             ImGui.TextUnformatted("Reuse market data seen in the last".Loc());
             ImGui.SameLine();
             // 步進 60（一分鐘）／快速步進 300（五分鐘）：跑一輪多角色時常用的值是

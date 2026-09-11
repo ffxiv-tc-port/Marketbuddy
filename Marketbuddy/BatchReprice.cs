@@ -981,6 +981,29 @@ namespace Marketbuddy
             {
                 var newPrice = LastSoldPriceSource.RoundDownToHundred(sold.UnitPrice);
                 var when = FormatSoldAt(sold.SoldAtUtc);
+
+                // 🔴 異常低價保護（成交價這一側）：有人買走了別人少打一個 0 的掛單時，
+                //    那一筆成交會把我們整格拉到那個價。
+                //    這裡拿「本世界目前的最低掛售價」當正常價——那是與這筆成交
+                //    完全獨立的另一個觀測，整體崩盤時它會跟著低，所以不會把崩盤誤判成異常。
+                //    ⚠️ 它**不排除自家掛單**（Universalis 給的是伺服器端算好的單一最小值，
+                //    手上沒有原始清單，過濾不掉）⇒ 自己是唯一賣家時它退化成「拿自己的價比」，
+                //    也就是與 Own 基準同一個答案。這一點是已知的精度上限，不是 bug。
+                var soldListedPrice = CurrentListedPrice(job.Slot);
+                var soldPeer =
+                    LastSoldPriceSource.TryGetMinPrices(job.ItemId, job.IsHq, out var minWorld, out _)
+                    && minWorld is { } minWorldPoint
+                        ? minWorldPoint.UnitPrice
+                        : -1L;
+                var soldAnomaly = PriceAnomalyGuard.Evaluate(
+                    sold.UnitPrice, soldPeer, job.QuickListed ? -1L : soldListedPrice, conf);
+                if (soldAnomaly.IsAnomalous)
+                {
+                    HoldForAnomaly(job, soldAnomaly, soldListedPrice, $"sale@{when}", string.Empty);
+                    job.LastSoldDone = true;
+                    return TickTaskResult.Done;
+                }
+
                 Log.Information(
                     $"{Diag} LASTSOLD item={job.ItemId} '{job.Name}' unit={sold.UnitPrice} " +
                     $"rounded={newPrice} soldHq={sold.Hq} soldAt={when} world='{sold.World}' " +
@@ -1072,6 +1095,24 @@ namespace Marketbuddy
                 // undercutting ourselves.
                 FinishPricing(job, lowest.Price, cacheTag,
                     "[Marketbuddy] ??: matched your own lowest listing at ?? gil".Loc(job.Name, lowest.Price) + cacheTag);
+                return;
+            }
+
+            // 🔴 異常低價保護：整頁最低價看起來是打錯的（少打一個 0 之類）就不要跟著降。
+            //    判準是「離群」不是「變低」——完整取捨見 PriceAnomalyGuard 的類別註解。
+            //    🔑 這道檢查刻意排在算價之前、也排在 FinishPricing 那兩道下架門檻之前：
+            //    一個打錯的低價會同時觸發「照它降價」與「低於最低價就下架」，
+            //    而我們對這兩件事的答案都是「這一格不要動」。
+            var listedPrice = CurrentListedPrice(job.Slot);
+            var anomaly = PriceAnomalyGuard.Evaluate(
+                lowest.Price,
+                PriceAnomalyGuard.PeerBaseline(eligible, lowest.RetainerId, ownRetainerIds),
+                // 🔴 快速上架的那一格停在上限價，那不是一個真的價格，絕不能當基準。
+                job.QuickListed ? -1L : listedPrice,
+                conf);
+            if (anomaly.IsAnomalous)
+            {
+                HoldForAnomaly(job, anomaly, listedPrice, "listing", cacheTag);
                 return;
             }
 
@@ -1506,6 +1547,75 @@ namespace Marketbuddy
                 DateTime.UtcNow, PendingActionKind.PriceCap, job.ItemId, job.IsHq,
                 CurrentBatchRetainerId, RetainerNameOf(CurrentBatchRetainerId), job.Slot,
                 current, -1, string.Empty, string.Empty, DateTime.MinValue, false));
+        }
+
+        /// <summary>
+        /// 某一格目前的掛售單價；讀不到時 -1（＝不知道，<b>不是 0</b>）。
+        /// </summary>
+        /// <remarks>🔴 只從 framework 執行緒呼叫：它會解參考 <c>InventoryManager</c>。</remarks>
+        private static long CurrentListedPrice(short slot)
+        {
+            var inventoryManager = InventoryManager.Instance();
+            return inventoryManager == null ? -1L : (long)inventoryManager->GetRetainerMarketPrice(slot);
+        }
+
+        /// <summary>
+        /// 判定為異常低價之後的完整處置：<b>一個 gil 都不改</b>，只記錄與告知。
+        /// </summary>
+        /// <param name="listedPrice">這一格目前的掛售價，只拿來顯示；-1＝讀不到。</param>
+        /// <param name="referenceKind">參考價是哪一種（<c>listing</c> 或 <c>sale@時間</c>），只進 log。</param>
+        /// <remarks>
+        /// 🔴 這一行是 <c>Information</c>：這正是「事後要查得到為什麼那一件沒降價」的那一行，
+        /// 而使用者的 LogLevel 放行到 Debug 為止，Debug 單檔數十萬行會把它淹掉。
+        /// </remarks>
+        private void HoldForAnomaly(SlotJob job, PriceAnomaly anomaly, long listedPrice,
+            string referenceKind, string cacheTag)
+        {
+            Log.Information(
+                $"{Diag} ANOMALY-HOLD item={job.ItemId} '{job.Name}' hq={job.IsHq} " +
+                $"ours={listedPrice} refKind={referenceKind} reference={anomaly.Reference} " +
+                $"normal={anomaly.NormalPrice} baseline={anomaly.Tag} ratio={anomaly.RatioText}x " +
+                $"minNormal={conf.AnomalyGuardMinNormalPrice} mult={conf.AnomalyGuardRatio} " +
+                $"quickListed={job.QuickListed}");
+
+            RecordAnomaly(job, anomaly, listedPrice);
+
+            var ours = listedPrice < 0 ? "?" : listedPrice.ToString("N0");
+            var reference = anomaly.Reference.ToString("N0");
+            var normal = anomaly.NormalPrice.ToString("N0");
+
+            if (job.QuickListed)
+            {
+                // 快速上架的那一格本來就停在上限價：保護不改價，所以它還在上限價上，
+                // 而那代表沒有人買得到 —— 必須算進「一定要人工介入」的那個數。
+                ProcessedSlots++;
+                NeedsPricingCount++;
+                ChatGui.PrintError(
+                    "[Marketbuddy] ??: ?? gil looks like a mistyped price (??x below the ?? gil that looks normal), so this is still at the price cap - price it by hand"
+                        .Loc(job.Name, reference, anomaly.RatioText, normal) + cacheTag);
+                return;
+            }
+
+            Skip(job,
+                "[Marketbuddy] ??: kept at ?? gil - ?? gil looks like a mistyped price (??x below the ?? gil that looks normal), so it was not used"
+                    .Loc(job.Name, ours, reference, anomaly.RatioText, normal) + cacheTag);
+        }
+
+        /// <summary>
+        /// 把這一格記進「待處理」清單的「疑似打錯的低價」桶。
+        /// 🔴 只記錄，不改任何價格。
+        /// </summary>
+        /// <remarks>
+        /// ⚠️ 這一桶借用了兩個欄位（理由與語意寫在 <see cref="PendingActionKind.PriceAnomaly"/> 上）：
+        /// <c>SuggestedPrice</c>＝被擋下來的那個可疑價，<c>SuggestionWorld</c>＝拿來比的正常價。
+        /// </remarks>
+        private void RecordAnomaly(SlotJob job, PriceAnomaly anomaly, long listedPrice)
+        {
+            PendingActions.Upsert(new PendingActionRow(
+                DateTime.UtcNow, PendingActionKind.PriceAnomaly, job.ItemId, job.IsHq,
+                CurrentBatchRetainerId, RetainerNameOf(CurrentBatchRetainerId), job.Slot,
+                listedPrice, anomaly.Reference, anomaly.Tag,
+                anomaly.NormalPrice.ToString("N0"), DateTime.UtcNow, false));
         }
 
         /// <summary>

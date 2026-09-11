@@ -1607,10 +1607,11 @@ namespace Marketbuddy
         /// <summary>已經按過「跳過」的那些要不要一起顯示出來。刻意不存檔：它是一個當下的檢視選項。</summary>
         private bool showSkipped;
 
-        /// <summary>三個桶的顯示順序。先處理最急的（掛在上限價＝現在沒人買得起）。</summary>
+        /// <summary>四個桶的顯示順序。先處理最急的（掛在上限價＝現在沒人買得起）。</summary>
         private static readonly PendingActionKind[] BucketOrder =
         [
             PendingActionKind.PriceCap,
+            PendingActionKind.PriceAnomaly,
             PendingActionKind.BelowMinimum,
             PendingActionKind.Undercut,
         ];
@@ -1770,6 +1771,7 @@ namespace Marketbuddy
         private static string BucketTitle(PendingActionKind kind) => kind switch
         {
             PendingActionKind.PriceCap => "Parked at the price cap",
+            PendingActionKind.PriceAnomaly => "Left alone - the cheap price looks mistyped",
             PendingActionKind.BelowMinimum => "Should come off the board",
             _ => "Undercut on your home world",
         };
@@ -1778,6 +1780,8 @@ namespace Marketbuddy
         {
             PendingActionKind.PriceCap =>
                 "Quick-listed while nobody was selling that item, so no price could be worked out and it was left at the cap on purpose. Nobody can buy these until you price them.",
+            PendingActionKind.PriceAnomaly =>
+                "The cheapest price found was so far below what everything else costs that it looks like somebody dropped a zero, so your price was left exactly as it was - nothing here was changed. Check it yourself: if the cheap listing is real, reprice by hand. This list is worked out again every time you recalculate, so an entry disappears once that listing is gone - the permanent record is the ANOMALY-HOLD line in /xllog.",
             PendingActionKind.BelowMinimum =>
                 "Going by the current market these would end up under the minimum price you set, so relisting them would delist them instead. Decide whether to keep holding them.",
             _ =>
@@ -1865,6 +1869,26 @@ namespace Marketbuddy
 
         private static void DrawSuggestedCell(PendingActionRow row)
         {
+            // 🔴 「疑似打錯的低價」這一桶的 SuggestedPrice 不是「建議你掛的價」，
+            //    而是「被擋下來的那個可疑價」。畫成綠色的建議價會把意思完全弄反。
+            if (row.Kind == PendingActionKind.PriceAnomaly)
+            {
+                if (row.SuggestedPrice < 0)
+                {
+                    Grey("?");
+                    Tooltip("The suspicious price is not known.".Loc());
+                    return;
+                }
+
+                ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudOrange);
+                ImGui.TextUnformatted(row.SuggestedPrice.ToString("N0"));
+                ImGui.PopStyleColor();
+                Tooltip(
+                    "The price that was refused - what the cheapest listing (or the last sale) was asking. Your own price was left exactly as it was; nothing was changed."
+                        .Loc());
+                return;
+            }
+
             if (row.SuggestedPrice < 0)
             {
                 // 🔴 絕不畫成 0：那是一個合法但荒謬的價格。
@@ -1909,6 +1933,23 @@ namespace Marketbuddy
                 case "survey":
                     ImGui.TextUnformatted("survey  ??  ??".Loc(world, age));
                     Tooltip("From the cross-world survey log, the row for your own world.".Loc());
+                    return;
+                case "anomaly-peer":
+                    // 🔑 「拿什麼當正常價」必須在列上看得見：那是整個判定的全部依據。
+                    ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudOrange);
+                    ImGui.TextUnformatted("looks mistyped  normal ??  ??".Loc(world, age));
+                    ImGui.PopStyleColor();
+                    Tooltip(
+                        "The next seller along is asking ?? gil, so the cheapest listing looks like somebody dropped a zero. This test compares one seller against another, so a market-wide crash never lands here - only a single odd listing does."
+                            .Loc(world));
+                    return;
+                case "anomaly-own":
+                    ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudOrange);
+                    ImGui.TextUnformatted("looks mistyped  vs your ??  ??".Loc(world, age));
+                    ImGui.PopStyleColor();
+                    Tooltip(
+                        "Nobody else was selling, so there was no second seller to compare against and your own ?? gil had to be the yardstick. This is the weaker of the two tests: it cannot tell \"somebody mistyped\" apart from \"you are asking too much\"."
+                            .Loc(world));
                     return;
                 case "survey-excluded":
                     // 🔑 「知道但故意不用」要看得見，而且要看得見是哪一個世界——

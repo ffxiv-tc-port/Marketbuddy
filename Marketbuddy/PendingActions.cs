@@ -24,6 +24,23 @@ namespace Marketbuddy
 
         /// <summary>照目前行情重掛會落到使用者設的「最低價」以下，該下架而不是繼續掛。</summary>
         BelowMinimum = 2,
+
+        /// <summary>
+        /// 市場上最便宜的那個價看起來是打錯的（少打一個 0 之類），所以<b>沒有跟著降價</b>。
+        /// </summary>
+        /// <remarks>
+        /// 🔴 這個桶記的是「<b>已經替你擋下來了</b>」，不是「你該做什麼」——
+        /// 價格一個 gil 都沒有被改動。判準與門檻見 <see cref="PriceAnomalyGuard"/>。
+        /// <para>
+        /// ⚠️ 這一桶的兩個欄位語意與其他桶不同（沒有別的欄位可以放，而加一欄 CSV
+        /// 會讓既有的清單檔整份讀不回來）：
+        /// <c>SuggestedPrice</c>＝<b>被擋下來的那個可疑價</b>（不是建議你掛的價），
+        /// <c>SuggestionWorld</c>＝拿來比的那個<b>正常價</b>（已經格式化成字串）。
+        /// <c>SuggestionSource</c> 是 <c>anomaly-peer</c>／<c>anomaly-own</c>，
+        /// UI 靠它分辨這兩個欄位該怎麼讀。
+        /// </para>
+        /// </remarks>
+        PriceAnomaly = 3,
     }
 
     /// <summary>
@@ -563,7 +580,7 @@ namespace Marketbuddy
                 return false;
             if (!int.TryParse(fields[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var kind))
                 return false;
-            if (kind is < (int)PendingActionKind.PriceCap or > (int)PendingActionKind.BelowMinimum)
+            if (kind is < (int)PendingActionKind.PriceCap or > (int)PendingActionKind.PriceAnomaly)
                 return false;
             if (!uint.TryParse(fields[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out var itemId)
                 || itemId == 0)

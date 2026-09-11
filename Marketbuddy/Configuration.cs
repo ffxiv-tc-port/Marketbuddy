@@ -56,6 +56,49 @@ namespace Marketbuddy
         public bool BatchCompareHqOnly = true;
         public bool BatchDelistBelowVendor = false;
         public int BatchMinPrice = 0;
+
+        /// <summary>
+        /// 異常低價保護：別人手滑少打一個 0 的時候，不要跟著把自己的東西降到那個價。
+        /// <b>預設開啟。</b>
+        /// </summary>
+        /// <remarks>
+        /// 🔴 它擋下來的是「跟著一個看起來打錯的價降價」，<b>不是</b>「降價」本身：
+        /// 判準是<b>離群</b>（最低價比下一位賣家便宜太多倍）而不是<b>變低</b>，
+        /// 所以整個市場一起崩盤時它不會作用。完整的取捨寫在
+        /// <see cref="PriceAnomalyGuard"/> 的類別註解裡，那裡是唯一真值來源。
+        /// <para>
+        /// 📌 <b>改預設對既有使用者確實生效</b>：本外掛走 Dalamud 自己那條
+        /// <c>GetPluginConfig()</c>／<c>SavePluginConfig()</c>，JSON 缺鍵時保留的是
+        /// C# 的欄位初始值（與 ECommons EzConfig 那條路不同，兩者不要互相套用）。
+        /// </para>
+        /// <para>
+        /// ⚠️ 失效方向刻意是安全的：最壞的結果是「有一件東西沒跟著降價、因此沒賣掉」，
+        /// 而且那一件會出現在待處理清單上、聊天視窗與 log 裡都講得出原因。
+        /// </para>
+        /// </remarks>
+        public bool AnomalyGuardEnabled = true;
+
+        /// <summary>
+        /// 異常低價保護的<b>金額門檻</b>：只有「正常價」達到這個數字，這道保護才會作用。
+        /// <b>0 = 停用</b>。
+        /// </summary>
+        /// <remarks>
+        /// ⚠️ 比的是<b>正常價</b>（下一位賣家的價，或退而求其次時自己的現價），
+        /// 不是那個可疑的低價——可疑的那個本來就低，拿它當門檻等於門檻永遠不會過。
+        /// 低價品整批在幾十 gil 之間跳是常態，沒有這個門檻那些會全部被誤判。
+        /// </remarks>
+        public int AnomalyGuardMinNormalPrice = 100000;
+
+        /// <summary>
+        /// 異常低價保護的<b>倍數門檻</b>：正常價是可疑價的幾倍（含）以上算異常。
+        /// </summary>
+        /// <remarks>
+        /// 📌 預設 5。使用者的原話：「5 倍就可以當異常了，10 倍可能是少輸入一個 0」——
+        /// 取 5 是為了連「少打一個 0 之後又被別人小幅壓價」那種也蓋得到。
+        /// 合理範圍 <see cref="PriceAnomalyGuard.MinRatio"/>..<see cref="PriceAnomalyGuard.MaxRatio"/>，
+        /// 超出範圍時保護<b>整個不作用</b>（寧可不擋，也不要擋住正常的降價）。
+        /// </remarks>
+        public int AnomalyGuardRatio = 5;
         public int MarketTaxPercent = 5;
         public bool DelistToRetainerInventory = false;
         public int QuickListKeyCode = 0;
@@ -616,6 +659,11 @@ namespace Marketbuddy
                     conf.UndercutPrice = 0;
                 if (conf.BatchMinPrice < 0)
                     conf.BatchMinPrice = 0;
+                if (conf.AnomalyGuardMinNormalPrice < 0)
+                    conf.AnomalyGuardMinNormalPrice = 0;
+                // 🔴 刻意**不**夾到合法範圍內：被手改成範圍外的值時該發生的事是
+                //    「保護不作用」（PriceAnomalyGuard.Evaluate 自己會放行），
+                //    而不是被我們悄悄改成 2 或 1000 —— 那等於替使用者做了他沒要的決定。
                 if (conf.DelistAboveUnitPrice < 0)
                     conf.DelistAboveUnitPrice = 0;
                 // 舊設定檔沒有這個鍵時欄位初始值會留著；只有檔案裡明寫 null 才會變成 null。

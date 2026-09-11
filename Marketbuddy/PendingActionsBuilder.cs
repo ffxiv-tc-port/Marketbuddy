@@ -253,6 +253,9 @@ namespace Marketbuddy
             int UndercutPercent,
             int UndercutAmount,
             int MinPrice,
+            bool AnomalyEnabled,
+            int AnomalyMinNormalPrice,
+            int AnomalyRatio,
             string? CsvPath,
             IReadOnlySet<uint> ExcludedWorlds);
 
@@ -333,6 +336,11 @@ namespace Marketbuddy
                 conf.UndercutPercent,
                 conf.UndercutPrice,
                 conf.BatchMinPrice,
+                // 🔴 拍成快照帶走：這一段之後會跑到執行緒池上，
+                //    而設定物件是繪製執行緒在改的。
+                conf.AnomalyGuardEnabled,
+                conf.AnomalyGuardMinNormalPrice,
+                conf.AnomalyGuardRatio,
                 PriceSurveyItemSource.InventoryToolsCsvPath(),
                 // 🔴 排除清單是一個裸 List，繪製執行緒（勾選框）會改它。
                 //    這裡是 framework 執行緒，當場拍一份快照帶走，
@@ -374,7 +382,16 @@ namespace Marketbuddy
         }
 
         /// <summary>建議價與它的出處。價格 -1＝沒有任何可用的參考價。</summary>
-        private readonly record struct Suggestion(long Price, string Source, string World, DateTime At);
+        /// <param name="Price">套過降價設定之後的建議掛售價。</param>
+        /// <param name="Reference">算出 <paramref name="Price"/> 用的<b>原始</b>參考價（尚未套降價）；-1＝不知道。</param>
+        /// <param name="PeerBaseline">
+        /// 下一位賣家的最低價，異常低價保護要用（見 <see cref="PriceAnomalyGuard"/>）。
+        /// 🔴 <b>只有 <c>live</c> 這條路算得出來</b>：巡檢記錄每個世界只存一個最低價、
+        /// 沒有原始掛單，所以 <c>survey</c>／<c>survey-other</c> 一律 -1（＝不知道），
+        /// 那兩條上的異常判定只能退回「拿自己的現價比」。
+        /// </param>
+        private readonly record struct Suggestion(long Price, string Source, string World, DateTime At,
+            long Reference = -1, long PeerBaseline = -1);
 
         /// <summary>
         /// 巡檢記錄裡有資料、但被排除清單擋下來的那些世界的名字（已排序）。
@@ -454,14 +471,13 @@ namespace Marketbuddy
                         prepared, ownRetainers);
 
                 prepared.Latest.TryGetValue((placement.ItemId, placement.Hq, request.HomeWorldId), out var homeRow);
-                var kind = Classify(placement.Price, suggestion, request, homeRow);
+                var kind = Classify(placement.Price, suggestion, request, homeRow, out var anomaly);
                 if (kind == null)
                     continue;
 
-                result.Add(new PendingActionRow(now, kind.Value, placement.ItemId, placement.Hq,
+                result.Add(BuildRow(now, kind.Value, placement.ItemId, placement.Hq,
                     placement.RetainerId, names.GetValueOrDefault(placement.RetainerId, string.Empty),
-                    placement.Slot, placement.Price, suggestion.Price, suggestion.Source, suggestion.World,
-                    suggestion.At, false));
+                    placement.Slot, placement.Price, suggestion, anomaly));
             }
 
             // 巡檢資料看得到、但我們完全找不到它掛在哪一格的那些。
@@ -477,12 +493,12 @@ namespace Marketbuddy
                 if (!suggestions.TryGetValue(key, out var suggestion))
                     suggestions[key] = suggestion = ResolveSuggestion(itemId, hq, request, prepared, ownRetainers);
 
-                var kind = Classify(row.OurPrice, suggestion, request, row);
+                var kind = Classify(row.OurPrice, suggestion, request, row, out var anomaly);
                 if (kind == null)
                     continue;
 
-                result.Add(new PendingActionRow(now, kind.Value, itemId, hq, 0, string.Empty, -1,
-                    row.OurPrice, suggestion.Price, suggestion.Source, suggestion.World, suggestion.At, false));
+                result.Add(BuildRow(now, kind.Value, itemId, hq, 0, string.Empty, -1,
+                    row.OurPrice, suggestion, anomaly));
             }
 
             return result;
@@ -525,17 +541,18 @@ namespace Marketbuddy
             if (request.CurrentWorldId == request.HomeWorldId
                 && MarketDataCache.TryGet(itemId, request.CacheSeconds, out var listings, out var ageMs))
             {
-                var lowest = LowestCompetitor(listings, hq, request.CompareHqOnly, ownRetainers);
+                var lowest = LowestCompetitor(listings, hq, request.CompareHqOnly, ownRetainers,
+                    out var peerBaseline);
                 if (lowest >= 0)
                     return new Suggestion(ApplyUndercut(lowest, request), "live", request.HomeWorldName,
-                        DateTime.UtcNow.AddMilliseconds(-Math.Max(0d, ageMs)));
+                        DateTime.UtcNow.AddMilliseconds(-Math.Max(0d, ageMs)), lowest, peerBaseline);
             }
 
             // ② 巡檢記錄，家世界那一列。
             if (prepared.Latest.TryGetValue((itemId, hq, request.HomeWorldId), out var homeRow)
                 && homeRow.Verdict == "ok" && homeRow.LowestIsOurs == 0 && homeRow.LowestForQuality >= 0)
                 return new Suggestion(ApplyUndercut(homeRow.LowestForQuality, request), "survey",
-                    homeRow.WorldName, homeRow.AtUtc);
+                    homeRow.WorldName, homeRow.AtUtc, homeRow.LowestForQuality);
 
             // ③ 巡檢記錄，別的世界最便宜的那一列。
             long best = -1;
@@ -579,7 +596,7 @@ namespace Marketbuddy
             }
 
             if (best >= 0)
-                return new Suggestion(ApplyUndercut(best, request), "survey-other", bestWorld, bestAt);
+                return new Suggestion(ApplyUndercut(best, request), "survey-other", bestWorld, bestAt, best);
 
             // 🔑 「不知道」與「知道但故意不用」在畫面上必須分得出來。
             //    後者照樣回 -1（絕不回 0），但帶著出處，UI 才畫得出
@@ -602,8 +619,9 @@ namespace Marketbuddy
         /// 而且這一頁真的有優質品掛單時，才只看優質品。
         /// </summary>
         private static long LowestCompetitor(List<(uint Price, bool IsHq, ulong RetainerId)> listings, bool hq,
-            bool compareHqOnly, HashSet<ulong> ownRetainers)
+            bool compareHqOnly, HashSet<ulong> ownRetainers, out long peerBaseline)
         {
+            peerBaseline = -1;
             var hqOnly = false;
             if (hq && compareHqOnly)
             {
@@ -616,17 +634,29 @@ namespace Marketbuddy
                 }
             }
 
-            long lowest = -1;
+            // 品質篩選只做一次，最低價與同業基準共用同一份，兩者的取捨才不會分岔。
+            var considered = new List<(uint Price, bool IsHq, ulong RetainerId)>(listings.Count);
             foreach (var listing in listings)
             {
                 if (hqOnly && !listing.IsHq)
                     continue;
+                considered.Add(listing);
+            }
+
+            long lowest = -1;
+            ulong lowestRetainerId = 0;
+            foreach (var listing in considered)
+            {
                 if (ownRetainers.Contains(listing.RetainerId))
                     continue;
                 if (lowest >= 0 && listing.Price >= lowest)
                     continue;
                 lowest = listing.Price;
+                lowestRetainerId = listing.RetainerId;
             }
+
+            if (lowest >= 0)
+                peerBaseline = PriceAnomalyGuard.PeerBaseline(considered, lowestRetainerId, ownRetainers);
 
             return lowest;
         }
@@ -659,8 +689,24 @@ namespace Marketbuddy
         /// </para>
         /// </summary>
         private static PendingActionKind? Classify(long currentPrice, Suggestion suggestion, Request request,
-            PriceSurveyRow homeRow)
+            PriceSurveyRow homeRow, out PriceAnomaly anomaly)
         {
+            // 🔴 異常低價排在最前面，而且理由與引擎逐字相同（BatchReprice.ApplySlot）：
+            //    一個打錯的低價會同時長出「照它降價」與「低於最低價就該下架」兩個建議，
+            //    而正確答案是兩件都不要做。判準與門檻見 PriceAnomalyGuard。
+            //
+            //    🔴 刻意只認 live／survey 這兩種**本世界**的參考價，理由與下面那道
+            //    「該下架」的限制完全相同：重掛引擎從來不會拿別的世界的行情去定價，
+            //    所以那裡根本沒有東西需要被保護。少了這道限制，一件「家世界查不到、
+            //    但別的世界有人掛很便宜」的東西會憑空長出一列「已經替你擋下來了」——
+            //    而其實什麼都沒有發生過。
+            anomaly = suggestion.Source is "live" or "survey"
+                ? PriceAnomalyGuard.Evaluate(suggestion.Reference, suggestion.PeerBaseline, currentPrice,
+                    request.AnomalyEnabled, request.AnomalyMinNormalPrice, request.AnomalyRatio)
+                : PriceAnomaly.Clear;
+            if (anomaly.IsAnomalous)
+                return PendingActionKind.PriceAnomaly;
+
             if (request.MinPrice > 0 && suggestion.Price >= 0
                 && suggestion.Source is "live" or "survey"
                 && suggestion.Price < request.MinPrice)
@@ -674,5 +720,22 @@ namespace Marketbuddy
                 return null;
             return PendingActionKind.Undercut;
         }
+
+        /// <summary>
+        /// 把一列組出來。
+        /// 🔴 「疑似打錯的低價」那一桶借用了兩個欄位（語意寫在
+        /// <see cref="PendingActionKind.PriceAnomaly"/> 上）：<c>SuggestedPrice</c> 放的是
+        /// <b>被擋下來的可疑價</b>而不是建議掛的價，<c>SuggestionWorld</c> 放的是拿來比的正常價。
+        /// 這裡是唯一組出那種列的地方（引擎那側是 <c>BatchReprice.RecordAnomaly</c>），
+        /// 兩處必須一致。
+        /// </summary>
+        private static PendingActionRow BuildRow(DateTime now, PendingActionKind kind, uint itemId, bool hq,
+            ulong retainerId, string retainerName, short slot, long currentPrice,
+            Suggestion suggestion, PriceAnomaly anomaly)
+            => kind == PendingActionKind.PriceAnomaly
+                ? new PendingActionRow(now, kind, itemId, hq, retainerId, retainerName, slot, currentPrice,
+                    anomaly.Reference, anomaly.Tag, anomaly.NormalPrice.ToString("N0"), now, false)
+                : new PendingActionRow(now, kind, itemId, hq, retainerId, retainerName, slot, currentPrice,
+                    suggestion.Price, suggestion.Source, suggestion.World, suggestion.At, false);
     }
 }

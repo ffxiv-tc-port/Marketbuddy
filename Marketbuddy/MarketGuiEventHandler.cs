@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Numerics;
 using Dalamud.Game.Addon.Lifecycle;
 using Dalamud.Game.Addon.Lifecycle.AddonArgTypes;
@@ -223,6 +224,15 @@ namespace Marketbuddy
                                 price < Configuration.MIN_PRICE ? Configuration.MIN_PRICE
                                 : price > Configuration.MAX_PRICE ? Configuration.MAX_PRICE
                                 : price;
+
+                            // 🔴 異常低價保護：點到的那一列如果就是整頁最便宜的、而且它比
+                            //    下一位賣家便宜太多倍，那多半是對方少打一個 0。
+                            //    ⚠️ 這裡刻意**只**用同業基準：手動上架時「我現在賣多少」
+                            //    根本不存在（出售品視窗第一次上架時也是這條路），沒有可信的
+                            //    第二基準，所以查不到掛單快取時一律放行 —— 寧可不擋，
+                            //    也不要擋住使用者自己按下去的那一下。
+                            if (TryBlockAnomalousPick(getPricePerItem(nodeParam)))
+                                return;
 
                             SetPrice(price);
                         }
@@ -525,6 +535,103 @@ namespace Marketbuddy
             var addonRetainerSell = (AddonRetainerSell*)retainerSell;
             Commons.SendClick(addonPtr, EventType.CHANGE, 21, addonRetainerSell->Confirm);
             return true;
+        }
+
+        /// <summary>
+        /// 比價視窗上被點到的那個價看起來是打錯的嗎；是的話<b>不填價、不確認</b>，回 <c>true</c>。
+        /// </summary>
+        /// <remarks>
+        /// 🔴 與 <see cref="TryBlockListing"/>（最低價／小販價那兩道門檻）刻意<b>不同</b>的地方：
+        /// 那兩道在自動確認開著時會把整筆上架取消掉，這一道<b>只是不填價</b>，
+        /// 兩扇視窗都留著。理由是這一道判的是「別人的價可疑」而不是「你的價不該掛」，
+        /// 誤判的時候使用者只要自己把價打進去就好，不該被關掉視窗。
+        /// <para>
+        /// 🔑 只在「點到的就是整頁最便宜那一列」時才作用：刻意挑一個比較貴的列
+        /// 是使用者自己的決定，沒有什麼好保護的。
+        /// </para>
+        /// </remarks>
+        private bool TryBlockAnomalousPick(int pickedUnitPrice)
+        {
+            if (!conf.AnomalyGuardEnabled || pickedUnitPrice <= 0)
+                return false;
+
+            var itemId = SearchedItemId();
+            if (itemId == 0)
+                return false;
+
+            // 🔴 只讀已經被動收下來的掛單快取，不送任何查詢。
+            if (!MarketDataCache.TryGet(itemId, conf.MarketDataCacheSeconds, out var listings, out _)
+                || listings.Count == 0)
+                return false;
+
+            var ownRetainers = OwnRetainerIds();
+            long lowest = -1;
+            ulong lowestRetainerId = 0;
+            foreach (var listing in listings)
+            {
+                if (ownRetainers.Contains(listing.RetainerId))
+                    continue;
+                if (lowest >= 0 && listing.Price >= lowest)
+                    continue;
+                lowest = listing.Price;
+                lowestRetainerId = listing.RetainerId;
+            }
+
+            if (lowest < 0 || pickedUnitPrice > lowest)
+                return false;
+
+            var anomaly = PriceAnomalyGuard.Evaluate(lowest,
+                PriceAnomalyGuard.PeerBaseline(listings, lowestRetainerId, ownRetainers),
+                // 🔴 -1＝「我現在賣多少」不知道，所以自家現價那條退路整個不走。
+                -1L, conf);
+            if (!anomaly.IsAnomalous)
+                return false;
+
+            Log.Information(
+                $"[Marketbuddy] ANOMALY-PICK item={itemId} picked={pickedUnitPrice} " +
+                $"reference={anomaly.Reference} normal={anomaly.NormalPrice} " +
+                $"baseline={anomaly.Tag} ratio={anomaly.RatioText}x " +
+                $"minNormal={conf.AnomalyGuardMinNormalPrice} mult={conf.AnomalyGuardRatio}");
+
+            ChatGui.PrintError(
+                "[Marketbuddy] Price not filled in: ?? gil looks like a mistyped listing (??x below the ?? gil that looks normal). Type a price in yourself if you really mean it."
+                    .Loc(anomaly.Reference.ToString("N0"), anomaly.RatioText,
+                        anomaly.NormalPrice.ToString("N0")));
+            return true;
+        }
+
+        /// <summary>
+        /// 比價清單目前問的是哪一件道具；問不出來時 0（＝不知道）。
+        /// 逐字比照 <see cref="TryBlockListing"/> 用的那條路。
+        /// </summary>
+        private static uint SearchedItemId()
+        {
+            var infoModule = FFXIVClientStructs.FFXIV.Client.UI.Info.InfoModule.Instance();
+            if (infoModule == null)
+                return 0;
+            var proxy = (FFXIVClientStructs.FFXIV.Client.UI.Info.InfoProxyItemSearch*)
+                infoModule->GetInfoProxyById(FFXIVClientStructs.FFXIV.Client.UI.Info.InfoProxyId.ItemSearch);
+            return proxy == null ? 0 : proxy->SearchItemId;
+        }
+
+        /// <summary>
+        /// 目前角色的僱員 id。
+        /// ⚠️ 只涵蓋<b>目前角色</b>——別的角色的僱員會被當成別人，
+        /// 那個方向的失敗是「保護比較不容易作用」，不是賤賣。
+        /// </summary>
+        private static HashSet<ulong> OwnRetainerIds()
+        {
+            var result = new HashSet<ulong>();
+            var retainerManager = FFXIVClientStructs.FFXIV.Client.Game.RetainerManager.Instance();
+            if (retainerManager == null)
+                return result;
+            foreach (var retainer in retainerManager->Retainers)
+            {
+                if (retainer.RetainerId != 0)
+                    result.Add(retainer.RetainerId);
+            }
+
+            return result;
         }
 
         private unsafe int getPricePerItem(IntPtr /* AtkResNode* */ nodeParam)
