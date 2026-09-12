@@ -89,7 +89,6 @@ namespace Marketbuddy
         /// <summary>
         /// 僱員選單目前的螢幕矩形：左上角座標與**已套用縮放**的尺寸。
         /// 巡迴面板靠它貼在原生視窗右邊並跟著它跑。
-        ///
         /// 🔴 與 <see cref="AddonRetainerSellList_Frame"/> 同一套作法，只讀已建模的**純欄位**，
         /// 不呼叫任何特徵碼解析的原生函式（理由見那個方法的說明）。
         /// </summary>
@@ -254,7 +253,6 @@ namespace Marketbuddy
         /// <summary>
         /// 出售品視窗目前的螢幕矩形：左上角座標與**已套用縮放**的尺寸。
         /// 重掛面板靠它貼在原生視窗下方並跟著它跑。
-        ///
         /// 🔴 與 <see cref="LiveSellList"/> 同一套作法，刻意只讀已建模的**純欄位**
         /// （X / Y / RootNode->Width / RootNode->Height / Scale），不呼叫
         /// GetScaledWidth() 之類**特徵碼解析**的原生函式——台服上解到錯的函式就是
@@ -378,8 +376,6 @@ namespace Marketbuddy
 
         /// <summary>
         /// Closes the "compare prices" window by replaying the window-close event.
-        ///
-        /// 原本這裡是一條零檢查的六層裸鏈:
         ///   addon->WindowNode->Component->UldManager.NodeList[7]->GetComponent()->OwnerNode
         /// WindowNode / Component / NodeList[7] / GetComponent() 任何一層是 null 都會解參考,
         /// 而 GetComponent() 本身是 [MemberFunction] 原生呼叫、對 null 節點呼叫即 AVE;
@@ -545,10 +541,8 @@ namespace Marketbuddy
         /// 那兩道在自動確認開著時會把整筆上架取消掉，這一道<b>只是不填價</b>，
         /// 兩扇視窗都留著。理由是這一道判的是「別人的價可疑」而不是「你的價不該掛」，
         /// 誤判的時候使用者只要自己把價打進去就好，不該被關掉視窗。
-        /// <para>
         /// 🔑 只在「點到的就是整頁最便宜那一列」時才作用：刻意挑一個比較貴的列
         /// 是使用者自己的決定，沒有什麼好保護的。
-        /// </para>
         /// </remarks>
         private bool TryBlockAnomalousPick(int pickedUnitPrice)
         {

@@ -29,9 +29,6 @@ namespace Marketbuddy
     /// (999,999,999) and the new market slot is handed to the BatchReprice
     /// engine as a single-slot run - compare (30 min cache), undercut,
     /// thresholds and delist all reuse the existing pipeline. Listing first
-    /// and repricing after turns "stuck at the price input" into "listed,
-    /// then priced".
-    ///
     /// Hooked through the bundled ClientStructs member
     /// AgentInventoryContext.OpenForItemSlot (resolved address, no manual
     /// signature scan). Strictly manual: one item per key-held right-click,
@@ -44,14 +41,7 @@ namespace Marketbuddy
 
         /// <summary>
         /// 引擎必須在這麼久之內接手這一格。
-        ///
-        /// 🔑 這段時間**只在真的有機會推進時才倒數**。原本它是絕對期限，於是「使用者
-        /// 一邊跑全僱員巡迴、一邊快速上架」時會這樣：
-        ///   03:26:42 RetainerSellList not open → 03:26:46 multi-retainer tour running
-        ///   → 03:26:47 engine already running → 03:27:02 multi-retainer tour running
-        ///   → 03:27:06「仍掛在上限價，請手動定價！」
-        /// 那 30 秒裡它被擋住的原因**全部是我們自己合法佔用引擎**，不是卡住，
-        /// 卻照樣把道具靜默丟掉、永久留在 999999999。
+        /// 🔑 這段時間<b>只在真的有機會推進時才倒數</b>：被我們自己合法佔用引擎而擋住的時間不算，不然道具會被靜默丟掉、永久留在 999999999。
         /// </summary>
         private const int RepriceQueueTimeoutMs = 30000;
 
@@ -372,8 +362,6 @@ namespace Marketbuddy
                 //      再操作一次」，也就是原生 AccessViolationException。AVE 在 .NET Core 屬
                 //      corrupted-state exception，try/catch（包含外層那個 detour 的 catch）
                 //      完全攔不到 ⇒ 唯一的防護是不要送第二次。
-                //    分歧點不必猜台服的處理常式回不回非零：FireCallback 的回傳值語意正好就是
-                //    「我有沒有替你把窗關掉」，直接拿它當判準。
                 if (!AddonHelpers.FireContextMenuSelect(addon, i, contextMenuName, out var closedByCallback))
                 {
                     // 守衛在 CanPress 之後才擋下（同一幀同一執行緒理論上不會發生，但回傳值
@@ -402,10 +390,6 @@ namespace Marketbuddy
                 //    ✅ 擋得到：這扇窗已經被 Finalize／釋放（那時才會從 AllLoadedUnitsList
                 //       移除），以及同一個 id 已經換成另一個實例。
                 //    ❌ 擋不到：「已經 Close 但還沒 Finalize」。AtkUnitBase::Close
-                //       (0x14063CFE0) 只把窗從 AtkUnitManager+0x7920 那張表移除，
-                //       **完全沒有碰 AllLoadedUnitsList (+0x6900)**，而 GetAddonById
-                //       (0x14064B900) 與 GetAddonByName 掃的正是後者 —— 這也正是
-                //       「按下即關的窗，按完那幾幀三關全過」那個危險窗口的成因。
                 //    ⇒ 這道閘門是加分，不是證明。真正把這個站移出危險窗口的，是上面那個
                 //      closedByCallback 分歧：原生端說它關了，我們就一個字都不再碰。
                 // 🔴 這裡對存下來的位址**只做等值比較**：存的是 id，解參考的是遊戲這一幀自己

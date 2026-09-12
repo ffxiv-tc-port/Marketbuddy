@@ -33,21 +33,15 @@ namespace Marketbuddy.Common
 
     /// <summary>
     /// 「不要對正在關閉中的視窗再按一次」的守衛。
-    ///
     /// 🔴🔴 這在防什麼：SelectYesno 這類「按下即關」的原生視窗，在按下之後的幾幀裡
     /// <c>GetAddonByName</c> 仍然回得到實例，<c>IsVisible</c> 與
     /// <c>UldManager.LoadedState == Loaded</c> 也都還是真 —— 也就是說
     /// <see cref="AddonHelpers.GetReadyAddon"/> 的三關全部通過 —— 這時再送一次
     /// callback / ReceiveEvent 就是原生 AccessViolation。AVE 在 .NET Core 屬於
     /// corrupted-state exception，<c>try/catch</c> 完全攔不到，唯一的防護是**不要送第二次**。
-    ///
     /// 🔴 節流不是防護：牆鐘節流記的是「上一次動作在哪一幀」，不是「這扇窗按過了」。
-    /// 本外掛原有的 250ms / 500ms / 1000ms 節流換算成幀取決於實機 FPS，30fps 時
-    /// 250ms 只有約 7.5 幀，正好落在危險窗口內。守衛記的是**位址**，與 FPS 無關。
-    ///
     /// 🔴 位址只做等值比較，永遠不解參考。位址會被新視窗重用，所以一定要搭配
     /// 「看到生命週期結束」的解除點（PreFinalize / PostSetup / 每幀輪詢）與逾時兜底。
-    ///
     /// 🔴 這個守衛**只做防護**：它只會讓按下的次數變少，永遠不會多按一次，也不會
     /// 改變任何觸發條件。被擋下時一律回 <c>false</c>，對呼叫端的意義是「這一輪沒按到」，
     /// 走的是它本來就有的「addon 還沒就緒」那條路徑。
@@ -190,11 +184,6 @@ namespace Marketbuddy.Common
             // 跨外掛重按診斷：只在真的送出按壓時記一行，刻意不節流。
             // 🔴 這一行的格式逐字固定（艦隊裡多份各自獨立的 AddonPressGuard 共用同一個形狀），
             //    改格式就無法交叉比對，不要「順手改得好看一點」。
-            // 📌 2026-09-07 由 Information 降為 Debug：它要回答的問題已經有答案了 —— 跨外掛重按
-            //    是真的在發生（2026-09-06 02:20:20 實機：本外掛與 YesAlready 相隔 6ms 按下同一個
-            //    Talk 實例 0x1CA56AE0660）。使用者的 LogLevel 是 1，盲區只有 Verbose，Debug 照樣
-            //    收得到；而這一行每次按壓都寫，單場數千行留在 Information 會把真正需要使用者
-            //    回報的訊號淹沒。要再查跨外掛重按時，這條探針原地還在。
             Log.Debug($"[按窗診斷] plugin=Marketbuddy addon={addonName} addr=0x{address:X} key={kind}|{(kind == PressKind.Terminal ? 0 : param)}");
             return true;
         }
