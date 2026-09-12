@@ -227,6 +227,7 @@ namespace Marketbuddy
         /// 🔴 <b>欄位名必須與 AR 端逐字相同。</b>型別對不上時 Dalamud 的 CallGate 會把物件
         /// 做一次 JSON 來回轉（<c>CallGateChannel.ConvertObject</c>），名字打錯不會報錯，
         /// 只會靜默拿到預設值（false／0／null）。
+        /// </remarks>
         // CS0649「從未指派」：這些欄位是 Newtonsoft 反序列化時填的（CallGate 的
         // ConvertObject 走 JSON 來回轉），編譯器看不到那條路徑。**不要**改成屬性或加初始值
         // 去消警告——欄位名與形狀必須跟 AR 端一致。

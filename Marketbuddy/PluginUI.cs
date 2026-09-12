@@ -239,6 +239,7 @@ namespace Marketbuddy
         /// 🔑 這是**列上**的資訊不是滑鼠提示：使用者正要按一顆紅色的「全部下架」，
         /// 如果實際上會留下東西，那件事必須在他按下去之前就看得見，不能藏在 tooltip 裡
         /// （tooltip 藏的是「為什麼」，不是「有沒有」）。
+        /// </summary>
         /// <param name="includeSkipList">
         /// 僱員名單只對巡迴有意義；出售品視窗那顆「本僱員全下架」傳 false。
         /// </param>
@@ -388,6 +389,7 @@ namespace Marketbuddy
         /// 兩者共用 <see cref="Configuration.LiveSellListOffset"/> 當作整欄的位移，
         /// 所以拖滑桿是兩塊一起動；重掛面板高度變化時，下面那塊是照**量到的下緣**
         /// 重新定位的，不會重疊。
+        /// </summary>
         /// <returns>面板下緣的螢幕 Y 座標；面板這一幀沒有畫出來時回傳 null。</returns>
         private float? DrawRepriceWindow()
         {

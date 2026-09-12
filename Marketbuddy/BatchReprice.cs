@@ -971,6 +971,7 @@ namespace Marketbuddy
         /// 🔑 這裡<b>不再直接判失敗</b>：跨世界價格巡檢已經把全世界的掛售清單掃過一遍，
         /// 家世界那一列可以補位（見 <see cref="TryUseSurveyFallback"/>）；補不到、但這一格
         /// 有成交價候選時，照樣定得出價。<b>兩條都沒有才真的是失敗。</b>
+        /// </summary>
         /// <param name="reason">真的失敗時給使用者看的原因（已在地化）。</param>
         /// <param name="tag">失敗的形狀，只進 log：<c>send-failed</c>／<c>refused</c>／<c>timeout</c>。</param>
         private TickTaskResult GiveUpOnMarketQuery(SlotJob job, string reason, string tag)
@@ -1774,6 +1775,7 @@ namespace Marketbuddy
         /// <summary>
         /// 這一行必須留在 Information：使用者跑 LogLevel 1，盲區只有 Verbose,Debug 收得到但單檔數十萬行會淹沒，
         /// 沒有它就完全看不見查價發生過。
+        /// </summary>
         /// <param name="via">答案是怎麼來的：cache / offerings / empty(...)。</param>
         /// <param name="n">採用的掛單筆數。</param>
         private void LogQuerySummary(SlotJob job, string via, int n, DateTime now)
