@@ -20,71 +20,12 @@ namespace Marketbuddy
     /// <summary>
     /// 在 <c>InfoProxyItemSearch::ProcessRequestResult</c> 上掛一個 hook，把伺服器對每一次市場
     /// 查價的答覆轉交給 <see cref="BatchReprice"/> —— 讓它不必再用逾時去**猜**伺服器怎麼了。
-    ///
-    /// ── 這一版為什麼從「純記錄」升級成「真的用結果」 ──────────────────────────
-    /// v7.20.0.18 的純診斷版在台服實機跑了一輪 83 件的批次改價（2026-08-02 20:50:56–20:53:50），
-    /// 結果推翻了先前「台服的拒絕是完全靜默」的結論：
-    ///     • **83 次 REQUEST 對到 83 次 ProcessRequestResult，一對一，零遺漏。**
-    ///       所謂「被吞掉」的那一次其實有回封包，只是帶著錯誤碼。
-    ///     • 唯一一次拒絕：`errorCode = 0x70000003`，在送出後 **229 ms** 抵達，
-    ///       而我們的 <c>NoResponseDeadlineMs</c> 要到 **2502 ms** 才判定 —— 晚了 2.27 秒。
-    ///     • 使用者從沒在聊天窗看過「無法在市場中進行搜尋。」是因為
-    ///       <c>InfoModule</c> 只對 <c>errorCode ∈ [1, 0x6FFFFFFF]</c> 印 <c>LogMessage</c>，
-    ///       而 <c>0x70000003 ≥ 0x70000000</c>。**拒絕一直有訊號，只是對使用者靜默。**
-    ///
-    /// ── 兩個可以拿來當真值的判準（都經反編譯證實，不是推測） ────────────────
-    /// 台服 7.20 `0x1409274A0` 的錯誤碼分派（`+0x06E`–`+0x08D`）與尾段（`+0x1F6`–`+0x264`）：
-    /// <code>
-    ///   test edi,edi ; je 成功分支          errorCode == 0
-    ///   sub  edi,0x181      ; je 分支B      errorCode == 0x181
-    ///   sub  edi,0x6FFFFE81 ; je 分支C      errorCode == 0x70000002
-    ///   cmp  edi,1 ; jne 尾段               其餘 → 直接到尾段
-    ///                                       落下來的就是 errorCode == 0x70000003 → 分支B
-    ///   尾段：self->ListingCount = listingCount
-    ///         if (listingCount != 0) { self->[+0x5B96] = 1; 送出續頁請求 command 0x375 }
-    ///         else                   { vf13() EntryCount = 0; vf10() EndRequest(); }
-    /// </code>
-    /// ① <c>errorCode != 0</c> ＝ 伺服器明確拒絕。真值，不是推測。
-    /// ② <c>errorCode == 0 &amp;&amp; listingCount == 0</c> ＝ 真的沒人在賣。
-    ///    **關鍵是尾段的 else 分支：`listingCount == 0` 時客戶端根本不送續頁請求**，
-    ///    所以 offerings 封包永遠不會來 —— 等 <c>EmptyResultGraceMs</c> 是在等一個
-    ///    保證不會發生的事件。
-    ///
-    /// ⚠️ <c>listingCount</c> 的語意（實測校準過，不是猜的）：它是**跨所有分頁的總數**，
-    /// 不是第一頁的筆數。實機對照：item 44914 回報 46，offerings 分五頁 10+10+10+10+6 = 46；
-    /// item 46002 回報 36 = 10+10+10+6；item 38583 回報 35 = 10+10+10+5；item 44104 回報 12 = 10+2。
-    /// 型別是 <c>byte</c>（呼叫端 <c>movzx edx, byte ptr [rbx+4]</c>），所以理論上 256 筆會繞回 0；
-    /// 但**客戶端自己讀的也是同一個位元組**，繞回時它同樣不會去要續頁、同樣顯示「沒有搜尋到任何結果。」
-    /// —— 我們只會跟遊戲本身錯得一樣多，不會更多。
-    ///
-    /// ── 🔴 detour 裡刻意不做的事 ──────────────────────────────────────
     /// • **不呼叫 <c>RequestData()</c>。** 那會繞過 <see cref="MarketRequestGate.NoteRequestSent"/>，
-    ///   讓閘門對「上次送出時間」的模型立刻失真 —— 正是 2026-08-02 那輪診斷剛修掉的 bug 形狀。
     ///   重送一律由既有的 framework tick 路徑發起、走既有的閘門。
     /// • **不碰任何集合或外掛狀態。** 封包分派不保證在主執行緒，所以交接只用一個
     ///   <see cref="Interlocked"/> 單槽（<see cref="signal"/>），沒有鎖、沒有配置、沒有字典。
     /// • **不吞掉 Original。** 代價會是 <c>ListingCount</c>/<c>EntryCount</c> 留著上一件的值，
     ///   而那時 <c>SearchItemId</c> 已經是新道具 —— 不會崩，會**給錯價**。
-    /// • **不啟動任何東西。** 收到封包只會影響「使用者自己已經啟動的那一輪批次」；
-    ///   沒有批次在跑時這個訊號會被下一次 <see cref="ArmForRequest"/> 直接丟掉。
-    ///
-    /// ── 位址從哪來 ────────────────────────────────────────────────────
-    /// 用 bundled ClientStructs 自己解出來的
-    /// <c>InfoProxyItemSearch.Addresses.ProcessRequestResult</c>，**不寫死特徵碼**。
-    /// 解不出來時 <c>Value</c> 是 0，不會丟例外，我們就不掛 hook、記一行 Warning ——
-    /// 此時 <see cref="IsInstalled"/> 為 false，<see cref="BatchReprice"/> 自動退回原本的
-    /// 逾時／寬限判定，功能完全不受影響。
-    ///
-    /// ── 簽名 ──────────────────────────────────────────────────────────
-    /// 呼叫端反編譯是決定性證據：
-    /// <code>
-    ///   mov   r8d, dword ptr [rbx]      ; arg3 = int32 errorCode
-    ///   mov   rcx, rax                  ; arg1 = InfoProxyItemSearch*
-    ///   movzx edx, byte ptr [rbx + 4]   ; arg2 = byte  listingCount
-    ///   call  0x1409274A0               ; ← r9 從未被設定
-    /// </code>
-    /// ⚠️ 所以 DailyRoutines 宣告的第四個參數 <c>a4</c> **根本不存在**，
-    /// <c>entryCount</c> 也是 <c>byte</c> 不是 <c>int</c> —— 不要照抄 DR 的 delegate。
     /// </summary>
     internal sealed unsafe class MarketRequestResultProbe : IDisposable
     {
@@ -100,21 +41,13 @@ namespace Marketbuddy
         /// </summary>
         private delegate nint ProcessRequestResultDelegate(InfoProxyItemSearch* self, byte listingCount, int errorCode);
 
-        // ---------------------------------------------------------------
         // 跨執行緒交接：**一個 long 的單槽**，detour 寫、framework tick 取。
-        //
-        // 為什麼是 static：這是一個行程級的遊戲 hook，同時間只會有一個實例，而消費端
-        // （BatchReprice 的 tick）不持有這個實例的參考。生命週期由建構式/Dispose 維護。
-        //
         // 佈局（0 ＝ 空槽）：
         //   bit 63     valid
         //   bit 40     refused（errorCode != 0）
         //   bits 39-32 listingCount
         //   bits 31-0  itemId
-        // 錯誤碼本身放不進同一個 long，所以另外用一個 int 欄位；它**只給診斷用**，
-        // 行為判斷所需的位元全部在 signal 裡，所以就算它被下一筆覆寫也不會改變決策。
         // 寫入順序（先 errorCode 後 Interlocked 發佈）提供 release 語意。
-        // ---------------------------------------------------------------
         private const long ValidBit = unchecked((long)0x8000_0000_0000_0000UL);
         private const long RefusedBit = 1L << 40;
 
@@ -137,10 +70,6 @@ namespace Marketbuddy
 
         /// <summary>
         /// 取走伺服器對 <paramref name="expectedItemId"/> 的答覆。取得後槽即清空（消費一次）。
-        ///
-        /// <para>⚠️ 不符合 <paramref name="expectedItemId"/> 的答覆會被**丟掉**（那是玩家自己
-        /// 或別的外掛查的東西）。批次進行中玩家開市場板本來就會讓批次中止，所以這條路徑
-        /// 幾乎不會發生；真的發生時最壞情況只是這一格退回原本的逾時判定。</para>
         /// </summary>
         public static bool TryTakeResult(uint expectedItemId, out MarketRequestResult result)
         {
