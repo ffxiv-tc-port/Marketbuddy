@@ -9,54 +9,11 @@ namespace Marketbuddy
 {
     /// <summary>
     /// 全域市場資料快取。
-    ///
-    /// <para>
-    /// <c>IMarketBoard.OfferingsReceived</c> 是**全域事件**：不管那筆查詢是誰送出去的
-    /// （我們自己的批次、DailyRoutines 的改價器、PriceInsight 的滑鼠提示、或是玩家自己
-    /// 點開市場板），封包都會送到每一個訂閱者手上。舊版的 BatchReprice 只收「自己正在等
-    /// 的那一件」，其餘整包丟掉 —— 2026-08-02 的實機 log 裡光是
-    /// <c>OFFERINGS dropped: no request pending</c> 就有 1047 筆。
-    /// </para>
-    ///
-    /// <para>
-    /// 這個類別把每一筆看得到的掛單資料都存下來，之後要查同一件道具時就不必再問伺服器。
-    /// 兩個直接效果：
-    /// <list type="number">
-    ///   <item>別人剛查過的道具我們直接用（實測 .15 那段有 5.8% 的第一次查詢可以完全省掉）。</item>
-    ///   <item>**逾時之後才到的資料不再被丟掉** —— 它會落進快取，重試前的快取檢查就會命中，
-    ///         於是那次重試根本不會送出去（實測 63 次重試裡有 18 次，答案在我們重問之前就已經到了）。</item>
-    /// </list>
-    /// </para>
-    ///
-    /// <para>
     /// 🔴 這裡是**純被動接收**：只寫進字典，不觸發任何遊戲操作、不啟動任何流程。
     /// 收到別人查的資料**不會**讓我們開始改價；改價一律仍由使用者按下的按鈕發動。
-    /// </para>
-    ///
-    /// <para>
-    /// 正確性邊界（為什麼可以拿別人查的資料當自己的答案）：
-    /// <list type="bullet">
-    ///   <item><b>HQ／NQ</b>：存的是整頁原始掛單（含每一筆的 IsHq），HQ/NQ 的取捨仍然由
-    ///         BatchReprice 依該格自己的品質逐格判斷，快取不做任何預先篩選。</item>
-    ///   <item><b>伺服器</b>：市場板是**每個世界各自一份**，所以整份快取綁在**世界**上；
-    ///         世界一變（跨界／服務器旅行）就整份清掉。世界 ID 由 Framework tick 讀取後
-    ///         快取起來，封包處理器只讀這個欄位，不在事件裡碰任何遊戲狀態。
-    ///         <para>
-    ///         🔑 2026-08-02：**身分刻意不含角色 ID。** 掛售資料是「世界」的屬性而不是
-    ///         「角色」的屬性 —— 同一個世界上任何角色查同一件道具，伺服器回的掛售完全相同。
-    ///         而「最低價是不是自己的」這個唯一跟角色有關的判斷，發生在**讀取時**
-    ///         （<c>BatchReprice.ownRetainerIds</c> 每批重算後才過濾），快取存的是**未經任何
-    ///         過濾的原始 listings**，所以換角色之後這份資料仍然完全正確。
-    ///         舊版把角色 ID 放進身分，等於使用者每換一個角色就把整份快取清光 ——
-    ///         而「一輪整理所有角色的包包」正是這個外掛最主要的使用情境。
-    ///         </para></item>
-    ///   <item><b>雇員</b>：掛單裡帶 RetainerId，「最低價是不是自己的」是拿**當下**的雇員清單
-    ///         去比對的（BatchReprice.ownRetainerIds 每批重算），所以換雇員不影響快取正確性。</item>
-    ///   <item><b>「沒人在賣」</b>：零掛單的道具伺服器根本不送 offerings 封包，
-    ///         沒辦法從被動觀察推斷出來，所以**只有我們自己走完 history-grace 流程確認過**的
-    ///         空結果才會進快取（<see cref="StoreConfirmedEmpty"/>）。被動路徑永遠不寫空結果。</item>
-    /// </list>
-    /// </para>
+    /// 🔴 市場板是**每個世界各自一份**，所以整份快取綁在**世界**上，世界一變就整份清掉；世界 ID 由 Framework tick 讀取後快取起來，封包處理器只讀這個欄位。
+    /// 🔑 身分刻意**不含角色 ID**：快取存的是未經任何過濾的原始 listings，「最低價是不是自己的」在讀取時才逐格過濾，所以換角色之後這份資料仍然完全正確。
+    /// ⚠️ 零掛單的道具伺服器根本不送 offerings 封包，所以只有我們自己確認過的空結果才會進快取（<see cref="StoreConfirmedEmpty"/>）；被動路徑永遠不寫空結果。
     /// </summary>
     internal static class MarketDataCache
     {
@@ -91,12 +48,8 @@ namespace Marketbuddy
         /// </summary>
         /// <remarks>
         /// 🔴 <b>價格 0 代表「這個品質沒有掛單」</b>,不是「免費」——真實掛單不可能是 0 gil。
-        /// 這樣就不必用可空值型別:CallGate 的 <c>InvokeFunc</c> 對 null 走 <c>(TRet)result</c>,
-        /// 回傳可空**值**型別時會擲一個看起來與 IPC 完全無關的 NullReferenceException。
-        /// <para>
         /// ⚠️ <c>ListingCount*</c> 是<b>第一頁</b>的筆數,不是「總共有幾件在賣」——
         /// 後續分頁刻意不覆蓋第一頁(見 <see cref="OnOfferingsReceived"/>)。要當「至少 N 件」讀。
-        /// </para>
         /// </remarks>
         internal sealed class PublicSnapshot
         {
@@ -132,20 +85,11 @@ namespace Marketbuddy
         /// <see cref="Cache"/> 的<b>對外鏡像</b>。這不是快取本身,是另一份只放摘要的表。
         /// </summary>
         /// <remarks>
-        /// 🔴🔴 <b>為什麼要有兩份。</b><see cref="Cache"/> 是裸 <c>Dictionary</c>,只被遊戲
-        /// 主執行緒碰(<c>OfferingsReceived</c> 是遊戲函式 hook、<c>Framework.Update</c>、
-        /// 以及 ImGui 的繪製,三者都在主執行緒)。而 <b>IPC 端點跑在呼叫端外掛的執行緒上</b>,
-        /// 讓它去讀 <c>Cache</c> 的失敗形式不是「拿到舊值」而是<b>字典本身壞掉</b>,
-        /// 那會連帶弄壞批次改價與查價——而且例外可能被既有的 catch 吞成「這件查不到價」。
-        /// <para>
+        /// 🔴🔴 <b>為什麼要有兩份。</b><see cref="Cache"/> 是裸 <c>Dictionary</c>、只被遊戲主執行緒碰，而 IPC 端點跑在呼叫端外掛的執行緒上。
         /// ⇒ 這裡另外維護一份 <c>ConcurrentDictionary</c>:<b>寫入端仍然只有那條主執行緒</b>
         /// (與 <c>Cache</c> 的每一次異動一對一),讀取端可以是任何執行緒。
-        /// <b>既有的 <c>Cache</c> 讀寫路徑一個字都沒有改</b>,所以改價/查價的行為完全不變。
-        /// </para>
-        /// <para>
         /// 🔴 這裡刻意<b>不用鎖</b>:沒有鎖就不可能發生「鎖內呼叫 ImGui/做 I/O」那類問題,
         /// 而 <c>PublicSnapshot</c> 不可變 ⇒ 讀到的物件內容不會在讀的過程中被換掉。
-        /// </para>
         /// </remarks>
         private static readonly ConcurrentDictionary<uint, PublicSnapshot> Published = new();
 
