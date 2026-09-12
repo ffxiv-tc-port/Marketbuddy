@@ -16,15 +16,10 @@ namespace Marketbuddy
 {
     /// <summary>
     /// 一件道具的「歷史最近賣出價」目前是什麼狀態。
-    ///
-    /// <para>
     /// 🔴 <see cref="Unknown"/> 刻意給明確的 0：沒有零值的列舉會讓 <c>default</c> 落在一個
     /// 無效值上，而那種壞法是靜默的。
-    /// </para>
-    /// <para>
     /// 🔑 「查不到」（<see cref="NoData"/>）與「查詢中」（<see cref="Loading"/>）是<b>兩件事</b>，
     /// 而且兩個都必須在畫面上分得出來。把任何一種畫成 0 或空白會被讀成「這件賣過 0 gil」。
-    /// </para>
     /// </summary>
     internal enum LastSoldState
     {
@@ -64,47 +59,14 @@ namespace Marketbuddy
     /// <summary>
     /// 「歷史最近賣出價」的來源：Universalis 的 <c>aggregated</c> 端點，取<b>整個資料中心</b>的
     /// <c>recentPurchase</c>。
-    ///
-    /// <para>
     /// 🔴 <b>範圍是「整個資料中心，但扣掉世界排除清單上的世界」</b>，不是整個資料中心。
-    /// 理由是實機事實：台服的拉姆（4034）已經停止營運，而一件道具只要自它關閉之後在其他
-    /// 世界都沒賣出過，它留下的舊成交價就會變成重掛的定價依據。清單用的是設定裡
-    /// <b>既有</b>那一份（<see cref="Configuration.PriceSurveyExcludedWorlds"/>），
-    /// 這裡不另外判斷哪個世界該不該用。
-    /// </para>
-    /// <para>
-    /// ⚠️ 被排除之後<b>不會</b>拿別的來源代打：查不到可用的成交就不定這一件，
-    /// 呼叫端落回它原本的市場比價。沒有成交紀錄的往往正是稀有的東西，拿別的來源湊會賤賣。
-    /// </para>
-    ///
-    /// <para>
     /// 🔴 <b>完全不碰遊戲內的市場查詢。</b>這條路徑不送 <c>InfoProxyItemSearch.RequestData()</c>、
     /// 不開任何原生視窗、不掛 hook、不碰任何封包——只有一個對公開 HTTP API 的 GET。
-    /// 因此它也天生避開了台服「查詢被拒絕時完全靜默」那個已知問題。
-    /// </para>
-    ///
-    /// <para>
-    /// 🔑 為什麼不去問 PriceInsight：2026-09-09 逐字掃過 <c>D:/ffxiv-tc-port/PriceInsight</c>
-    /// 的全部 <c>.cs</c>，<b>它一個 IPC 端點都沒有提供</b>（<c>Ipc</c>／<c>CallGate</c> 零命中），
-    /// 所以「跟 PriceInsight 要價格」在技術上不存在。它自己也是打同一個 Universalis 端點，
-    /// 所以這裡直接打同一個端點得到的是同一份資料。
-    /// </para>
-    ///
-    /// <para>
     /// 執行緒：<see cref="Request"/>／<see cref="EnsureWorldNames"/> 只從 framework 執行緒呼叫
     /// （它們會讀遊戲資料表）；HTTP 與解析全在執行緒池上，<b>續行不會回到 framework 執行緒，
     /// 所以那一段不碰任何遊戲狀態</b>——世界名稱是在 framework 執行緒先建好的唯讀字典。
-    /// <see cref="TryGet"/>／<see cref="StateOf"/> 讀的是 <see cref="ConcurrentDictionary{TKey,TValue}"/>，
-    /// 任何執行緒都可以呼叫。
-    /// 🔴 刻意<b>不</b>用 <c>ECommons.Throttlers.EzThrottler</c>（本外掛也根本沒有 ECommons 相依）：
-    /// 節流是這裡自己的 <see cref="MinRequestGapMs"/> ＋ <see cref="Gate"/>。
-    /// </para>
-    /// <para>
     /// 🔴 <b>例外只有一個</b>：掛售發生的那個世界（家世界）<b>永遠不會</b>被排除，
     /// 即使使用者把它勾進清單裡（見 <see cref="Configuration.BuildPricingExclusions()"/>）。
-    /// 那是自己要定價的那一個市場，把它排掉之後畫面上只會顯示「查不到成交」，
-    /// 使用者看不出來那是自己勾出來的。
-    /// </para>
     /// </summary>
     internal static class LastSoldPriceSource
     {
@@ -116,13 +78,7 @@ namespace Marketbuddy
 
         /// <summary>
         /// 單一 HTTP 請求的時間預算。
-        ///
-        /// <para>
-        /// ⚠️ 2026-09-10 校對後從 15 秒改成 30 秒：原本的 15 秒比兩個「實測會成功」的參考實作
-        /// 都短——PriceInsight 用 <c>HttpClient</c> 的預設值（100 秒），Artisan 明確設 30 秒，
-        /// 而且 Artisan 的註解記著它是從 10 秒調上來的，原因是「10 秒的預算都花在排隊等前一個
         /// 請求上」。這個值只管請求本身；呼叫端（重掛批次）另有自己的 25 秒等待上限。
-        /// </para>
         /// </summary>
         private const int RequestTimeoutSeconds = 30;
 
@@ -137,25 +93,13 @@ namespace Marketbuddy
 
         /// <summary>
         /// 連續失敗之後的退避（毫秒）。
-        ///
-        /// <para>
-        /// ⚠️ 2026-09-10 從 15 秒改成 30 秒。理由是同一台機器上的實機證據：Universalis 在
-        /// 2026-09-09 一天內對 InventoryTools 吐了 95 次 Cloudflare 錯誤頁（回應內容逐字是
-        /// <c>error code: 520</c>）。服務自己在喘的時候，加快重問只會讓它更喘；
-        /// InventoryTools 在同樣的情境下用的也是 30 秒。
         /// 使用者看得到的差別只有「這段期間重掛照原本的市場比價進行」，那本來就是安全的退路。
-        /// </para>
         /// </summary>
         private const int FailureBackoffMs = 30000;
 
         /// <summary>
         /// 暫時性錯誤（408／429／5xx）之後重試一次的等待（毫秒）。
-        ///
-        /// <para>
         /// 📌 Universalis 是免費的公開服務，偶發的 429／504／520 是常態不是故障。
-        /// <b>兩個實測會成功的參考實作都會重試</b>（PriceInsight 退 2 秒重試一次；
-        /// Artisan 退 2／5／10 秒重試三次），原本這裡一次都不重試，是校對出來的落差。
-        /// </para>
         /// </summary>
         private const int TransientRetryDelayMs = 2000;
 
@@ -210,18 +154,13 @@ namespace Marketbuddy
 
         /// <summary>
         /// 排除清單的一份不可變快照。
-        ///
-        /// <para>
         /// 🔴 <see cref="Configuration.PriceSurveyExcludedWorlds"/> 是一個裸
         /// <c>List&lt;uint&gt;</c>，勾選框在<b>繪製執行緒</b>上改它，而這裡的解析跑在
         /// 執行緒池上 ⇒ <b>絕不</b>從背景執行緒直接讀那個 List。作法與待處理清單重算
         /// （<c>PendingActionsBuilder</c>）同一個形狀：在 framework 執行緒當場拍一份快照，
         /// 之後全程只讀快照。
-        /// </para>
-        /// <para>
         /// 🔑 清單與版號綁在<b>同一個物件</b>裡：兩個分開的 volatile 欄位讀起來不是原子的，
         /// 會出現「拿到新清單卻配到舊版號」那種對不上的組合。
-        /// </para>
         /// </summary>
         internal sealed class ExclusionSnapshot(
             int configRevision, uint sellingWorldId, IReadOnlySet<uint> worlds)
@@ -231,11 +170,9 @@ namespace Marketbuddy
             /// <summary>
             /// 這份快照的編號。🔴 <b>設定的版號或掛售所在的世界任一變了就是新的一號</b>，
             /// 所以快取裡的答案只要編號對不上就一律作廢重問。
-            /// <para>
             /// ⚠️ 這<b>不是</b> <see cref="Configuration.WorldExclusionRevision"/>：換成一個
             /// 家世界不同的角色時那個版號不會動，但「該扣掉哪個世界」變了——只比版號會拿到
             /// 一份對不上的舊答案，而那種壞法是靜默的。
-            /// </para>
             /// </summary>
             public int Revision { get; } = Interlocked.Increment(ref stampCounter);
 
@@ -267,13 +204,9 @@ namespace Marketbuddy
 
         /// <summary>
         /// 目前生效的排除清單快照。
-        ///
-        /// <para>
         /// 🔴 初始版號刻意是 <c>-1</c>（<see cref="Configuration.WorldExclusionRevision"/> 最小是 0）：
         /// 這樣第一次 <see cref="Request"/> 一定會去同步一次。寫成 0 會把「還沒問過設定」
         /// 誤當成「清單是空的」——而使用者的清單在版號 0 的時候就可能已經有內容了
-        /// （出廠排除是上一次遊戲期間套用並存檔的，本次啟動版號仍是 0）。
-        /// </para>
         /// </summary>
         private static volatile ExclusionSnapshot exclusion = new(-1, 0, new HashSet<uint>());
 
@@ -312,17 +245,11 @@ namespace Marketbuddy
 
         /// <summary>
         /// Universalis 不認得的世界 id。
-        ///
-        /// <para>
         /// 📌 台服的 <c>World</c> 資料表裡混著測試世界與已退役世界，而<b>台服每一個世界的
         /// <c>IsPublic</c> 都是 false</b>（活的那八個也是），所以那個旗標當不了過濾條件。
-        /// 實機 log 逐字證實 Universalis 對 4000／4001／4002／4020／4021／4023／4024 回 404。
         /// ⇒ 只有 Universalis 自己答得出來，記住它拒絕過的世界就不要再問。
-        /// </para>
-        /// <para>
         /// 刻意只活在這一次遊戲期間、不落地：重載會重新探一次，一次連線異常不會永久註銷一個
         /// 真的存在的世界。
-        /// </para>
         /// </summary>
         private static readonly ConcurrentDictionary<uint, byte> UnknownWorlds = new();
 
@@ -479,12 +406,9 @@ namespace Marketbuddy
 
         /// <summary>
         /// 這件道具目前是什麼狀態。任何執行緒都可以呼叫。
-        ///
-        /// <para>
         /// 🔴 照<b>舊版</b>排除清單算出來的答案一律回 <see cref="LastSoldState.Unknown"/>。
         /// 那不是「沒有資料」：呼叫端看到 Unknown 會自己補排一次查詢，所以這條路的語意是
         /// 「重新問一次」，而落在中間的那幾幀畫面上顯示的是「查詢中」而不是某個舊價。
-        /// </para>
         /// </summary>
         internal static LastSoldState StateOf(uint itemId)
             => Cache.TryGetValue(itemId, out var entry) && entry.ExclusionRevision == exclusion.Revision
@@ -536,18 +460,9 @@ namespace Marketbuddy
 
         /// <summary>
         /// 這件道具「<b>有</b>成交紀錄，但能用的那幾筆全部來自被排除的世界」嗎。
-        ///
-        /// <para>
         /// 🔑 存在的理由只有一個：它與「從來沒賣過」<b>必須在畫面上分得出來</b>。
         /// 兩者的處置相同（都不定價、落回原本的市場比價），但原因完全不同——
         /// 前者只要把那個世界勾回來就有價格了，後者勾什麼都沒用。
-        /// 把兩件事畫成同一個符號等於叫使用者去猜。
-        /// </para>
-        /// <para>
-        /// ⚠️ 只有在 <see cref="TryGet"/> 回 false 的時候問這個才有意義：
-        /// 「忽略優質狀態」開著而另一個品質有可用成交時，<see cref="TryGet"/> 會給出價格，
-        /// 這時本旗標仍可能為 true（某一個品質被排除了），但那並不是使用者要看的事。
-        /// </para>
         /// </summary>
         internal static bool IsSaleExcluded(uint itemId, bool hq, bool ignoreQuality)
         {
@@ -564,21 +479,12 @@ namespace Marketbuddy
 
         /// <summary>
         /// 這件道具目前的最低掛售價：本世界一個、整個資料中心一個。
-        ///
-        /// <para>
         /// 🔴 兩個都是 <c>MarketPricePoint?</c>：<b>「查不到」是 null，不會是 0</b>。
-        /// </para>
-        /// <para>
         /// ⚠️ 這裡<b>一律照這一格自己的品質</b>取，不受「忽略優質狀態」影響：
         /// 那個選項的用途是找「最近賣出價」，而拿自己的優質品去跟普通品的最低價比是錯的比較。
-        /// </para>
-        /// <para>
         /// 📌 <b>這兩個值刻意不套世界排除清單</b>，而且也不受清單版號影響。
-        /// 排除清單的用途是「不要拿這個世界的價格幫你定價」，而最低掛售價是純顯示的現況
-        /// （使用者拿它判斷要不要降價），把它藏起來只會讓畫面少講一件正在發生的事。
         /// ⚠️ 而且資料中心那一半是 Universalis <b>伺服器端算好的單一最小值</b>，
         /// 手上沒有原始清單，過濾不掉——只過濾得到的那一半會變成「時對時錯而且分不出來」。
-        /// </para>
         /// </summary>
         internal static bool TryGetMinPrices(uint itemId, bool hq,
             out MarketPricePoint? world, out MarketPricePoint? datacenter)
@@ -595,19 +501,10 @@ namespace Marketbuddy
 
         /// <summary>
         /// 無條件捨去到百位。
-        ///
-        /// <para>
         /// 🔴 <b>全程整數運算</b>（<c>p / 100 * 100</c>）：浮點數在邊界值上會給錯答案，
         /// 而價格是錢。
-        /// </para>
-        /// <para>
         /// 捨去之後小於 100 就用 100——絕不掛出 0 gil。上限夾在
         /// <see cref="Configuration.MAX_PRICE"/>。
-        /// </para>
-        /// <para>
-        /// 手算驗過的邊界：0→100、99→100、100→100、101→100、980→900、12345→12300、
-        /// 999999999→999999900。
-        /// </para>
         /// </summary>
         internal static uint RoundDownToHundred(long unitPrice)
         {
@@ -825,8 +722,6 @@ namespace Marketbuddy
                 var unresolved = new HashSet<uint>();
 
                 // 400＝這一批的道具在 Universalis 的「可上市清單」裡一件都不存在。
-                // 🔑 2026-09-10 用 curl 直打實測過這個端點的兩種形狀：只要有「任何一件」解得開
-                //    就回 200，解不開的那幾件放進 failedItems；「整批都解不開」才回 400。
                 // ⚠️ 但「aggregated 解不開」不等於「沒有市場資料」——同日實測道具 5730（染料）
                 //    在 aggregated 是 failedItems，在 v3 overview 卻有 38 筆掛售、133 筆成交。
                 //    ⇒ 這裡不再直接判「沒有資料」，改交給 v3 補查（見 ResolveWithOverviewAsync）。
@@ -1007,14 +902,9 @@ namespace Marketbuddy
 
         /// <summary>
         /// 送一個 GET；遇到暫時性狀態就退一下再試一次（只重試一次）。
-        ///
-        /// <para>
         /// 伺服器自己在 <c>Retry-After</c> 裡給建議時以它為準，夾在
         /// <see cref="MaxRetryAfterSeconds"/>；沒給就用 <see cref="TransientRetryDelayMs"/>。
-        /// </para>
-        /// <para>
         /// 🔴 回傳的 <see cref="HttpResponseMessage"/> 由呼叫端負責釋放。
-        /// </para>
         /// </summary>
         private static async Task<HttpResponseMessage> SendWithRetryAsync(
             HttpClient client, string url, CancellationToken token)
@@ -1042,13 +932,10 @@ namespace Marketbuddy
         /// <summary>
         /// aggregated 端點答不出來的那幾件，改用 v3 <c>market/overview</c> 端點逐件補查。
         /// 回傳<b>真的補到資料</b>的道具 id（它們已經寫進 <see cref="Cache"/>）。
-        ///
-        /// <para>
         /// 🔑 為什麼需要這條路：aggregated 端點會擋掉不在它「可上市清單」裡的道具，而台服有一批
         /// 道具（實測是 5730 起的那批舊染料，還有 30118／30121／30122／48172）就落在那個縫裡。
         /// 對這些道具，aggregated 回 <c>failedItems</c>／400，v3 卻答得出來。
         /// 沒有這條路，使用者看到的是「這件沒賣過」——而那是錯的。
-        /// </para>
         /// </summary>
         private static async Task<HashSet<uint>> ResolveWithOverviewAsync(
             uint worldId, IReadOnlyCollection<uint> itemIds, ExclusionSnapshot ex,
@@ -1128,19 +1015,11 @@ namespace Marketbuddy
 
         /// <summary>
         /// 目前世界所屬資料中心有哪些世界——直接<b>問 Universalis 自己</b>。
-        ///
-        /// <para>
         /// 🔴 刻意<b>不</b>從遊戲的 <c>World</c> 資料表推：台服的資料表把測試世界與已退役世界
         /// 跟活的放在同一個資料中心底下，而每一個世界的 <c>IsPublic</c> 都是 false，
         /// 光看資料表分不出來（PriceInsight 就是這樣掉進去，只好逐個世界試到 404 再排除）。
-        /// 2026-09-10 實測 Universalis 的 <c>data-centers</c>：陸行鳥＝4028~4035 這八個，
-        /// 剛好就是活的那八個。
-        /// </para>
-        /// <para>
         /// ⚠️ 只取<b>數字</b>，絕不用資料中心或世界的名字組 URL。同日實測逐字驗過：
         /// <c>/api/v2/利維坦/36256</c> 回 <b>404</b>，而 <c>/api/v2/4030/36256</c> 回 200 有資料。
-        /// （這正是同一台機器上 InventoryTools 查價在台服拿不到東西的原因。）
-        /// </para>
         /// </summary>
         private static async Task<uint[]> GetDataCenterWorldsAsync(
             HttpClient client, uint worldId, CancellationToken token)
@@ -1185,23 +1064,12 @@ namespace Marketbuddy
 
         /// <summary>
         /// 把 v3 overview 的原始掛售／成交清單壓成與 aggregated 端點<b>同一個形狀</b>。
-        ///
-        /// <para>
-        /// 🔑 2026-09-10 拿一件<b>兩個端點都查得到</b>的道具校準過（道具 36256、世界 4030），
-        /// 四個值逐一相同：本世界最低價 130、資料中心最低價 99、最近成交單價 160、
-        /// 時間戳 1788968528000（世界 4030）。沒有這一步就分不出「換算對」與
-        /// 「換算錯但看起來很合理」。
-        /// </para>
-        /// <para>
         /// ⚠️ v3 的掛售 <c>price</c> 是<b>含稅</b>的每單位價而且是浮點數，遊戲介面與 aggregated
         /// 端點用的則是<b>未稅整數價</b> ⇒ 一律從 <c>total</c>／<c>quantity</c> 還原。
         /// 成交紀錄的 <c>price</c> 本來就是未稅單價，不要再換算。
-        /// </para>
-        /// <para>
         /// ⚠️ v3 每個世界最多回 20 筆成交，而且留下的是<b>最新</b>的 20 筆（同日實測：最舊的一筆
         /// 落在 2～4 天前）⇒ 拿它取「最近一次成交」是安全的；拿它算平均價或成交速度<b>不安全</b>，
         /// 所以這裡一個都不算。
-        /// </para>
         /// </summary>
         private static ItemEntry? BuildFromOverview(OverviewDto overview, uint worldId,
             ExclusionSnapshot ex)
@@ -1242,11 +1110,8 @@ namespace Marketbuddy
 
         /// <summary>
         /// 這個品質最近成交的那一筆；一筆都沒有就回 null，<b>絕不回 0</b>。
-        ///
-        /// <para>
         /// 🔴 被排除的世界一筆都不看。這裡與 aggregated 那條路的差別是：這裡拿得到
         /// <b>原始</b>成交清單，所以挑出來的真的是「排除清單以外的最近一次成交」。
-        /// </para>
         /// </summary>
         /// <param name="excludedOnly">
         /// true＝這個品質有成交紀錄，但<b>每一筆</b>都落在被排除的世界上。
@@ -1339,11 +1204,8 @@ namespace Marketbuddy
 
         /// <summary>
         /// 第一次查成功時報告一行，之後安靜。
-        ///
-        /// <para>
         /// 🔑 這一行存在的理由：在它之前，這個來源<b>只有失敗才寫 log</b>，成功路徑完全靜默
         /// ⇒「log 裡沒有訊息」同時代表「一切正常」與「一次都沒跑過」，兩者分不出來。
-        /// </para>
         /// </summary>
         private static void LogFirstSuccess(int asked, int unresolved, int recovered)
         {
@@ -1392,8 +1254,6 @@ namespace Marketbuddy
             // （dc 的範圍涵蓋本世界，所以這個退路只會多給資料，不會少給）。
             // 🔴 但排除清單上的世界一筆都不採用：拉姆（4034）已經停止營運，而一件道具
             //    只要「自它關閉之後在其他世界都沒賣出過」，重掛就會照拉姆留下的舊價定價。
-            // ⚠️ dc 被擋掉時退回 world 範圍<b>不是</b>「找別的價來湊」：那仍然是一筆真的
-            //    成交紀錄（本世界自己的），只是範圍比較窄；這個退路本來就存在。
             //    兩個範圍都沒有可用的成交時就回 null，呼叫端落回原本的市場比價。
             var dropped = false;
             var entry = UsablePurchase(purchase.dc, ex, 0u, ref dropped)
@@ -1416,17 +1276,12 @@ namespace Marketbuddy
 
         /// <summary>
         /// 一筆 <c>recentPurchase</c> 能不能用：有價格，而且成交的世界不在排除清單上。
-        ///
-        /// <para>
         /// ⚠️ <paramref name="fallbackWorldId"/> ＝「回應沒帶 <c>worldId</c> 時當成哪個世界」。
         /// <c>world</c> 範圍就是這次查詢的世界；<c>dc</c> 範圍<b>沒有</b>合理的替代值 ⇒ 傳 0，
         /// 而 0 一律當成「不知道」＝不排除。
-        /// </para>
-        /// <para>
         /// 🔴 那是本次過濾唯一一個縫。Universalis 對 <c>dc</c> 範圍照 schema 一定帶
         /// <c>worldId</c>（同一個欄位這裡本來就在讀，用來顯示成交世界），真的缺了的話
         /// <see cref="NoteWorldlessDc"/> 會寫一行讓它<b>看得見</b>，而不是靜默照用。
-        /// </para>
         /// </summary>
         private static EntryDto? UsablePurchase(EntryDto? entry, ExclusionSnapshot ex,
             uint fallbackWorldId, ref bool dropped)
