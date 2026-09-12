@@ -14,7 +14,7 @@ using static Marketbuddy.Common.Dalamud;
 namespace Marketbuddy
 {
     /// <summary>
-    /// 「即時出售品清單」——我們自己畫的雇員掛單表，貼在遊戲「出售品」視窗旁邊。
+    /// 「即時出售品清單」——我們自己畫的僱員掛單表，貼在遊戲「出售品」視窗旁邊。
     /// 為什麼需要：批次改價是走 <c>InventoryManager.SetRetainerMarketPrice()</c> 直接寫容器的
     /// （刻意不開任何原生視窗，那才是它比手動快的原因），所以遊戲的 <c>RetainerSellList</c>
     /// **不會自己重繪**——畫面停在開窗當下的價格，剛上架的道具會一直顯示 999,999,999，

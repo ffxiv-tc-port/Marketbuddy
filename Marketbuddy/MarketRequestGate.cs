@@ -21,7 +21,7 @@ namespace Marketbuddy
         /// </summary>
         private const int StartIntervalMs = 2000;
 
-        /// <summary>撴寬的級距。往回收時至少也收這麼多。</summary>
+        /// <summary>撐寬的級距。往回收時至少也收這麼多。</summary>
         private const int StepMs = 300;
 
         /// <summary>保險絲的天花板。只有在拒絕成群時才會爬到這裡，之後會自動衰減回地板。</summary>
@@ -32,7 +32,7 @@ namespace Marketbuddy
         private const int ClusterWindow = 5;
 
         /// <summary>
-        /// 觀察窗內達到這個拒絕次數就視為「成群」，立刻撴寬。
+        /// 觀察窗內達到這個拒絕次數就視為「成群」，立刻撐寬。
         /// </summary>
         private const int ClusterRefusals = 3;
 
@@ -41,7 +41,7 @@ namespace Marketbuddy
         private const int RateWindowRequests = 50;
 
         /// <summary>
-        /// 觀察窗內達到這個拒絕次數就撴寬。地板 2000 時損益兩平率＝300/2300＝**13.0%**，
+        /// 觀察窗內達到這個拒絕次數就撐寬。地板 2000 時損益兩平率＝300/2300＝**13.0%**，
         /// 這裡取 10/50 ＝ **20%**（≈1.5 倍損益兩平）。
         /// ⚠️ 正常運行（2000 ms、實測 0% 拒絕）下這條路徑**永遠不會走到**。
         /// </summary>
@@ -63,11 +63,11 @@ namespace Marketbuddy
 
         private static int intervalMs = StartIntervalMs;
 
-        /// <summary>目前往下探需要幾次請求；從地板被撴寬時加倍，在地板撐久了減半。</summary>
+        /// <summary>目前往下探需要幾次請求；從地板被撐寬時加倍，在地板撐久了減半。</summary>
         private static int narrowAfter = BaseNarrowAfter;
 
         /// <summary>
-        /// 距離上一次改動間隔（撴寬或往回收）過了幾次請求。
+        /// 距離上一次改動間隔（撐寬或往回收）過了幾次請求。
         /// 🔴 刻意**不是**「連續乾淨的次數」：那在有雜訊時永遠湊不滿，往回收會走不回來。
         /// </summary>
         private static int requestsSinceChange;
@@ -133,7 +133,7 @@ namespace Marketbuddy
             }
 
             // 已經在地板上：整個乾淨窗都乾淨就讓之前的懲罰逐步失效，否則一次爆發會讓
-            // 整輪（實機一輪 9 個雇員、約 180 次請求）都不敢再往下探。
+            // 整輪（實機一輪 9 個僱員、約 180 次請求）都不敢再往下探。
             if (narrowAfter > BaseNarrowAfter && RefusalsInLast(CleanWindowRequests) == 0)
             {
                 requestsSinceChange = 0;
@@ -165,7 +165,7 @@ namespace Marketbuddy
             if (!inCluster && !overRate)
             {
                 // 🔑 這才是常態路徑：實機兩輪乾淨的批次各只有 1 次孤立的拒絕（2/151）。
-                // 代價＝一個閘門週期；撴寬的代價＝之後每一件都多 StepMs，貴得多。
+                // 代價＝一個閘門週期；撐寬的代價＝之後每一件都多 StepMs，貴得多。
                 absorbedRefusals++;
                 MarketDiag.Trace(
                     $"{Diag} GATE absorbed a refusal at send-gap {gap} ms " +
@@ -183,7 +183,7 @@ namespace Marketbuddy
                 return;
             }
 
-            // 從地板被撴寬 ⇒ 上一次往下探收得太早，下一次要更多證據才准再探。
+            // 從地板被撐寬 ⇒ 上一次往下探收得太早，下一次要更多證據才准再探。
             var penaltyNote = string.Empty;
             if (intervalMs == StartIntervalMs && narrowAfter < MaxNarrowAfter)
             {
@@ -219,7 +219,7 @@ namespace Marketbuddy
             var rate = 100.0 * seenRefusals / seenRequests;
 
             // 🔑 有效間隔要用**目前運行點**的拒絕率算，不能用整場的：整場的率混了
-            // 撴寬前後兩種間隔，會把現在跑得好不好糊掉。窗內率才代表「現在」。
+            // 撐寬前後兩種間隔，會把現在跑得好不好糊掉。窗內率才代表「現在」。
             var windowSeen = Math.Min(RateWindowRequests, recentFilled);
             var windowRefused = RefusalsInLast(RateWindowRequests);
             var windowRate = windowSeen == 0 ? 0.0 : (double)windowRefused / windowSeen;

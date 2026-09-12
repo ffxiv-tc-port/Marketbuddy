@@ -145,17 +145,6 @@ namespace Marketbuddy
         public Vector2 RetainerPanelOffset = new Vector2(4, 0);
 
         /// <summary>
-        /// 一整輪市場重掛跑完時，透過 IPC 請「塔塔露誇獎」(TataruPraise) 念一句。
-        /// </summary>
-        /// <remarks>
-        /// 📌 純通知：不觸發任何自動化、不改任何重掛行為。沒裝 TataruPraise 時整條路徑是 no-op
-        /// （見 <see cref="TataruPraiseIPC"/>），所以預設開著對沒裝的人完全沒有影響。
-        /// <para>
-        /// ⚠️ 只有「整輪跑完」才響：全僱員重掛巡迴收尾響一次，單僱員重掛（不在巡迴中）收尾響一次；
-        /// 巡迴途中每個僱員各自的批次收尾<b>不</b>響，快速上架的單件定價也不響——那些會變成洗版。
-        /// </para>
-        /// </remarks>
-        /// <summary>
         /// 多角色重掛：與 AutoRetainer 的多開模式協作，在 AR 每處理完一個角色、
         /// 準備登出換下一角之前，接手跑一輪全僱員重掛巡迴。
         /// </summary>
@@ -166,6 +155,17 @@ namespace Marketbuddy
         /// </remarks>
         public bool MultiCharTourEnabled = false;
 
+        /// <summary>
+        /// 一整輪市場重掛跑完時，透過 IPC 請「塔塔露誇獎」(TataruPraise) 念一句。
+        /// </summary>
+        /// <remarks>
+        /// 📌 純通知：不觸發任何自動化、不改任何重掛行為。沒裝 TataruPraise 時整條路徑是 no-op
+        /// （見 <see cref="TataruPraiseIPC"/>），所以預設開著對沒裝的人完全沒有影響。
+        /// <para>
+        /// ⚠️ 只有「整輪跑完」才響：全僱員重掛巡迴收尾響一次，單僱員重掛（不在巡迴中）收尾響一次；
+        /// 巡迴途中每個僱員各自的批次收尾<b>不</b>響，快速上架的單件定價也不響——那些會變成洗版。
+        /// </para>
+        /// </remarks>
         public bool TataruPraiseOnRelistDone = true;
 
         /// <summary>

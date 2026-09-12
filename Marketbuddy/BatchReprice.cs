@@ -95,7 +95,7 @@ namespace Marketbuddy
             /// <summary>
             /// 上一次嘗試什麼封包都沒收到，暫定判為「被吞掉」。判決刻意延後到真的要送重試
             /// 的那一刻才交給閘門——因為在那之前遲到的答案還可能落進 MarketDataCache 把
-            /// 這次重試整個省掉，那就代表它根本沒被吞，不該拿去撴寬閘門。
+            /// 這次重試整個省掉，那就代表它根本沒被吞，不該拿去撐寬閘門。
             /// </summary>
             public bool RefusalPending;
             /// <summary>暫定被吞掉的那次請求，距離前一次送出的實際毫秒數。</summary>
@@ -173,7 +173,7 @@ namespace Marketbuddy
         private DateTime lastDataReceivedAt = DateTime.MinValue;
 
         /// <summary>
-        /// 這一批（＝這一個雇員的一輪，或 QuickLister 的單件）開始的時間。
+        /// 這一批（＝這一個僱員的一輪，或 QuickLister 的單件）開始的時間。
         /// 只用來替 CACHE-HIT 標出 within-batch / cross-batch，沒有行為作用。
         /// </summary>
         private DateTime batchStartedAt = DateTime.MinValue;
@@ -400,15 +400,15 @@ namespace Marketbuddy
         }
 
         /// <summary>
-        /// Runs the full pipeline (compare via cache/request, undercut,
-        /// thresholds, delist) for one just-quick-listed slot that is parked at
-        /// the price cap. Returns false when the engine cannot start right now.
-        /// </summary>
-        /// <summary>
         /// 上一次 <see cref="StartQuickReprice"/> 被拒絕的原因，供 QuickLister 記進診斷 log。
         /// </summary>
         public string LastStartRefusalReason { get; private set; } = string.Empty;
 
+        /// <summary>
+        /// Runs the full pipeline (compare via cache/request, undercut,
+        /// thresholds, delist) for one just-quick-listed slot that is parked at
+        /// the price cap. Returns false when the engine cannot start right now.
+        /// </summary>
         public bool StartQuickReprice(short slotIndex)
         {
             // requireListedItems: false —— 我們已經指名了 slotIndex，而且下面就會去讀
@@ -619,8 +619,8 @@ namespace Marketbuddy
                     if (MarketDataCache.TryGet(job.ItemId, conf.MarketDataCacheSeconds, out var cachedListings,
                             out var cacheAgeMs))
                     {
-                        // 🔑 scope 讓事後分得出「這一輪自己剛查過」與「上一輪／上一個雇員留下來的」。
-                        // 使用者的實際流程是反覆補滿同一個雇員再換下一個，跨輪次的命中才是
+                        // 🔑 scope 讓事後分得出「這一輪自己剛查過」與「上一輪／上一個僱員留下來的」。
+                        // 使用者的實際流程是反覆補滿同一個僱員再換下一個，跨輪次的命中才是
                         // 1800 秒 TTL 真正的價值所在，而單一批次內的樣本永遠看不到它。
                         var batchAgeMs = batchStartedAt == DateTime.MinValue
                             ? -1
@@ -645,7 +645,7 @@ namespace Marketbuddy
 
                     // 🔴 上一次真的被吞掉/被拒絕的**判決點**。走到這裡代表已經過了退避、
                     // 也確認快取裡沒有遲到的答案可用，現在真的要再問一次同一件事。
-                    // ⚠️ 必須在下面的 IsReady 之前呼叫：放在閘門檢查之後才呼叫，撴寬對「這一次重試」完全無效。
+                    // ⚠️ 必須在下面的 IsReady 之前呼叫：放在閘門檢查之後才呼叫，撐寬對「這一次重試」完全無效。
                     if (job.RefusalPending)
                     {
                         job.RefusalPending = false;
@@ -678,7 +678,7 @@ namespace Marketbuddy
                     }
 
                     // ⚠️ 拒絕的判決已經在 SlotPhase.Throttle 下過了（刻意在閘門檢查之前），
-                    // 這裡不要重複，否則撴寬又會晚一拍。
+                    // 這裡不要重複，否則撐寬又會晚一拍。
 
                     job.Attempt++;
 
@@ -779,7 +779,7 @@ namespace Marketbuddy
 
                         // 判決仍然延到真的要重送的那一刻才交給閘門（見 SlotPhase.Request）：
                         // 中間若有遲到的答案落進 MarketDataCache，那次重試會整個被省掉，
-                        // 也就不該拿這次拒絕去撴寬閘門。
+                        // 也就不該拿這次拒絕去撐寬閘門。
                         job.RefusalPending = true;
                         job.RefusalGapMs = job.SendGapMs;
 
@@ -1557,7 +1557,7 @@ namespace Marketbuddy
 
         private void OnQueueCompleted()
         {
-            // 每一輪（每個雇員 / 每件快速上架）印一次閘門軌跡：這是事後判斷
+            // 每一輪（每個僱員 / 每件快速上架）印一次閘門軌跡：這是事後判斷
             // 「往下探 → 成功還是被拒 → 收斂到多少」唯一不必翻 68 行 REQUEST 的入口。
             MarketRequestGate.LogSummary("batch finished");
             ResetRequestState();
