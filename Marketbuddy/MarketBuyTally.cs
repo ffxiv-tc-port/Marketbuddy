@@ -15,58 +15,12 @@ namespace Marketbuddy
 {
     /// <summary>
     /// 「這一趟買到哪了」——貼在市場板搜尋結果視窗旁邊的計數面板。
-    ///
-    /// <para>
-    /// 由來（2026-09-09，從實機 log 量出來的）：市場板上買一件東西的型態是
-    /// <b>「一件商品點很多列」</b>——兩天內 156 次逐列點擊、26 種道具、合計 12,577,661 gil，
-    /// 其中「硬銀沙」一件就點了 23 列湊 1,068 個。使用者一邊點一邊得自己心算
-    /// 「這樣夠了沒／再點下去會不會超買／這一頁點完要花多少」，而<b>畫面上沒有任何地方回答</b>。
-    /// 這個面板就是那個答案。
-    /// </para>
-    ///
-    /// <para>
     /// 🔴 <b>純顯示，而且刻意沒有「一鍵買到 N 件」。</b>那會是「按一下帶出一串市場操作」，
-    /// 花的又是不可逆的 gil（實機上有過 3 秒內 364 萬 gil 的紀錄）。形狀上跟批次改價很像，
     /// 風險完全不同：改錯價可以改回來，買錯買不回來。所以這裡一件東西都不買、一列都不點，
     /// 只把使用者本來就要自己算的兩個數字算給他看。
-    /// </para>
-    ///
-    /// <para>
-    /// 🔴 <b>零封包、零 hook、零記憶體寫入。</b>兩個資料來源都是遊戲自己填好的：
-    /// <list type="bullet">
-    ///   <item>「已經買了多少」來自 <see cref="MarketPurchaseWatcher"/> 看到的
-    ///         <c>InfoProxyItemSearch.LastPurchasedMarketboardItem</c>——同一個偵測器餵兩個消費端
-    ///         （GilDelta 提示與這裡），不是第二套輪詢，所以兩邊永遠一致。</item>
-    ///   <item>「這一頁有什麼」來自同一個 proxy 的 <c>Listings</c> 陣列（唯讀）。</item>
-    /// </list>
-    /// </para>
-    ///
-    /// <para>
-    /// ⚠️ <b><c>Listings</c> 的布局在台服 7.20 沒有被證實過</b>（間接證據只到
-    /// <c>LastPurchasedMarketboardItem</c>：它在實機 log 上連續產出 156 筆正確的道具／數量／單價，
-    /// 那證明的是結構基底與一個晚段偏移，不是 <c>0x30</c> 這一段）。所以這裡的設計目標是
-    /// <b>「假設不成立時數字不見，而不是遊戲崩掉」</b>：
-    /// <list type="number">
-    ///   <item><b>只讀純整數欄位</b>（<c>ItemId</c>／<c>UnitPrice</c>／<c>Quantity</c>／<c>IsHqItem</c>）。
-    ///         那個結構裡唯一的指標欄 <c>Utf8String Unk_0x00</c> 在 FFXIVClientStructs 裡本來就是
-    ///         註解掉的，這裡也<b>絕不</b>去解它——讀錯的整數是錯的數字，解錯的指標是
-    ///         AccessViolation，而 AVE 在 .NET Core 上 try/catch 攔不到。</item>
-    ///   <item><b>索引一律夾在 0..100</b>（<c>FixedSizeArray100</c> 的實際長度），所以再怎麼錯
-    ///         都還在 proxy 自己那塊配置裡面。</item>
-    ///   <item><b>自我校驗</b>：每一列的 <c>ItemId</c> 必須等於同一個 proxy 的 <c>SearchItemId</c>，
-    ///         單價與數量必須落在合理範圍。偏移只要錯一格，這個條件幾乎必然不成立
-    ///         ⇒ 整塊不顯示，並在畫面上留一行灰字說「讀不到」。</item>
-    ///   <item>道具 id 查不到 <c>Item</c> 表也整塊不顯示（<b>不顯示半套</b>）。</item>
-    /// </list>
-    /// ⇒ 最壞情況是「累計表永遠是一行灰字」，而<b>「本趟已買」那半邊照樣正確</b>——
-    /// 它走的是已經在實機上驗過 156 次的那條路。
-    /// </para>
-    ///
-    /// <para>
-    /// 📌 版面形式照 <see cref="LiveSellList"/>：只讀 addon 的 X／Y／<c>RootNode</c> 尺寸
-    /// （全是已建模的純欄位，沒有任何特徵碼呼叫）把自己畫在原生視窗<b>旁邊</b>，
-    /// 不藏、不蓋、不改任何原生節點。原生視窗一切照舊可以點、可以拖。
-    /// </para>
+    /// ⚠️ <c>Listings</c> 的布局在台服 7.20 沒有被證實過，所以只讀純整數欄位、<b>絕不</b>去解那個指標欄
+    /// （解錯的指標是 AccessViolation，而 AVE 在 .NET Core 上 try/catch 攔不到）、索引一律夾在 0..100，
+    /// 並且每一列的 <c>ItemId</c> 必須等於 <c>SearchItemId</c> ⇒ 偏移只要錯一格就整塊不顯示，而不是遊戲崩掉。
     /// </summary>
     internal sealed unsafe class MarketBuyTally : IDisposable
     {
