@@ -83,16 +83,7 @@ namespace Marketbuddy
 
     /// <summary>
     /// 重掛的定價規則——<b>唯一真值來源</b>。
-    ///
-    /// <para>
     /// 🔴 <b>這個類別不改任何價格、不碰任何遊戲指標、不做 I/O、不寫 log、不讀設定物件。</b>
-    /// 全部輸入都由呼叫端在<b>自己的執行緒上</b>取好再傳進來，所以它可以被重掛引擎
-    /// （framework 執行緒）與待處理清單（同樣在 framework 執行緒組清單，但設定是快照）共用。
-    /// 共用的理由很具體：清單上寫的建議價與按下按鈕之後真的掛出去的價<b>必須是同一套規則</b>，
-    /// 兩邊各算一份的話總有一天會分岔，而分岔是靜默的。
-    /// </para>
-    ///
-    /// <para>
     /// <b>規則</b>：每一格算兩個候選，各自先過異常低價保護（<see cref="PriceAnomalyGuard"/>），
     /// 再<b>取低者</b>——
     /// <list type="bullet">
@@ -103,13 +94,9 @@ namespace Marketbuddy
     /// 為什麼取低：使用者的目標是<b>賣掉</b>。成交價告訴我們「市場上真的有人以這個價買走」，
     /// 板上最低價告訴我們「現在得低於誰才輪得到我」。只看成交價會在板上有人開更低時
     /// 掛在賣不掉的價；只看板上會在別的世界都靠更低價才賣掉時掛得太貴。
-    /// </para>
-    ///
-    /// <para>
     /// 🔑 平手（<c>S == L</c>）時取 <b>L</b>：使用者的降價設定是 0 時「跟板上最低價相同」
     /// 正是他明確要的行為（「如果目前上架得有人掛更低 但不是離群值 可以維持和它相同」），
     /// 而 L 已經套過那個設定。
-    /// </para>
     /// </summary>
     internal static class RelistPricing
     {
@@ -125,10 +112,6 @@ namespace Marketbuddy
         /// <summary>
         /// 把參考價換算成掛售價：百分比模式用浮點乘法（<b>絕不用整數除法</b>），然後夾到合法範圍。
         /// </summary>
-        /// <remarks>
-        /// 📌 這是原本 <c>BatchReprice.ApplySlot</c> 與 <c>PendingActionsBuilder.ApplyUndercut</c>
-        /// 各寫一份的那個算式，現在只有這一份。
-        /// </remarks>
         internal static long ApplyUndercut(long reference, UndercutRule rule)
         {
             var target = rule.UsePercent
@@ -295,7 +278,6 @@ namespace Marketbuddy
         /// 兩候選取低——<b>整個功能的核心，而且只有這一份實作</b>。
         /// </summary>
         /// <remarks>
-        /// 決策表（手算驗過的邊界表在本次施工的報告裡）：
         /// <list type="table">
         ///   <item><term>S 與 L 都能用、<c>S &gt;= L</c></term><description>L（跟板上最低價）</description></item>
         ///   <item><term>S 與 L 都能用、<c>S &lt; L</c></term><description>S（要更低才賣得掉）</description></item>

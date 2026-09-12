@@ -15,24 +15,12 @@ namespace Marketbuddy
 {
     /// <summary>
     /// 「即時出售品清單」——我們自己畫的雇員掛單表，貼在遊戲「出售品」視窗旁邊。
-    ///
     /// 為什麼需要：批次改價是走 <c>InventoryManager.SetRetainerMarketPrice()</c> 直接寫容器的
     /// （刻意不開任何原生視窗，那才是它比手動快的原因），所以遊戲的 <c>RetainerSellList</c>
     /// **不會自己重繪**——畫面停在開窗當下的價格，剛上架的道具會一直顯示 999,999,999，
     /// 看起來像卡住。伺服器上的價格從頭到尾都是對的，這純粹是顯示問題。
-    /// （2026-08-02 實測：對該 addon 呼叫 <c>OnRefresh(0, null)</c> 完全無效，那條路已經走過了。）
-    ///
     /// 這裡的資料每一幀在 Framework.Update 上重新從 <c>InventoryManager</c> 讀進快照，
     /// 繪製時只吃快照，所以既永遠是最新的，也不會在繪製執行緒上呼叫任何遊戲函式。
-    ///
-    /// 🔴 刻意**不**照抄 DailyRoutines 的作法。DR 是把遊戲清單元件
-    /// （<c>GetComponentListById(11)->OwnerNode</c>）<c>SetAlpha(0)</c> 藏起來，再把自己的
-    /// ImGui 視窗蓋在原位、並每幀改寫遊戲視窗的 X/Y 去對齊自己。那需要三件我們無法離線證明的事：
-    ///   (1) <c>AtkResNode.SetAlpha</c> 是**特徵碼解析的原生呼叫**，台服上解到錯的函式就是
-    ///       AccessViolation，而 AVE 在 .NET Core 是 corrupted-state exception，try/catch 攔不到；
-    ///   (2) 節點 ID 11 是國際服的值，台服沒有驗證過；
-    ///   (3) 蓋住原生清單之後，原本點某一列改價的操作就必須由我們重新實作，一旦列高對不齊
-    ///       就會「看起來點的是 A、實際改的是 B」。
     /// 換來的好處只是「版面更整齊」。所以這裡採取零原生寫入的版本：只讀 addon 的
     /// X / Y / RootNode 尺寸（全是已建模的純欄位，沒有任何特徵碼呼叫）來決定貼在哪裡，
     /// 把表畫在原生視窗**旁邊**而不是上面。原生視窗一切照舊可以點、可以拖，
@@ -48,7 +36,6 @@ namespace Marketbuddy
 
         /// <summary>
         /// 「正在處理這一件」的列底色（半透明琥珀）。
-        ///
         /// 刻意跟「已改價」那個綠色**分屬不同視覺通道**：進行中是整列底色，已改價是
         /// 單價欄的綠字。兩者可以同時出現在同一列（剛改完價、下一輪又輪到它）而不打架，
         /// 而且顏色本身也分得開——琥珀＝正在做，綠＝做完了。
@@ -67,20 +54,12 @@ namespace Marketbuddy
 
             /// <summary>
             /// 這一幀「歷史最近賣出價」的查詢到底有沒有在跑（＝那個定價方式開著）。
-            ///
-            /// <para>
             /// 🔴 這個旗標存在的唯一理由：<see cref="LastSoldState.Unknown"/> 有<b>兩種</b>
             /// 完全不同的意思。定價方式開著時它是「這一幀剛好還沒排到」，下一幀就會變成
             /// <see cref="LastSoldState.Loading"/>；關著時它是「<b>永遠</b>不會有人去問」
             /// ——通往 <c>LastSoldPriceSource.Request()</c> 的每一條路徑（這個面板的預取、
             /// <c>BatchReprice</c> 的批次預取、以及它逐格的補查）都在
             /// <c>RelistUseLastSoldPrice</c> 底下，所以那個開關關著時一個查詢都不會送出去。
-            /// </para>
-            /// <para>
-            /// 🔴 兩種都畫成「正在查…」的話，面板會<b>永遠</b>宣稱有一個根本不存在的查詢
-            /// 在跑（2026-09-13 之前就是這樣：只開市場價格欄、不開定價方式的人，三欄
-            /// 一直停在 <c>…</c>）。
-            /// </para>
             /// </summary>
             public bool SoldLookupEnabled { get; init; }
 
@@ -733,15 +712,10 @@ namespace Marketbuddy
 
         /// <summary>
         /// 「按下重掛會掛出去的金額」那一格。
-        ///
-        /// <para>
         /// 🔴 「查詢中」與「查不到」是<b>兩種不同的狀態，而且都要在列上看得見</b>：
         /// 任何一種畫成 0 或空白都會被讀成「這件賣過 0 gil」，而讀不到當成 0 在艦隊裡
         /// 已經害過一次。所以這裡一律用灰色的 <c>…</c> 與 <c>?</c>，理由放滑鼠提示。
-        /// </para>
-        /// <para>
         /// 📌 純顯示：這一格不會去改任何價格，改價一律是使用者自己按重掛按鈕。
-        /// </para>
         /// </summary>
         private static void DrawRelistCell(in Row row)
         {
@@ -818,14 +792,9 @@ namespace Marketbuddy
 
         /// <summary>
         /// 「目前最低價」那一格（本世界／整個資料中心各一欄）。
-        ///
-        /// <para>
         /// 🔴 沒有資料一律畫成灰色的 <c>?</c>（查詢中是 <c>…</c>）——<b>絕不畫成 0</b>。
         /// 一個 0 gil 的最低價是合法但荒謬的數字，使用者會照它去決定要不要降價。
-        /// </para>
-        /// <para>
         /// ⚠️ 這一格照的是<b>這一格自己的品質</b>，與「忽略優質狀態」那個選項無關。
-        /// </para>
         /// </summary>
         private static void DrawMinPriceCell(in Row row, MarketPricePoint? point, bool forDatacentre)
         {
@@ -851,15 +820,10 @@ namespace Marketbuddy
 
         /// <summary>
         /// 「最近一次成交」那一格：價格 ＋ 灰色的日期。
-        ///
-        /// <para>
         /// 🔑 日期畫在<b>列上</b>而不是滑鼠提示：使用者要的就是「什麼時候賣掉的」，
         /// 一筆三個月前的成交價和昨天的成交價意義完全不同，而那件事不能藏起來。
-        /// </para>
-        /// <para>
         /// 📌 這個時間是 Universalis 記錄的<b>成交時間</b>（由玩家端上傳），
         /// 不是我們自己觀察到的「它從架上消失」的時間。
-        /// </para>
         /// </summary>
         private static void DrawLastSaleCell(in Row row)
         {
@@ -887,15 +851,10 @@ namespace Marketbuddy
 
         /// <summary>
         /// 「已經掛多久了」那一格。
-        ///
-        /// <para>
         /// 🔴 <b>精確值與暫定值必須看得出差別</b>：暫定值前面加上 <c>~</c>，理由寫在滑鼠提示裡。
         /// 遊戲不會告訴我們一筆掛售是什麼時候掛上去的，所以只有「我們親眼看著它出現」那一種
         /// 才是精確的；其餘是拿外掛載入時間暫定的。兩者長得一樣的話，使用者無從判斷該不該相信它。
-        /// </para>
-        /// <para>
         /// 🔴 完全沒有紀錄時是灰色的 <c>?</c>，<b>不是 0 也不是「剛剛」</b>。
-        /// </para>
         /// </summary>
         private static void DrawAgeCell(in Row row)
         {
@@ -929,8 +888,6 @@ namespace Marketbuddy
 
         /// <summary>
         /// 「這件東西以前賣掉過嗎」那一格：<c>賣出次數 / 沒賣掉就下架的次數</c>。
-        ///
-        /// <para>
         /// 🔴 <b>四種「沒有數字」必須互相分得出來，而且一個都不可以畫成 0</b>：
         /// <list type="bullet">
         ///   <item><c>?</c>（記錄功能關著）＝沒有資料，而且不會有。</item>
@@ -940,16 +897,8 @@ namespace Marketbuddy
         /// </list>
         /// 把前三種畫成 0 會讓使用者讀成「這件賣不掉」而做出相反的決定——
         /// 「讀不到當成 0」在艦隊裡已經害過一次。
-        /// </para>
-        ///
-        /// <para>
         /// 🔴 第二個數字裡<b>絕不含賣出</b>：它是「下架＋消失但對不上金幣」。信心不足的那些
         /// （<see cref="RetainerSaleConfidence.Unknown"/>）一律不算賣出，理由寫在滑鼠提示裡。
-        /// </para>
-        ///
-        /// <para>
-        /// 📌 純顯示：這一格不會因為「賣不掉」自動下架、自動降價或做任何事。
-        /// </para>
         /// </summary>
         private void DrawHistoryCell(in Row row)
         {
@@ -1079,13 +1028,6 @@ namespace Marketbuddy
                 //    的話，面板會永遠宣稱有一個不存在的查詢在跑。
                 // 🔑 這一格與下面「問過了、但沒有紀錄」共用灰色的 ?：列上要傳達的是同一句
                 //    「不知道」，而「為什麼不知道」照慣例放滑鼠提示。
-                // ⚠️ 兩者**有可能同時出現在同一張表上**，不要以為分得開：
-                //    LastSoldPriceSource.Cache 是 static 的，只在 Shutdown() 與換世界時
-                //    清空，**不會**因為使用者把定價方式關掉而清空 ⇒ 曾經開過又關掉的人，
-                //    舊道具畫「沒有紀錄」的 ?、之後新上架的畫這一格的 ?。
-                //    刻意接受：兩個提示各自說得清楚，而兩者的處置相同（這一欄沒有值）。
-                //    🔴 哪天覺得這不夠，正解是給這一格一個自己的符號 ——
-                //    … ! × ? 都已經被上面四種狀態占用了，要挑第五個。
                 case LastSoldState.Unknown when !row.SoldLookupEnabled:
                     Grey("?");
                     Tooltip(
