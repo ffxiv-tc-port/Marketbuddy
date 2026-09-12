@@ -12,7 +12,6 @@ namespace Marketbuddy
     /// Auto-requery for the interactive market price list (the native
     /// "ItemSearchResult" addon - both the standalone market board search and
     /// the "compare prices" popup opened from a retainer's sell window).
-    ///
     /// The server occasionally throttles a market query ("please wait before
     /// searching again") or the response otherwise never lands; previously the
     /// only recourse was for the player to close and reopen the window by
@@ -21,16 +20,11 @@ namespace Marketbuddy
     /// IMarketBoard.OfferingsReceived nor .HistoryReceived fires for that item
     /// within a short window, re-issues InfoProxyItemSearch.RequestData() for
     /// the same item - the same request the game's own UI would have sent.
-    ///
     /// No hooks, no memory patches: this is exactly the same mechanism
     /// BatchReprice already uses for headless batch pricing, just watching the
     /// user's own interactive window instead of driving one of our own. It
     /// steps aside whenever BatchReprice/MultiRetainerTour own the shared
     /// InfoProxyItemSearch request slot, so the two never fight over it.
-    /// Backoff is capped and the retry count bounded, so a genuinely rejected
-    /// search can never turn into a request flood: if the cap is reached
-    /// without a response, this simply gives up and the window is left
-    /// exactly as it would have been without this feature.
     /// </summary>
     internal sealed unsafe class ManualRequery : IDisposable
     {

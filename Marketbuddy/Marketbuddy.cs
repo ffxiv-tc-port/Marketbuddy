@@ -206,10 +206,6 @@ namespace Marketbuddy
                 // 而且是直接用 IGameInteropProvider.HookFromAddress 建的,沒有進 Commons 的
                 // HookList,所以只有它們自己的 Dispose() 會拆。
                 // 這個 catch 把例外吞掉 ⇒ Dalamud 認為外掛「載入成功」,卸載時仍會呼叫 Dispose();
-                // 但舊的 Dispose() 一開頭就無防護地存取 PluginInterface / PluginUi 等欄位,
-                // 初始化半途失敗時那些欄位是 null,第一個 NullReferenceException 就會讓後面的
-                // QuickLister?.Dispose() 與 requestResultProbe?.Dispose() 永遠跑不到,
-                // detour 於是活過外掛卸載 —— 下一次遊戲呼叫該函式就跳進已卸載的組件。
                 ReleaseAll();
             }
         }

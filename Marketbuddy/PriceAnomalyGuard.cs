@@ -63,14 +63,9 @@ namespace Marketbuddy
 
     /// <summary>
     /// 「異常低價保護」：別人手滑少打一個 0 的時候，不要跟著把自己的東西降到那個價。
-    ///
-    /// <para>
     /// 🔴 <b>這個類別不改任何價格、不碰任何遊戲指標、不做 I/O、不寫 log。</b>
     /// 它只回答一個問題：「這個參考價看起來像不像打錯的？」
     /// 真正的處置（維持原價／不填入價格）由呼叫端做，那裡才印得出有意義的訊息。
-    /// </para>
-    ///
-    /// <para>
     /// <b>判準是「離群」不是「變低」</b>——這是整個功能的核心取捨：
     /// <list type="number">
     ///   <item><b>同業基準（<see cref="AnomalyBaseline.Peer"/>，優先）</b>：
@@ -84,14 +79,10 @@ namespace Marketbuddy
     /// 🔑 <b>有同業資料時它就是唯一判準</b>，不會再回頭看自家現價：
     /// 「別人全都降價了」與「有一個人打錯字」的差別<b>只有同業基準看得出來</b>，
     /// 而拿自家現價去補判會把前者也判成異常，那就變成「永遠不降價」。
-    /// </para>
-    ///
-    /// <para>
     /// 兩個門檻都可設定（<see cref="Configuration.AnomalyGuardMinNormalPrice"/> 與
     /// <see cref="Configuration.AnomalyGuardRatio"/>）：正常價要先達到金額門檻，
     /// 參考價才會因為「便宜太多倍」被判成異常。低價品本來就常常整批在幾十 gil 之間跳，
     /// 沒有金額門檻的話那些全部會被誤判。
-    /// </para>
     /// </summary>
     internal static class PriceAnomalyGuard
     {
