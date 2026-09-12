@@ -11,54 +11,15 @@ namespace Marketbuddy
 {
     /// <summary>
     /// 跨世界掛售價格巡檢。
-    ///
-    /// <para>
     /// 「帶著自己正在賣的清單，站在某一個世界的市場前面，把每一件的行情逐一問過一遍並記下來」。
-    /// 預設跑完一個世界就停；要換世界是**另一顆按鈕**，換到之後仍然要使用者再按一次「掃描這個世界」。
-    /// </para>
-    ///
-    /// <para>
-    /// 🔴 <b>一律手動觸發。</b>啟動的入口只有兩個，兩個都是使用者按的按鈕：
-    /// 「掃描這個世界」（<see cref="RequestStart"/>），以及「武裝一輪」
-    /// （<see cref="RequestArmTour"/>，2026-09-11 新增的自動續跑）。
     /// 這個類別**沒有**訂閱 AutoRetainer 的任何事件、**沒有**訂閱任何 addon 生命週期事件，
     /// 也**不會**在 <c>Framework.Update</c> 裡因為任何遊戲狀態自己開始跑
-    /// （<see cref="OnFrameworkUpdate"/> 在閒置時的唯一副作用，就是把那兩個
-    /// 「使用者按了按鈕」的旗標消費掉）。
-    /// </para>
-    ///
-    /// <para>
-    /// 🔴 <b>自動續跑（武裝）只在「使用者手動武裝的那一輪」裡有效。</b>
-    /// 武裝要 <c>PriceSurveyAutoTour</c> 這個<b>預設關</b>的設定先打開，武裝狀態
-    /// <b>刻意不存檔</b>（重開遊戲、重載外掛一律回到解除狀態），而且有三道停止閘：
-    /// ①同一輪裡每個世界最多去一次 ②一輪最多換 <c>PriceSurveyAutoTourMaxWorlds</c> 個世界
-    /// ③只有「這個世界的清單整份掃完」才會續跑——逾時、使用者按停、關視窗、離開遊戲世界、
-    /// 世界被動改變、讓路給重掛／下架，一律當場解除武裝並說明原因。
     /// 換世界一律走 Lifestream 的具名 IPC 端點，<b>絕不</b>用空參數的 <c>/li</c> 聊天指令。
-    /// </para>
-    ///
-    /// <para>
-    /// 🔴 <b>整條路徑只讀不寫。</b>它只呼叫
-    /// <c>InfoProxyItemSearch.RequestData()</c>（＝遊戲自己的市場查詢，跟玩家開市場板搜尋
-    /// 送的是同一個請求）並接收 <c>IMarketBoard.OfferingsReceived</c>。
-    /// 沒有 <c>SetRetainerMarketPrice</c>、沒有任何 <c>InventoryManager</c> 寫入、
-    /// 沒有任何掛售／改價／下架動作，也不碰 <see cref="BatchReprice"/>／
-    /// <see cref="BatchDelist"/>／<see cref="MultiCharacterTour"/> 的狀態。
-    /// </para>
-    ///
-    /// <para>
-    /// 🔴 <b>節流沿用全外掛共用的 <see cref="MarketRequestGate"/></b>（同一個 static 實例，
-    /// 不另開更短的路徑）：每一件之間至少隔閘門當下的間隔，而且每一次送出都記進閘門，
-    /// 所以巡檢跟批次改價、跟互動視窗的重查共用同一份「上次送出是什麼時候」。
-    /// </para>
-    ///
-    /// <para>
     /// ⚠️ <b>未經實機證實的前提</b>：本功能假設「站在市場前面、**沒有**開啟僱員出售品視窗」
     /// 時 <c>RequestData()</c> 仍然送得出去。假設不成立時的表現被刻意設計成
     /// 「只是查不到東西」而不是崩潰：不對回應解參任何指標、不假設 <c>ListingCount</c>
     /// 會被寫、逾時走既有的重試路徑；而且**第一件連續逾時 3 次就停下來**並在畫面與
     /// 記錄檔上明說「這個情境送不出查詢」，不會傻跑幾百件。
-    /// </para>
     /// </summary>
     internal sealed unsafe class PriceSurvey : IDisposable
     {
@@ -101,18 +62,10 @@ namespace Marketbuddy
 
             /// <summary>
             /// 暫停：整輪的清單、進度、統計全部留著，只是不再送任何查詢。
-            ///
-            /// <para>
             /// 🔴 <b>離開暫停只有兩條路，兩條都要使用者按按鈕</b>：按「繼續掃描」
             /// （<see cref="RequestResume"/>）或按「停止」（<see cref="RequestStop"/>）。
-            /// 沒有任何遊戲狀態、任何事件、任何逾時會讓它自己繼續跑——
-            /// 「換完世界自動接著掃」那種串接正是這個功能刻意不做的事。
-            /// </para>
-            ///
-            /// <para>
             /// ⚠️ 暫停中 <see cref="IsRunning"/> 是 <c>false</c>：重掛／下架／手動重查
             /// 拿它當互斥判準，暫停的巡檢沒有在用市場查詢的額度，不該擋住它們。
-            /// </para>
             /// </summary>
             Paused,
         }
@@ -224,7 +177,6 @@ namespace Marketbuddy
 
         /// <summary>
         /// 這個資料中心的全部世界（含目前所在的這一個，<b>不</b>套用排除清單）。
-        /// 畫面上的「哪些世界不要碰」勾選清單就是它。
         /// </summary>
         /// <remarks>
         /// 🔴 <b>整份換掉，不就地改</b>：這份清單在 framework 執行緒上重建、由繪製執行緒讀，
@@ -852,7 +804,6 @@ namespace Marketbuddy
 
         /// <summary>
         /// 重建「這裡去得了哪些世界」的下拉選單內容。
-        /// 候選來自 World 表裡同一個資料中心的列，再逐一問 Lifestream 去不去得了——
         /// 🔑 刻意<b>不</b>自己維護一份世界名單，也不靠 <c>IsPublic</c>（台服八個正式世界
         /// 的 <c>IsPublic</c> 全是 false，照它篩會得到空清單）。Lifestream 才是
         /// 「這個角色現在去得了哪裡」的權威。
@@ -960,14 +911,11 @@ namespace Marketbuddy
 
         // =====================================================================
         //  自動續跑（使用者手動武裝的那一輪）
-        //
         //  🔴 三道停止閘，缺一不可：
         //     ①同一輪裡每個世界最多去一次（tourVisited）
         //     ②一輪最多換 tourMaxWorlds 個世界
         //     ③只有「整份掃完」或「這個世界該問的都在保留時間內問過了」才往下走
         //  🔴 換世界一律走 Lifestream 的具名 IPC 端點，絕不用空參數的 /li 聊天指令。
-        //  🔴 每一種收場都會寫一行 Information 並往聊天視窗印一句：
-        //     使用者永遠看得出「它為什麼沒有繼續」。
         // =====================================================================
 
         /// <summary>消費使用者的武裝／解除武裝旗標。🔴 任何狀態下每幀都跑。</summary>
@@ -1113,7 +1061,6 @@ namespace Marketbuddy
         /// <remarks>
         /// 🔑 其餘情況表示這一輪<b>根本沒開始</b>（<see cref="BeginRun"/> 的
         /// <see cref="CanStart"/> 擋下了它，那條路不會走到 <see cref="Finish"/>）。
-        /// 沒有這道守衛的話武裝會安安靜靜地永遠掛在那裡。
         /// </remarks>
         private void TourTickScanning()
         {
@@ -1140,10 +1087,8 @@ namespace Marketbuddy
         /// 🔑 候選就是換世界選單那一份（<see cref="travelTargets"/>）——已經濾掉排除清單、
         /// 濾掉 Lifestream 說去不了的，所以「選單上看得到的」與「自動續跑可能選到的」
         /// 是同一組，不可能一邊漏掉。
-        /// <para>
         /// 🔑 「最舊」讀的是 <see cref="PriceSurveyWorldLog"/> 現成的 <c>AtUtc</c>，
         /// 不另外存一份時間——兩份時間遲早會不一致，而不一致是靜默的。
-        /// </para>
         /// </remarks>
         private void TourChooseNextWorld()
         {
@@ -1629,23 +1574,12 @@ namespace Marketbuddy
 
         /// <summary>
         /// 把採購清單的道具接在佇列<b>後面</b>。
-        ///
-        /// <para>
         /// 🔑 <b>刻意接在後面而不是混進去</b>：這樣「我在賣的那份」永遠先跑完，
         /// 中途被打斷時損失的一定是採購清單那一段——那一段本來就是順路的。
-        /// 也因為順序如此，「這個世界的掛售清單掃到哪」那個進度才算得準
-        /// （見 <see cref="NoteWorldProgress"/>）。
-        /// </para>
-        ///
-        /// <para>
         /// 🔑 <b>與掛售清單重疊的道具不會多查一次</b>：它已經在佇列裡了，
         /// 這裡只把它記進 <see cref="shoppingIds"/>，一次查詢兩份記錄。
-        /// </para>
-        ///
-        /// <para>
         /// ⚠️ 「只巡檢被壓價的」那個篩選<b>不套用</b>在採購清單上：被壓價講的是我方掛單，
         /// 而採購清單上的東西我根本沒掛。
-        /// </para>
         /// </summary>
         /// <param name="shoppingHistory">採購清單的歷史行情（續掃用）。</param>
         private void AppendShoppingList(List<ShoppingSurveyRow> shoppingHistory)
@@ -2132,17 +2066,11 @@ namespace Marketbuddy
 
         /// <summary>
         /// 把「這個世界掃到哪了」寫進 <see cref="PriceSurveyWorldLog"/>。
-        ///
-        /// <para>
         /// 🔑 <c>plannedTotal</c> 是<b>這個世界的完整清單</b>（這一輪的佇列 ＋ 因為
         /// 保留時間內已經問過而被略過的），所以連著跑好幾段的結果會自然累加：
         /// 第一段 78/633、第二段 127/633，而不是每段各自從 0 開始。
-        /// </para>
-        ///
-        /// <para>
         /// ⚠️ 開著「只巡檢被壓價的」時<b>不記</b>：那一輪的佇列是被篩過的，
         /// 拿它當「這個世界掃到哪」會把一份挑過的子集講成整個世界的進度。
-        /// </para>
         /// </summary>
         private void NoteWorldProgress()
         {
@@ -2223,8 +2151,6 @@ namespace Marketbuddy
             //    ②nothingLeftOnThisWorld＝該問的都在保留時間內問過了（空佇列，不是失敗）
             //    其餘一律當場解除武裝：逾時、使用者按停、離開遊戲世界、世界被動改變、
             //    讓路給重掛／下架、清單建不起來、篩選之後什麼都不剩。
-            //    🔴 這裡在 framework 執行緒上（Finish 的每個呼叫點都在 OnFrameworkUpdate 的鏈上），
-            //    所以直接呼叫，不必 marshal。
             if (tourArmed)
             {
                 if ((completed && wasRunning) || nothingLeftOnThisWorld)

@@ -47,19 +47,13 @@ namespace Marketbuddy
 
     /// <summary>
     /// 巡檢清單的三個來源。
-    ///
-    /// <para>
     /// 🔴 <b>三個都是唯讀的</b>：讀遊戲的僱員市場容器、讀 AllaganTools 的 IPC、讀
     /// InventoryTools 自己的記錄檔。沒有任何一條路徑會寫入遊戲、寫入別的外掛的檔案，
     /// 或改變任何掛售狀態。
-    /// </para>
-    ///
-    /// <para>
     /// 執行緒：<see cref="TryFromSellList"/> 與 <see cref="TryFromAllaganTools"/>
     /// <b>只能在 framework 執行緒上呼叫</b>（前者解遊戲的原生指標，後者的 IPC 實作
     /// 跑在呼叫端的執行緒上、而對方會去讀遊戲狀態）。<see cref="TryFromInventoryToolsCsv"/>
     /// 是純檔案讀取，<b>只能在執行緒池上呼叫</b>——那個檔案有數十萬 bytes。
-    /// </para>
     /// </summary>
     internal static unsafe class PriceSurveyItemSource
     {

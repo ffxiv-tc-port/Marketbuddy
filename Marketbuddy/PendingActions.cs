@@ -31,14 +31,12 @@ namespace Marketbuddy
         /// <remarks>
         /// 🔴 這個桶記的是「<b>已經替你擋下來了</b>」，不是「你該做什麼」——
         /// 價格一個 gil 都沒有被改動。判準與門檻見 <see cref="PriceAnomalyGuard"/>。
-        /// <para>
         /// ⚠️ 這一桶的兩個欄位語意與其他桶不同（沒有別的欄位可以放，而加一欄 CSV
         /// 會讓既有的清單檔整份讀不回來）：
         /// <c>SuggestedPrice</c>＝<b>被擋下來的那個可疑價</b>（不是建議你掛的價），
         /// <c>SuggestionWorld</c>＝拿來比的那個<b>正常價</b>（已經格式化成字串）。
         /// <c>SuggestionSource</c> 是 <c>anomaly-peer</c>／<c>anomaly-own</c>，
         /// UI 靠它分辨這兩個欄位該怎麼讀。
-        /// </para>
         /// </remarks>
         PriceAnomaly = 3,
     }
@@ -112,32 +110,16 @@ namespace Marketbuddy
     /// <summary>
     /// 「還沒處理完的事」的持久清單，寫在 Marketbuddy 自己的設定目錄底下的
     /// <c>pending_actions.csv</c>。
-    ///
-    /// <para>
-    /// 🔴 <b>為什麼要有這個檔</b>：查不到行情而留在上限價的那幾格，以前只在
-    /// <c>BatchReprice.HandleNoListings</c> 印一行聊天訊息、在收尾印一個件數，而
-    /// <c>NeedsPricingCount</c> 每一批就歸零 —— 也就是說訊息一被洗掉，那些格子就
-    /// <b>再也找不回來</b>。實機 log 兩天累積 107 次、70 件，全部只存在於聊天記錄裡。
-    /// </para>
-    ///
-    /// <para>
     /// 🔴 <b>這個類別不會改任何價格。</b>它只記錄「哪一格需要人去看一下」。
     /// 真正的改價一律仍然由使用者在畫面上按下按鈕，走既有的
     /// <c>BatchReprice.StartQuickReprice</c>。
-    /// </para>
-    ///
-    /// <para>
     /// 執行緒：形狀比照 <see cref="PriceSurveyLog"/> —— <b>鎖只用來動字典</b>，
     /// 真正的檔案 I/O 一律在鎖外、在執行緒池上做。鎖內絕不做 I/O、不寫 log、
     /// 不呼叫別的外掛、不碰 ImGui。
-    /// </para>
-    ///
-    /// <para>
     /// ⚠️ 與 <see cref="PriceSurveyLog"/> 不同，這個檔是<b>整份重寫</b>而不是追加：
     /// 清單會縮短（處理完、跳過、重算），追加寫不出「某一列不見了」。重寫走
     /// 「暫存檔 → <see cref="File.Move(string,string,bool)"/>」，所以寫到一半崩潰
     /// 不會留下半份清單。
-    /// </para>
     /// </summary>
     internal static class PendingActions
     {
@@ -327,11 +309,9 @@ namespace Marketbuddy
         /// <summary>
         /// 用重算的結果換掉<b>算得出來的那兩個桶</b>（<see cref="PendingActionKind.Undercut"/>
         /// 與 <see cref="PendingActionKind.BelowMinimum"/>）。
-        ///
         /// 🔴 <see cref="PendingActionKind.PriceCap"/> <b>一列都不動</b>：那個桶是事件記下來的
         /// （快速上架當下查不到行情），重算的輸入（巡檢記錄）裡根本沒有那件事，
         /// 一起換掉等於把它們全部靜默刪光。
-        ///
         /// 「已跳過」會依鍵沿用過去，所以重算不會讓使用者跳過的東西又冒出來。
         /// </summary>
         internal static void ReplaceComputed(List<PendingActionRow> computed)

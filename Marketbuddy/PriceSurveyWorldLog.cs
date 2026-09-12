@@ -73,25 +73,13 @@ namespace Marketbuddy
 
     /// <summary>
     /// 每個世界的巡檢進度記錄檔。
-    ///
-    /// <para>
     /// 🔴 形狀刻意沿用 <see cref="PendingActions"/>：同一個設定目錄、同一種 CSV
     /// （UTF-8 BOM ＋ CRLF ＋ 同一份逸出／拆解器）、<b>整份重寫</b>而不是追加
     /// （一個世界只該有一列，追加寫不出「這一列被更新了」），而且重寫走
     /// 「暫存檔 → <see cref="File.Move(string,string,bool)"/>」，寫到一半崩潰
     /// 不會留下半份清單。
-    /// </para>
-    ///
-    /// <para>
     /// 🔴 執行緒：<b>鎖只用來動字典</b>，真正的檔案 I/O 一律在鎖外、在執行緒池上做。
     /// 鎖內絕不做 I/O、不寫 log、不呼叫別的外掛、不碰 ImGui。
-    /// </para>
-    ///
-    /// <para>
-    /// 📌 這個檔<b>不是</b>行情資料，只有進度。行情一律在
-    /// <see cref="PriceSurveyLog"/> 的 <c>price_survey.csv</c>；刪掉這個檔只會讓
-    /// 「哪些世界掃過」回到未知，不會弄丟任何價格。
-    /// </para>
     /// </summary>
     internal static class PriceSurveyWorldLog
     {
@@ -221,13 +209,10 @@ namespace Marketbuddy
 
         /// <summary>
         /// 「這個世界還算不算掃過」。
-        ///
-        /// <para>
         /// 🔑 <b>失效條件與續掃真正會跳過的規則是同一條</b>（<c>PriceSurveySkipHours</c>），
         /// 所以畫面說的話永遠不會跟按下去之後的行為不一致。四種失效：
         /// ①超過保留時數 ②保留時數設成 0（等於不追蹤） ③紀錄是別的角色用只看得到
         /// 自己僱員的來源掃的 ④使用者自己按了清除。
-        /// </para>
         /// </summary>
         /// <param name="row">紀錄。</param>
         /// <param name="skipHours">使用者設的保留時數；0＝不追蹤。</param>

@@ -17,35 +17,15 @@ namespace Marketbuddy
 
     /// <summary>
     /// 「我要買的東西」清單。
-    ///
-    /// <para>
-    /// 🔑 <b>為什麼不沿用巡檢原本那三個來源</b>：<c>sell-list</c>／<c>allagantools</c>／<c>csv</c>
-    /// 三個講的都是同一件事——「我自己有哪些東西<b>掛在市場上賣</b>」（最後那個讀的是
-    /// InventoryTools 的 <c>inventories.csv</c>，一樣是僱員市場容器）。採購清單問的是相反的
-    /// 問題，沒有任何一個既有來源答得出來，所以這裡是第四種來源。
-    /// </para>
-    ///
-    /// <para>
     /// 🔴 <b>刻意用一個純文字檔，而不是去讀別的外掛的私有檔案。</b>Artisan 的 IPC 沒有
     /// 「這張清單裡有什麼」的端點（<c>Artisan.IsListRunning</c> 那一組全是狀態與控制），
     /// AllaganTools 的 <c>GetCraftItems</c> 只回<b>成品</b>（<c>IsOutputItem</c>），
     /// 不是「要去買的材料」。猜別人的存檔格式的失敗形式是靜默拿到錯的清單，
     /// 然後在每一個世界多查幾百件——那比請使用者貼一份清單糟得多。
-    /// </para>
-    ///
-    /// <para>
-    /// 檔案格式（<c>shopping_list.txt</c>，放在 Marketbuddy 自己的設定目錄）：
-    /// 一行一件，可以寫道具名稱或道具 id；<c>#</c> 之後是註解。數量可寫可不寫，
-    /// 三種寫法都吃：<c>12x 銅礦</c>、<c>銅礦 x12</c>、<c>銅礦,12</c>。
-    /// 數量只是寫給人看的備註，<b>不影響查詢</b>。
-    /// </para>
-    ///
-    /// <para>
     /// 執行緒：<see cref="BeginLoad"/> 把<b>讀檔</b>丟到執行緒池，
     /// <see cref="PumpLoad"/> <b>只能在 framework 執行緒上呼叫</b>——名稱轉 id 要讀
     /// Lumina 的 <c>Item</c> 表，那份索引也只在那裡建。整條路徑<b>只讀不寫</b>，
     /// 唯一會寫檔的是使用者自己按下「建立範例清單檔」（<see cref="TryCreateTemplate"/>）。
-    /// </para>
     /// </summary>
     internal static class ShoppingList
     {
