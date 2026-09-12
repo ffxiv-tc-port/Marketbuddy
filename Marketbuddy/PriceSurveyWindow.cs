@@ -295,7 +295,7 @@ namespace Marketbuddy
             }
 
             ImGui.Spacing();
-            Grey("Whatever is looked up here is uploaded anonymously to Universalis by Dalamud itself (if you have that turned on in Dalamud). This plugin never contacts any website on its own."
+            GreyWrapped("Whatever is looked up here is uploaded anonymously to Universalis by Dalamud itself (if you have that turned on in Dalamud). The survey itself contacts nothing on its own: the only setting that makes this plugin send its own HTTP request is \"Also price from the most recent sale, and use whichever is lower\", which reads prices from Universalis. The market price columns on the live sell list panel reuse that very same lookup and send no request of their own, so they only have data while that setting is on. Nothing else in this plugin talks to any website."
                 .Loc());
         }
 
@@ -2712,6 +2712,22 @@ namespace Marketbuddy
         {
             ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
             ImGui.TextUnformatted(text);
+            ImGui.PopStyleColor();
+        }
+
+        /// <summary>
+        /// 會換行的灰字，給占好幾行的說明段落用。
+        /// <para>
+        /// 🔴 <see cref="Grey"/> 走 <c>TextUnformatted</c>，<b>不換行</b>：整段文字會把
+        /// 視窗的內容寬度撐開（視窗最小寬 560，使用者調過的寬度不會自己變大，
+        /// 所以實際表現是被裁掉）。長段落一律走這一支。
+        /// </para>
+        /// <para>📌 與 <c>PluginUI</c> 畫長灰字段落的寫法是同一套。</para>
+        /// </summary>
+        private static void GreyWrapped(string text)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(text);
             ImGui.PopStyleColor();
         }
 
