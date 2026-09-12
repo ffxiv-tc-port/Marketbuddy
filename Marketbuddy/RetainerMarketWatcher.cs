@@ -16,19 +16,13 @@ namespace Marketbuddy
 
     /// <summary>
     /// 某一位僱員的市場容器在某一刻的樣子。
-    ///
-    /// <para>
     /// 🔴 <b>刻意不記格號。</b>一件道具被取回或賣掉之後，市場容器裡剩下的格子有沒有被壓縮，
     /// 我們無法離線證明（<see cref="BatchDelist"/> 的 <c>DelistJob</c> 註解逐字寫著同一件事，
     /// 它也因此改成每次現找第一個有東西的格子）。只要它會壓縮，用格號去對就會整排錯位，
     /// 而錯位的結果是「賣掉了 A」被記成「賣掉了 B」——一個自信的錯誤比沒有記錄更糟。
     /// 所以比對一律用「(道具, 品質) → 各價位各幾件」這個<b>與位置無關</b>的形狀。
-    /// </para>
-    ///
-    /// <para>
     /// 🔑 同一個形狀順帶解決了重掛：改價只是把某個價位的件數搬到另一個價位，
     /// <b>(道具, 品質) 的總件數不變</b>，所以批次重掛不會生出任何假的「賣出」事件。
-    /// </para>
     /// </summary>
     internal sealed class RetainerMarketSnapshot
     {
@@ -67,24 +61,15 @@ namespace Marketbuddy
 
     /// <summary>
     /// 「這件東西是 Marketbuddy 自己下架的」的短期帳。
-    ///
-    /// <para>
     /// 🔴 沒有這本帳，我方的批次下架會在下一次快照時長成一批「消失」事件，
     /// 而那些事件會去跟金幣比對——下架不會讓錢包增加，所以它們會全部落到
     /// 「低信心：可能手動下架」，把真正需要注意的那幾列淹掉。
-    /// </para>
-    ///
-    /// <para>
     /// 存活時間刻意短（<see cref="TtlMinutes"/> 分鐘）：這本帳是用來解釋<b>剛剛</b>發生的事，
     /// 留太久只會讓一次很久以前的下架去認領一筆真正的賣出。過期沒被認領的條目自然消失，
     /// 失敗形式是「那一列變成低信心」——不會產生錯誤的高信心結論。
-    /// </para>
-    ///
-    /// <para>
     /// 執行緒：所有呼叫點都在 framework 執行緒上（兩個下架引擎與觀察者都掛在
     /// <c>Framework.Update</c> 上），但仍然上鎖——這種清單一旦哪天被別的路徑碰到，
     /// 裸 <c>List</c> 的失敗形式是清單本身壞掉，不是拿到舊值。
-    /// </para>
     /// </summary>
     internal static class RetainerDelistLedger
     {
@@ -167,18 +152,12 @@ namespace Marketbuddy
     /// <summary>
     /// 每一位僱員「上一次看到的市場容器」的持久基準線，寫在 Marketbuddy 自己的設定目錄底下的
     /// <c>retainer_market_state.csv</c>。
-    ///
-    /// <para>
     /// 🔴 <b>為什麼一定要落地</b>：差異事件是「上一次開僱員」與「這一次開僱員」之間的比較，
     /// 而這兩件事跨得過重開遊戲。只放記憶體的話，每個工作階段第一次開每一位僱員都只能
     /// 「先記一份基準」什麼都算不出來——也就是最常見的使用方式下這個功能等於不存在。
-    /// </para>
-    ///
-    /// <para>
     /// ⚠️ 這個檔是<b>整份重寫</b>（僱員會被解僱、清單會縮短，追加寫不出「某一列不見了」），
     /// 走「暫存檔 → <see cref="File.Move(string,string,bool)"/>」，所以寫到一半崩潰不會留下
     /// 半份基準線。形狀與存檔紀律逐字比照 <see cref="PendingActions"/>。
-    /// </para>
     /// </summary>
     internal static class RetainerMarketState
     {
@@ -494,32 +473,19 @@ namespace Marketbuddy
 
     /// <summary>
     /// 僱員市場容器的差異觀察者：把「兩次看到之間少掉的東西」記成一張帶信心標記的事件清單。
-    ///
-    /// <para>
     /// 🔴 <b>純唯讀，零自動化。</b>只讀 <c>InventoryManager</c> 的僱員市場容器與
     /// <c>RetainerManager</c> 的錢包欄位，不送封包、不掛 hook、不寫任何記憶體，
     /// 也不會因為看到什麼而去下架、改價或掛單。市場紅線：純記錄。
-    /// </para>
-    ///
-    /// <para>
     /// 🔑 <b>為什麼只在「出售品」視窗開著時取樣。</b>市場容器是全域的一份，而
     /// <c>GetActiveRetainer()</c> 換人的時機與容器被伺服器填好的時機不保證同步；
     /// 兩者錯開的那幾幀會讓僱員 B 的容器內容被拿去跟僱員 A 的基準線比對，
     /// 結果是<b>一整批假的「賣出」</b>。出售品視窗開著的期間，容器屬於誰是確定的
-    /// （<see cref="PriceSurveyItemSource.TryFromSellList"/> 依賴的也是同一個前提）。
-    /// </para>
-    ///
-    /// <para>
     /// 🔑 <b>兩次相同的讀取才算數。</b>視窗剛開的那幾幀容器可能還沒填好，
     /// 「還沒填好」與「東西全賣光了」長得一模一樣。所以先拍成候選，隔一段時間再讀一次，
     /// 內容（含錢包）完全相同才承認它是一份快照。代價只是慢半秒。
-    /// </para>
-    ///
-    /// <para>
     /// 執行緒：全部在 framework 執行緒上（<c>Framework.Update</c>）。落地一律交給
     /// <see cref="RetainerSalesLog"/> 與 <see cref="RetainerMarketState"/>，那兩支自己
     /// 把 I/O 丟到執行緒池，鎖內不做 I/O。
-    /// </para>
     /// </summary>
     internal sealed unsafe class RetainerMarketWatcher : IDisposable
     {
@@ -729,20 +695,14 @@ namespace Marketbuddy
 
         /// <summary>
         /// 比較兩份快照，產出差異事件。
-        ///
-        /// <para>
         /// 步驟：①以 (道具, 品質) 為鍵算出「少了幾件」——<b>與格號、與價格都無關</b>，
         /// 所以壓縮容器與批次重掛都不會生出假事件。②先讓
         /// <see cref="RetainerDelistLedger">我方下架的帳</see>認領掉它解釋得了的部分。
         /// ③剩下的拿僱員錢包的增量去對：對得上＝高信心賣出，對不上＝低信心「消失」。
-        /// </para>
-        ///
-        /// <para>
         /// 🔑 <b>稅由誰付這件事不用先賭。</b>扣稅（<c>net</c>）與未扣稅（<c>gross</c>）兩種
         /// 都試著對，對上哪一種就記哪一種。台服遊戲文案（Addon #943「出售道具時需要繳交 N% 的稅金」、
         /// #6945「利用服裝模特出售道具無需繳交稅金」）指向<b>賣方付稅</b>，所以先試 <c>net</c>；
         /// 但那是文案推定不是實測，所以另一種也留著，而且哪一種對上會逐列寫進記錄檔。
-        /// </para>
         /// </summary>
         internal static List<RetainerSaleRow> Diff(RetainerMarketSnapshot previous,
             RetainerMarketSnapshot current, int taxPercent)

@@ -8,20 +8,14 @@ namespace Marketbuddy
 {
     /// <summary>
     /// 一件道具（一個品質）在整份僱員銷售紀錄裡的彙總。
-    ///
-    /// <para>
     /// 🔴 <b><see cref="RetainerSaleConfidence.Unknown"/> 的列永遠不算進賣出。</b>
     /// 那一級的語意是「我們看到它從清單消失，但錢包增量對不上」——把它算進去等於
     /// 用一個自信的數字蓋掉「我們其實不知道」。它有自己的欄位
     /// （<see cref="UnknownEvents"/>），而且畫面上一定要跟賣出並排看得見。
-    /// </para>
-    ///
-    /// <para>
     /// 🔑 <b>「全部是 0」不等於「沒有資料」。</b>這個結構本身分不出那兩件事——
     /// 分辨的責任在呼叫端：有沒有觀察基礎要問
     /// <see cref="RetainerListingAge.FirstSeen"/>／<see cref="RetainerListingAge.EarliestSeen"/>，
     /// 沒有基礎就必須畫成灰色的 <c>?</c>，<b>不可以畫成 0</b>。
-    /// </para>
     /// </summary>
     /// <param name="SoldEvents">高信心「賣出」事件數。</param>
     /// <param name="SoldQuantity">那些事件加起來賣掉幾件。</param>
@@ -56,12 +50,9 @@ namespace Marketbuddy
 
     /// <summary>
     /// 把僱員銷售紀錄的<b>事件清單</b>換算成<b>每件道具的彙總</b>的一份不可變快照。
-    ///
-    /// <para>
     /// 🔴 建好之後就不再改動，所以可以直接把整個物件的參考交給繪製執行緒讀，
     /// 不需要鎖、也不會讀到蓋到一半的字典。要更新就整份換掉
     /// （<see cref="RetainerSalesHistory"/> 用 <see cref="Volatile"/> 換參考）。
-    /// </para>
     /// </summary>
     internal sealed class SalesHistorySnapshot
     {
@@ -205,27 +196,14 @@ namespace Marketbuddy
 
     /// <summary>
     /// 「這件東西以前賣掉過嗎」的背景快取。
-    ///
-    /// <para>
-    /// 為什麼需要它：僱員銷售紀錄本來只有一個讀取端（巡檢視窗的「銷售」分頁，畫的是
-    /// <b>時間序事件表</b>），而使用者做決定的地方是出售品視窗旁邊的即時掛單面板——
-    /// 那裡不能開巡檢視窗，也不能在繪製路徑上讀 CSV。所以這裡把整份紀錄在執行緒池上
-    /// 彙總成一份不可變快照，繪製端只讀那個參考。
-    /// </para>
-    ///
-    /// <para>
     /// 🔴 <b>繪製路徑零 I/O。</b><see cref="Pump"/> 只從 framework 執行緒呼叫，
     /// 而且它自己也不讀檔——讀檔與彙總全部在 <see cref="Task.Run(Func{object})"/> 上。
-    /// </para>
-    ///
-    /// <para>
     /// 🔑 更新時機：<see cref="RetainerSalesLog.Revision"/> 一變就重算（節流
     /// <see cref="RebuildThrottle"/>），但<b>不是每次都重讀檔</b>——新事件同時也在
     /// <see cref="RetainerSalesLog.SessionRows"/> 裡，折進來就夠了。
     /// ⚠️ 那份記憶體清單有 1000 列的上限，超過會從最舊的丟；所以每
     /// <see cref="FileRefreshEvery"/> 還是要重讀一次檔把帳補回來，
     /// 否則長工作階段會<b>靜默少算</b>最舊的那些事件。
-    /// </para>
     /// </summary>
     internal static class RetainerSalesHistory
     {

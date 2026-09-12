@@ -11,11 +11,8 @@ namespace Marketbuddy
 {
     /// <summary>
     /// 一列「差異事件」有多少把握。
-    ///
-    /// <para>
     /// ⚠️ 刻意給 <see cref="Unknown"/> 明確的 0：沒有零值的列舉會讓 <c>default</c>
     /// 落在一個無效值上，而那種壞法是靜默的。
-    /// </para>
     /// </summary>
     internal enum RetainerSaleConfidence
     {
@@ -39,19 +36,13 @@ namespace Marketbuddy
 
     /// <summary>
     /// 僱員市場容器的一次「差異事件」：兩次快照之間少掉的東西。
-    ///
-    /// <para>
     /// 🔑 「不知道」一律用 <c>-1</c> 表示，<b>不是 0</b>。0 在單價與實收欄位是一個合法但
     /// 荒謬的值，把「沒算出來」畫成 0 會讓使用者以為那筆真的是 0 gil。
     /// 讀出來之後 UI 必須把 -1 畫成灰色的 <c>?</c>。
-    /// </para>
-    ///
-    /// <para>
     /// 🔴 <b>這裡沒有「本週收益」這種東西。</b>這份記錄是事件清單，不是帳本：
     /// 低信心的列本來就可能不是賣出，把它們加總成一個數字等於用一個自信的數字
     /// 蓋掉「我們其實不知道」。要做總計只能限定在 <see cref="RetainerSaleConfidence.Sold"/>，
     /// 而且必須同時把低信心的件數放在旁邊。
-    /// </para>
     /// </summary>
     /// <param name="AtUtc">發現這件事的時間（＝後一次快照的時間，UTC）。</param>
     /// <param name="PrevAtUtc">前一次快照的時間（UTC）；這一列描述的是這兩個時間之間發生的事。</param>
@@ -99,19 +90,13 @@ namespace Marketbuddy
 
     /// <summary>
     /// 僱員銷售差異事件的 CSV 記錄檔（追加寫入），寫在 Marketbuddy 自己的設定目錄底下。
-    ///
-    /// <para>
     /// 執行緒：形狀逐字比照 <see cref="PriceSurveyLog"/> —— <b>鎖只用來把待寫清單拍快照／
     /// 清空</b>，真正的 I/O 在鎖外、在執行緒池上做。鎖內絕不做 I/O、不寫 log、
     /// 不呼叫別的外掛、不碰 ImGui。
-    /// </para>
-    ///
-    /// <para>
     /// 🔑 <b>另外留一份「這個工作階段寫過的列」在記憶體裡</b>：追加是非同步的，
     /// UI 一發現有新事件就去讀檔的話，很可能讀在 flush 之前，結果是「明明剛剛才記到，
     /// 畫面上卻沒有」。UI 把檔案列與這份記憶體列<b>用格式化後的整行字串去重</b>再合併，
     /// 就不會有那個空窗（<see cref="Format"/> 是決定性的，同一列一定產生同一行）。
-    /// </para>
     /// </summary>
     internal static class RetainerSalesLog
     {
