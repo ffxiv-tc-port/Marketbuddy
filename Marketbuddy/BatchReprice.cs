@@ -16,15 +16,9 @@ namespace Marketbuddy
     /// <summary>
     /// One-click "relist every listed slot of the current retainer at
     /// (lowest market price - undercut)" batch engine.
-    ///
-    /// Headless: market data is requested via InfoProxyItemSearch.RequestData()
-    /// and captured through the IMarketBoard.OfferingsReceived event; prices are
-    /// applied via InventoryManager.SetRetainerMarketPrice(). RetainerSell /
-    /// ItemSearchResult windows are never opened and no native UI is touched.
     /// No hooks, no packet forgery, no memory patches; a stuck market query is
     /// handled by timeout + a capped-backoff retry (up to MaxAttempts tries,
     /// backoff escalating fast then capped low), then the slot is skipped.
-    ///
     /// Strictly manual: runs only when the user clicks the button while a
     /// retainer's sell list (RetainerSellList) is open, or when QuickLister
     /// hands it a single just-listed slot to price. Cancellable at any time
@@ -34,40 +28,8 @@ namespace Marketbuddy
     {
         // Pacing / safety constants. Requests are throttled and retried with
         // backoff instead of patching the client's "please wait" throttle path.
-        //
         // 🔑 送出節流的真實形狀（以及它為什麼是 send→send 而不是 data→send）整段寫在
         // MarketRequestGate 的類別註解裡，那裡才是唯一真值來源，這裡不重複。
-        // 摘要：以「上一次送出」起算、基準 2000 ms，單發拒絕當成一次便宜的重試吸收掉，
-        // 只有拒絕成群或持續率超過 20% 才動間隔，之後自動衰減回 2000。
-        // ⚠️ 基準 2026-08-03 由 1700 提高到 2000：實機 341 次真值請求顯示 1700 的拒絕率
-        // 是 23.5% 而 ≥2000 是 0%，換算**有效間隔**（間隔÷(1−拒絕率)）反而是 2000 比較快。
-        //
-        // 🔴 2026-08-02 重新量測的回應延遲（把每一筆 REQUEST 配對到後續同道具的封包，
-        // 不受我們自己的逾時截斷，n=639 次有回應的請求，涵蓋 .14 與 .15 兩段）：
-        //     REQ → 第一個封包：p50 128 / p90 469 / p95 1213 / p99 1802 / **max 1955 ms**
-        //     REQ → HISTORY   ：p50 129 / p90 491 / max 1955 ms
-        //     REQ → OFFERINGS ：p50 476 / p90 765 / max 1989 ms
-        //     HISTORY → OFFERINGS：p50 312 / p99 410 / max 432 ms（n=866，>500 ms 掛零）
-        //
-        // ⚠️ 舊註解寫的「最慢 861 ms」只成立於 16:32–16:36 那段（.14，max 909 ms）。
-        // 19:17–19:36 那段（.15）有一條到 ~1.95 秒的長尾：4.25% 的請求第一個封包超過
-        // 1000 ms、3.36% 超過 1500 ms。所以舊的 NoResponseDeadlineMs=1000 會把
-        // **約 5% 真實但比較慢的回應誤判成「被伺服器吞掉」**，然後去撴寬閘門——
-        // 那正是 MarketRequestGate 註解裡描述的永久卡死路徑。
-        //
-        // 新門檻取 2500 ms：全部 639 筆量到的回應沒有任何一筆超過 2000 ms，2500 ms
-        // 比實測最大值多 28% 餘裕（而且 .16 的閘門會讓我們查得比量測當時更密，
-        // 伺服器延遲有機會更差一點，餘裕留寬一點）。
-        //
-        // 另外，「判定被吞掉」不再等於「立刻去撴寬閘門」：真正的判決延到**要送重試的
-        // 那一刻**才下（見 SlotPhase.Request）。中間只要那件道具的資料落進
-        // MarketDataCache（遲到的答案就是這樣被撿回來的），我們連重試都不會送，
-        // 閘門自然也不會被那次「其實沒被吞」的請求汙染。
-        //
-        // 🔑 2026-08-02（v7.20.0.18 探針實測，83 次請求）：**這個門檻已經退居保險絲。**
-        // 探針證明台服的拒絕**有封包**（`errorCode = 0x70000003`，送出後 229 ms 就到），
-        // 所以「被拒絕」現在由 MarketRequestResultProbe 直接判，不再靠這個 2500 ms 的猜測。
-        // 它剩下的兩個用途都是退路：探針解不出位址而停用時、以及封包真的完全沒到時。
         // ⚠️ 因此**不能調低**（要蓋住實測 1955 ms 的回應長尾），也不必調高。
         private const int NoResponseDeadlineMs = 2500; // fuse only: nothing at all by now => probably swallowed (verdict deferred to retry time)
         private const int ResponseTimeoutMs = 3500;    // hard cap per attempt once *something* did arrive (safety net; must stay above NoResponseDeadlineMs + EmptyResultGraceMs)
@@ -83,16 +45,9 @@ namespace Marketbuddy
 
         /// <summary>
         /// 「以歷史最近賣出價重掛」時，一格最多等 Universalis 這麼久。
-        ///
-        /// <para>
-        /// ⚠️ 這條路徑不送任何遊戲內查詢，等的是一個 HTTP 回應（<see cref="LastSoldPriceSource"/>
-        /// 自己的逾時是 15 秒，外加最多一次退避），所以 25 秒蓋得住正常情況。
         /// 逾時之後<b>不是失敗</b>：那一格落回既有的市場比價流程，也就是它原本的定價方式。
-        /// </para>
-        /// <para>
         /// 🔴 必須明顯小於 <see cref="SlotWatchdogSeconds"/>：那個看門狗一到期是<b>整批中止</b>，
         /// 而「網路慢」不該讓整輪重掛死掉。
-        /// </para>
         /// </summary>
         private const int LastSoldWaitMs = 25000;
 
@@ -155,9 +110,7 @@ namespace Marketbuddy
             /// <summary>伺服器明確回答「零掛售」（<c>errorCode == 0 &amp;&amp; listingCount == 0</c>）。</summary>
             public bool ProbeEmpty;
 
-            // ---------------------------------------------------------------
             // 成交價候選（S）的原始觀測。
-            //
             // 🔑 這裡刻意只存**原始資料**，不存算好的候選：異常低價保護要拿「這一格目前的
             // 掛售價」當退路基準，而那個值要在真的要定價的那一刻（SlotPhase.Apply）才讀，
             // 不然它與最終決策之間會隔著整條市場查詢的時間窗。
@@ -215,26 +168,6 @@ namespace Marketbuddy
         /// <summary>Retainer the <see cref="RecentChanges"/> marks belong to; the overlay ignores them for anybody else.</summary>
         public ulong RecentChangesRetainerId => recentChangesRetainerId;
 
-        // ---------------------------------------------------------------
-        // Temporary instrumentation (2026-08-02).
-        //
-        // Measured from the live log: every fresh market query costs a flat
-        // ~6.0s (was ~7.5s before the backoff was shortened), and the two
-        // populations differ by exactly the change in RetryBackoff - which
-        // proves the FULL OfferingsTimeoutMs is burned on attempt 1 of every
-        // query, and that attempt 2 then answers in ~0.5s. Exactly one query
-        // per batch (the first) is fast.
-        //
-        // What that does NOT tell us is WHY attempt 1 never completes. Two
-        // candidates produce identical timing and need opposite fixes:
-        //   (a) the request never reaches the server (client-side market
-        //       throttle) - no offerings packet arrives at all; or
-        //   (b) the packet DOES arrive and one of the guards in
-        //       OnOfferingsReceived drops it (RequestId collision, or an
-        //       ItemId mismatch).
-        // These logs are Information level on purpose: the user's log level is 1, so DBG
-        // is captured but drowned by the 100k+ DBG lines a single log file holds, and
-        // Dalamud's own marketboard packet tracing is Verbose - which really is filtered out.
         // Grep tag: MBDIAG
         private const string Diag = "[MBDIAG]";
         private DateTime lastDataReceivedAt = DateTime.MinValue;
@@ -274,17 +207,6 @@ namespace Marketbuddy
         /// <remarks>
         /// 🔴 只給<b>收尾通知</b>用，不影響任何重掛行為。巡迴會逐個僱員各跑一次這具引擎，
         /// 每一次都會走到 <see cref="OnQueueCompleted"/>；沒有這道閘，九個僱員就會響九次。
-        /// <para>
-        /// 📌 用委派而不是旗標，是因為「巡迴還在跑嗎」的真值只有巡迴自己知道，
-        /// 而且問的時機必須是<b>引擎收尾的那一刻</b>。巡迴在建構式裡註冊、Dispose 時撤掉；
-        /// 沒有巡迴（null）就當成沒人驅動。
-        /// </para>
-        /// <para>
-        /// ⚠️ 順序是安全的：本引擎的 <c>Framework.Update</c> 訂閱早於巡迴的，
-        /// 所以同一 tick 內本引擎先收尾、巡迴才有機會改變自己的狀態；
-        /// 而且巡迴在跑完最後一個僱員的批次時，佇列裡還有「離開僱員」等步驟，
-        /// <c>IsRunning</c> 此刻必為 true。
-        /// </para>
         /// </remarks>
         internal Func<bool>? ExternalDriverActive;
 
@@ -308,8 +230,6 @@ namespace Marketbuddy
         /// <summary>
         /// 查不到比價資料、因此**刻意**留在上限價等使用者手動定價的格數。
         /// 🔑 這不是失敗：沒有參考價的時候不亂猜一個價掛出去，正是它該做的事。
-        /// 但它需要人工介入，所以獨立成一個數字，不跟 <see cref="FailedCount"/> 混在一起
-        /// ——算成「失敗」會讓使用者去找一個根本不存在的故障。
         /// </summary>
         public int NeedsPricingCount { get; private set; }
 
@@ -324,12 +244,6 @@ namespace Marketbuddy
         /// <summary>
         /// 此刻正在處理的那一格的市場容器索引，閒置時 -1。**純顯示用**
         /// （<see cref="LiveSellList"/> 靠它把那一列亮起來），沒有任何行為作用。
-        ///
-        /// 它在 <see cref="TickSlot"/> 一進來就設好、直到下一格接手才變，
-        /// 所以整段「送出 → 等回應 → 定價 → 完成」都指著同一格，不會只閃一下；
-        /// 快取命中（根本沒送請求）那條路徑也一樣會經過這裡。
-        /// 快速上架的單件定價走的是 <see cref="StartQuickReprice"/> → <see cref="BeginBatch"/>，
-        /// 也就是同一條 TickSlot，所以兩條路徑都涵蓋得到。
         /// </summary>
         public short CurrentSlot { get; private set; } = -1;
 
@@ -423,13 +337,7 @@ namespace Marketbuddy
                 return false;
             }
 
-            // 🔴 `MarketItemCount` 是**僱員結構上的計數器**，不是即時的出售品容器內容，
-            // 它會落後於我們自己剛剛掛上去的東西。實機 log 抓到的時序是決定性的：
-            //   03:26:36.720  engine refused: 這名僱員沒有上架中的物品 (queued=1, head='厚土大斧')
-            //   03:26:36.731  厚土大斧：已上架（暫掛上限價），開始比價定價…
-            // 也就是這個閘門說「沒有東西」的時間點，比我們自己在**市場容器裡實際看到**
-            // 那件道具還早 11 毫秒。結果是剛掛上去的道具卡在 999999999 沒被定價。
-            //
+            // 🔴 MarketItemCount 是**僱員結構上的計數器**，不是即時的出售品容器內容，會落後於我們自己剛剛掛上去的東西。
             // 🔑 呼叫端如果已經指名了某一格（快速上架的單件定價就是），它手上的資訊
             // 比這個計數器新也比它具體——StartQuickReprice 會直接去讀那一格確認
             // ItemId != 0，那才是這個引擎真正要操作的東西。這種時候不該讓落後的
@@ -498,8 +406,6 @@ namespace Marketbuddy
         /// </summary>
         /// <summary>
         /// 上一次 <see cref="StartQuickReprice"/> 被拒絕的原因，供 QuickLister 記進診斷 log。
-        /// 這裡原本把 CanStart 的 reason 丟掉（<c>out _</c>），導致「排進佇列 30 秒沒人接手」
-        /// 在 log 裡毫無線索——2026-08-02 實機遇到時只能靠推理。
         /// </summary>
         public string LastStartRefusalReason { get; private set; } = string.Empty;
 
@@ -699,8 +605,6 @@ namespace Marketbuddy
                 case SlotPhase.Throttle:
                     // 成交價候選（S）先解出來，但**不定價**：定價規則是「成交價與板上最低價
                     // 取低者」，所以這一格照樣要往下走市場查詢流程去拿板上的最低價。
-                    // 🔴 2026-09-12 之前這裡命中就直接定價、完全不看板上掛單——板上有人開得
-                    //    更低時我們會掛在賣不掉的價。取低的那一步在 ApplySlot。
                     // ⚠️ 排在最前面是因為它要等一個 HTTP 回應，而那段時間正好可以與
                     //    MarketRequestGate 的間隔重疊。
                     if (conf.RelistUseLastSoldPrice && !job.LastSoldDone &&
@@ -709,7 +613,6 @@ namespace Marketbuddy
 
                     // Fresh cached market data for this item skips the whole
                     // request/wait pipeline (and the request throttle).
-                    //
                     // 這一步刻意排在退避與閘門檢查**之前**：一次逾時之後遲到的答案會落進
                     // MarketDataCache，下一個 tick 就在這裡被撿回來，於是那次重試根本不會
                     // 送出去（實測 63 次重試裡有 18 次，答案在我們重問之前就已經到了）。
@@ -742,12 +645,7 @@ namespace Marketbuddy
 
                     // 🔴 上一次真的被吞掉/被拒絕的**判決點**。走到這裡代表已經過了退避、
                     // 也確認快取裡沒有遲到的答案可用，現在真的要再問一次同一件事。
-                    // ⚠️ 必須在下面的 IsReady 之前呼叫：舊版把它放在 SlotPhase.Request，
-                    // 那時閘門檢查早就通過了，所以撴寬對「這一次重試」完全無效——
-                    // 實機 .19 拒絕於 send-gap 1719 ms，重試仍然以 send-gap 1718 ms 送出。
-                    // ⚠️ 舊註解在這裡加了一句「順帶證明了間隔不是拒絕的原因」——**那句已被推翻**。
-                    // 那只是單一一次配對，而 341 次真值請求顯示 1700 ms 的拒絕率是 23.5%、
-                    // ≥2000 ms 是 0%。詳見 MarketRequestGate 的類別註解。
+                    // ⚠️ 必須在下面的 IsReady 之前呼叫：放在閘門檢查之後才呼叫，撴寬對「這一次重試」完全無效。
                     if (job.RefusalPending)
                     {
                         job.RefusalPending = false;
@@ -784,11 +682,6 @@ namespace Marketbuddy
 
                     job.Attempt++;
 
-                    // 🔎 2026-08-02 鑑識：台服 InfoProxyItemSearch 的 vf10 (`EndRequest`) 位元組是
-                    // `C2 00 00` —— **空函式**。舊註解寫的「reset any dangling request state」
-                    // 描述的效果從來不存在。真的要重設只能自己寫這兩個欄位，而遊戲自己在
-                    // ProcessRequestResult 的尾段做的也正是這件事（`mov [rbx+0x4810], ebp` 與
-                    // vf13 的 `mov [rcx+0x10], 0`），所以偏移與寫法都有二進位佐證。
                     // 為什麼要清：從這裡到伺服器回覆之間，SearchItemId 已經是**新**道具，
                     // 但 ListingCount/EntryCount 還是**上一件**的 —— 這段期間任何讀 proxy 的
                     // 消費者（含遊戲自己的市場面板）會把舊清單當成新道具的清單。
@@ -903,8 +796,6 @@ namespace Marketbuddy
                     //   • job.ProbeEmpty —— 伺服器直說 listingCount == 0。反編譯證實客戶端在
                     //     這個情況下**不送續頁請求**，所以 offerings 封包永遠不會來，
                     //     等 EmptyResultGraceMs 是在等一個保證不會發生的事件。
-                    //   • historySeen + 寬限 —— 探針沒掛上（IsInstalled == false）或訊號被別的
-                    //     查詢蓋掉時的退路，行為與 .18 之前完全相同。
                     if (job.ProbeEmpty || (historySeen && (now - historySeenAt).TotalMilliseconds >= EmptyResultGraceMs))
                     {
                         Log.Debug(
@@ -933,13 +824,6 @@ namespace Marketbuddy
                     //   (b) history 來了、offerings 沒來 → 請求送到了，是伺服器/網路慢
                     //       → 間隔沒有問題，加長它只會白白拖慢每一件。
                     // (a) 判得比 (b) 早：實測第一個封包最遲 1955 ms 會出現，門檻取 2500 ms。
-                    //
-                    // 🔑 NoResponseDeadlineMs 現在是**純保險絲**，不再是主要判準。
-                    // 探針上線後，「伺服器拒絕」由 errorCode 直接判（實機 229 ms），這條逾時
-                    // 只剩下兩個用途：(1) 探針解不出位址而停用時的退路；
-                    // (2) 真的連 ProcessRequestResult 都沒被呼叫（封包完全沒到）的情況。
-                    // 所以門檻**不能調低**——它要蓋住實測 1955 ms 的回應長尾，2500 ms 留 28% 餘裕。
-                    // 反過來說也不必調高：真正需要快速反應的情境已經被探針接走了。
                     var swallowed = !historySeen && waitedMs > NoResponseDeadlineMs;
                     if (swallowed || waitedMs > ResponseTimeoutMs)
                     {
@@ -978,24 +862,11 @@ namespace Marketbuddy
 
         /// <summary>
         /// 把「資料中心最近一筆成交價」這個<b>候選</b>解出來並記在這一格上。
-        ///
-        /// <para>
-        /// 🔴 <b>它不再自己定價。</b>2026-09-12 之前這裡命中就直接把價格寫下去、完全不看板上
-        /// 掛單，於是板上有人開得比成交價更低時我們會掛在<b>賣不掉</b>的價。現在成交價只是
-        /// 兩個候選之一，取低的那一步在 <see cref="ApplySlot"/>（規則本體見
-        /// <see cref="RelistPricing"/>）。
-        /// </para>
-        ///
-        /// <para>
         /// 回傳值刻意是兩態：<c>Continue</c>＝還在等 Universalis 回答；
         /// <b><c>null</c>＝這一格的成交價候選已經有結論了</b>（可能有值、可能沒有），
         /// 呼叫端要繼續往下走市場查詢流程。用 <c>bool</c> 表示不了「還在等」，
         /// 而把「還在等」誤當成「查不到」會讓第一批永遠拿不到成交價。
-        /// </para>
-        ///
-        /// <para>
         /// 🔴 這一段<b>一次遊戲內市場查詢都不送</b>：價格來自 Universalis 的 HTTP API。
-        /// </para>
         /// </summary>
         private TickTaskResult? TickSaleCandidate(SlotJob job, DateTime now)
         {
@@ -1034,9 +905,6 @@ namespace Marketbuddy
                 //    那一筆成交會把我們整格拉到那個價。
                 //    這裡拿「本世界目前的最低掛售價」當正常價——那是與這筆成交
                 //    完全獨立的另一個觀測，整體崩盤時它會跟著低，所以不會把崩盤誤判成異常。
-                //    ⚠️ 它**不排除自家掛單**（Universalis 給的是伺服器端算好的單一最小值，
-                //    手上沒有原始清單，過濾不掉）⇒ 自己是唯一賣家時它退化成「拿自己的價比」，
-                //    也就是與 Own 基準同一個答案。這一點是已知的精度上限，不是 bug。
                 //    📌 刻意**不**改用這一輪查到的板上最低價：那個值同時也是候選 L 的參考價，
                 //    拿 L 去替 S 背書會讓兩個候選不再互相獨立。
                 job.SalePeerBaseline =
@@ -1048,9 +916,6 @@ namespace Marketbuddy
             }
 
             // 走到這裡有四種情形，處置相同：這一格沒有成交價候選，只剩板上比價。
-            //   (a) Universalis 沒有這件的成交紀錄；
-            //   (b) 查詢失敗；
-            //   (c) 有資料，但「不忽略優質」而這個品質剛好沒有成交紀錄；
             //   (d) 有成交紀錄，但全部來自世界排除清單上的世界（拉姆已停止營運那條）。
             //     🔴 這一種刻意<b>不</b>拿別的來源代打：沒有成交紀錄的往往正是稀有的東西，
             //     湊一個價出來會賤賣。所以照樣只走板上比價，並在 log 裡標明是這個原因。
@@ -1103,17 +968,9 @@ namespace Marketbuddy
 
         /// <summary>
         /// 遊戲內市場查詢這條路走不通了（送不出去／被伺服器拒絕／逾時，而且重試次數已經用完）。
-        ///
-        /// <para>
         /// 🔑 這裡<b>不再直接判失敗</b>：跨世界價格巡檢已經把全世界的掛售清單掃過一遍，
         /// 家世界那一列可以補位（見 <see cref="TryUseSurveyFallback"/>）；補不到、但這一格
         /// 有成交價候選時，照樣定得出價。<b>兩條都沒有才真的是失敗。</b>
-        /// </para>
-        /// <para>
-        /// 📌 台服的市場查詢會靜默被拒絕，而新的定價規則每一格都需要板上的最低價
-        /// ——這個補位就是為了那件事存在的。
-        /// </para>
-        /// </summary>
         /// <param name="reason">真的失敗時給使用者看的原因（已在地化）。</param>
         /// <param name="tag">失敗的形狀，只進 log：<c>send-failed</c>／<c>refused</c>／<c>timeout</c>。</param>
         private TickTaskResult GiveUpOnMarketQuery(SlotJob job, string reason, string tag)
@@ -1140,14 +997,8 @@ namespace Marketbuddy
         /// <remarks>
         /// 🔴 <b>只認家世界</b>。別的世界的掛單永遠不會變成定價依據——別人在別的世界比我便宜，
         /// 不代表我在自己的市場上吃虧。（待處理清單上的 <c>survey-other</c> 是純顯示，那是另一件事。）
-        /// <para>
         /// 🔴 讀的是 <see cref="PriceSurveySnapshot"/> 這份記憶體索引，<b>不是檔案</b>：
         /// 這裡是 framework 執行緒，讀一個幾萬列的 CSV 就是掉幀。
-        /// </para>
-        /// <para>
-        /// ⚠️ 拿不到時寫一行 Information：「巡檢沒掃過這件」與「掃過但太舊」的處置相同，
-        /// 但使用者能做的事完全不同（前者去掃一輪就好）。
-        /// </para>
         /// </remarks>
         private bool TryUseSurveyFallback(SlotJob job, string tag)
         {
@@ -1180,16 +1031,9 @@ namespace Marketbuddy
         /// <summary>
         /// 這一格的定價決策：算出 <b>L</b>（板上別人的最低價）與 <b>S</b>（資料中心最近一筆成交價）
         /// 兩個候選，<b>取低者</b>，然後交給 <see cref="FinishPricing"/>。
-        ///
-        /// <para>
         /// 🔑 規則本體在 <see cref="RelistPricing"/>，那裡是唯一真值來源，而且
         /// <see cref="PendingActionsBuilder"/> 用的是<b>同一支</b>函式——清單上寫的建議價與
         /// 按下按鈕之後真的掛出去的價因此不可能分岔。這一段只負責「把輸入在正確的執行緒上取好」。
-        /// </para>
-        /// <para>
-        /// 🔴 下架門檻（低於 NPC 淨價、低於最低價）的順序<b>沒有變</b>：目標價算出來之後照樣
-        /// 經過 <see cref="FinishPricing"/>。
-        /// </para>
         /// </summary>
         private void ApplySlot(SlotJob job)
         {
@@ -1350,10 +1194,8 @@ namespace Marketbuddy
         /// <remarks>
         /// 🔴 這一行是 <c>Information</c>：它就是「事後查得到為什麼那一件掛在這個價」的那一行，
         /// 而使用者的 LogLevel 放行到 Debug 為止、Debug 單檔數十萬行會把它淹掉。
-        /// <para>
         /// 📌 <c>boardCompetitor</c> 是獨立欄位而不是從 <c>L=</c> 讀：自家掛單是最低價時 L 會被
         /// 當成「沒有」，那時候板上別人開多少仍然是判讀時必要的資訊。
-        /// </para>
         /// </remarks>
         private void LogPricingDecision(SlotJob job, PriceCandidate listing, PriceCandidate sale,
             RelistDecision decision, long listedPrice, bool ownIsLowest, long competitor)
@@ -1383,10 +1225,8 @@ namespace Marketbuddy
         /// by hand.
         /// </summary>
         /// <remarks>
-        /// 🔴 這裡以前會在使用者設了「最低價」時直接照那個最低價掛出去，那是**賤賣**：
         /// 板上沒人賣的東西往往正是稀有的。最低價欄位的語意是「算出來的價低於它就別掛了」
         /// （見 <see cref="FinishPricing"/> 的下架守衛），不是「查不到價就拿它當價格」。
-        /// 現在一律維持在上限價等人工定價——那也是使用者明確要的行為。
         /// </remarks>
         private void HandleNoListings(SlotJob job, string cacheTag)
         {
@@ -1473,9 +1313,6 @@ namespace Marketbuddy
 
         private void OnOfferingsReceived(IMarketBoardCurrentOfferings offerings)
         {
-            // Diagnostics: log EVERY offerings packet and the branch it takes.
-            // This is the measurement that separates "the request never went
-            // out" from "the answer arrived and we threw it away".
             // ⚠️ 這個處理器**只**負責「我們正在等的那一件」的快通道。把每一筆封包都存進
             // 快取是 MarketDataCache 自己那個獨立的訂閱做的事——包括下面每一條 dropped
             // 分支所丟掉的封包，它們一樣都已經被存起來了，只是不會在這裡被採用。
@@ -1824,10 +1661,6 @@ namespace Marketbuddy
         /// </summary>
         /// <param name="listedPrice">這一格目前的掛售價，只拿來顯示；-1＝讀不到。</param>
         /// <param name="referenceKind">參考價是哪一種（<c>listing</c> 或 <c>sale@時間</c>），只進 log。</param>
-        /// <remarks>
-        /// 🔴 這一行是 <c>Information</c>：這正是「事後要查得到為什麼那一件沒降價」的那一行，
-        /// 而使用者的 LogLevel 放行到 Debug 為止，Debug 單檔數十萬行會把它淹掉。
-        /// </remarks>
         private void HoldForAnomaly(SlotJob job, PriceAnomaly anomaly, long listedPrice,
             string referenceKind, string cacheTag)
         {
@@ -1939,13 +1772,8 @@ namespace Marketbuddy
         }
 
         /// <summary>
-        /// 一次查價 = 一行 Information。原本 REQUEST / MKTRESULT / OFFERINGS /
-        /// CACHE-STORE / HISTORY 各印一行，實機一輪累積約 16k 行 Information，
-        /// 把使用者 log 裡別的東西擠掉。那些細節現在全部降到 Debug，需要時把
-        /// LogLevel 調到 Debug 就整組回來，判讀邏輯完全沒變。
         /// 這一行必須留在 Information：使用者跑 LogLevel 1，盲區只有 Verbose,Debug 收得到但單檔數十萬行會淹沒，
         /// 沒有它就完全看不見查價發生過。
-        /// </summary>
         /// <param name="via">答案是怎麼來的：cache / offerings / empty(...)。</param>
         /// <param name="n">採用的掛單筆數。</param>
         private void LogQuerySummary(SlotJob job, string via, int n, DateTime now)
