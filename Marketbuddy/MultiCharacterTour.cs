@@ -696,7 +696,7 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
 
     /// <summary>
     /// 畫在 AutoRetainer 主視窗控制列（「重設計數器」那一列尾端）與僱員清單懸浮窗的
-    /// 「武裝一輪」按鈕（2026-08-31 使用者要求）。AR 每幀 SendMessage 呼叫進來。
+    /// 「武裝一輪」按鈕。AR 每幀 SendMessage 呼叫進來。
     /// 🔴 例外絕不能洩出去：這是 AR 的 Draw 鏈，Dalamud 對 Window.Draw 擲兩次例外會
     /// 永久關掉人家的主視窗。第一次失敗印一行 Information，之後靜默。
     /// </summary>

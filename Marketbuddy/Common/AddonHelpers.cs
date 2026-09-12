@@ -82,7 +82,7 @@ namespace Marketbuddy.Common
         {
             closedByCallback = false;
 
-            // 🔴🔴 送出前的就地就緒檢查（2026-09-04 補）。
+            // 🔴🔴 送出前的就地就緒檢查。
             //    ⚠️ 這一道**不是**「擋得住正在關閉中的窗」的檢查 —— IsAddonReady 的三關
             //    （非 null／IsVisible／LoadedState == Loaded）在窗被按下之後的拆除途中是**全過**的，
             //    單獨看它一個東西都擋不到。**這個結論不可以當成通用結論搬去別的地方用。**

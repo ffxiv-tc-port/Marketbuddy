@@ -37,7 +37,7 @@ namespace Marketbuddy
         private const int ClusterRefusals = 3;
 
         // --- 保險絲 ② 持續率：拒絕率**明顯**超過損益兩平點 --------------------
-        /// <summary>持續率的觀察窗大小。2026-08-03 由 20 放長到 50。</summary>
+        /// <summary>持續率的觀察窗大小。</summary>
         private const int RateWindowRequests = 50;
 
         /// <summary>

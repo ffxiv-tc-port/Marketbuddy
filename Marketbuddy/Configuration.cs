@@ -42,7 +42,7 @@ namespace Marketbuddy
 
         /// <summary>
         /// ⚠️ **已停用，保留只為了不動到既有設定檔。** 這是舊的「貼在出售品視窗標題列上的
-        /// 浮動列」相對**左上角**的位移；2026-08-03 重掛介面改成獨立視窗之後，位置改由
+        /// 浮動列」相對**左上角**的位移；重掛介面改成獨立視窗之後，位置改由
         /// <see cref="RepriceWindowOffset"/> 決定。改這個欄位不會有任何效果。
         /// </summary>
         public Vector2 AdjustMaxStackSizeInSellListOffset = new Vector2(77, 10);

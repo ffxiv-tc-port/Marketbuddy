@@ -166,7 +166,7 @@ namespace Marketbuddy
         private bool containerReady;
         private ulong snapshotRetainerId;
 
-        /// <summary>「這是哪一位僱員的掛單」——名稱＋鈴清單上的序號（2026-08-24 使用者需求）。
+        /// <summary>「這是哪一位僱員的掛單」——名稱＋鈴清單上的序號。
         /// 在 framework 執行緒隨快照一起算好，Draw 只讀字串。</summary>
         private string retainerLabel = string.Empty;
 

@@ -781,8 +781,7 @@ namespace Marketbuddy
             catch (Exception e)
             {
                 // 🔑 這裡也是「回應根本不是 JSON」的落點：Universalis 在 Cloudflare 後面，
-                //    服務出狀況時會吐 `error code: 520` 這種純文字錯誤頁。實機 log 證實同一台
-                //    機器上 InventoryTools 因為這個在 2026-09-09 一天內炸了 95 次。
+                //    服務出狀況時會吐 `error code: 520` 這種純文字錯誤頁。
                 //    JsonException 是 Exception 的子類，所以會停在這裡：查詢迴圈不會被打死，
                 //    這一批被標成「失敗」（暫時的），下一批照常。
                 NoteFailure(e.Message);

@@ -67,7 +67,7 @@ namespace Marketbuddy
         private const int NumericFieldCount = 25;
 
         // ToNumeric()／ToCsv() 的欄位位置。兩者前 25 欄逐字相同（CriticalCommonLib
-        // 的 InventoryItem.cs，2026-09-07 實讀），所以 IPC 與 CSV 兩條路共用這組常數。
+        // 的 InventoryItem.cs），所以 IPC 與 CSV 兩條路共用這組常數。
         private const int FieldContainer = 0;
         private const int FieldSlot = 1;
         private const int FieldItemId = 2;

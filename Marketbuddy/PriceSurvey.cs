@@ -24,7 +24,7 @@ namespace Marketbuddy
     internal sealed unsafe class PriceSurvey : IDisposable
     {
         // ---- 節奏常數 ---------------------------------------------------------
-        // 🔑 這些值刻意與 BatchReprice 對齊（那組是 2026-08-02/03 兩輪實機量測定下來的），
+        // 🔑 這些值刻意與 BatchReprice 對齊（那組是兩輪實機量測定下來的），
         //    只有嘗試次數放少：巡檢沒有「這一格一定要有答案」的壓力，問不到就記一筆
         //    「問不到」往下走，比反覆重試更誠實也更快。
         private const int NoResponseDeadlineMs = 2500; // 什麼封包都沒來 => 大概被吞掉了

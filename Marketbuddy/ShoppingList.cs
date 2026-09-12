@@ -380,7 +380,7 @@ namespace Marketbuddy
 
         /// <summary>
         /// 名稱→道具 id。第一次用到才建，而且只在 framework 執行緒上建。
-        /// ⚠️ 台服有 61 組同名不同 id 的道具（2026-09-10 對 <c>exd-tc</c> 實數）——
+        /// ⚠️ 台服有 61 組同名不同 id 的道具（對 <c>exd-tc</c> 實數）——
         /// <b>先出現的（id 小的）勝出</b>，要指定另一個就在清單檔裡直接寫 id。
         /// </summary>
         private static Dictionary<string, uint> Index(Lumina.Excel.ExcelSheet<Item> sheet)

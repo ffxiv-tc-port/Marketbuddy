@@ -706,7 +706,7 @@ namespace Marketbuddy
                 }
             }
 
-            // 兩個候選都沒有 ⇒ 退回純顯示的估計值（語意與 2026-09-12 之前完全相同）。
+            // 兩個候選都沒有 ⇒ 退回純顯示的估計值。
             if (observed.OtherSource == "survey-other")
                 return new Suggestion(
                     RelistPricing.ApplyUndercut(observed.OtherReference, undercut), "survey-other",
