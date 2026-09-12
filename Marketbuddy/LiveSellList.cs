@@ -65,6 +65,25 @@ namespace Marketbuddy
             /// <summary>這一件的「歷史最近賣出價」目前處在什麼狀態（查詢中／查不到／有值）。</summary>
             public LastSoldState SoldState { get; init; }
 
+            /// <summary>
+            /// 這一幀「歷史最近賣出價」的查詢到底有沒有在跑（＝那個定價方式開著）。
+            ///
+            /// <para>
+            /// 🔴 這個旗標存在的唯一理由：<see cref="LastSoldState.Unknown"/> 有<b>兩種</b>
+            /// 完全不同的意思。定價方式開著時它是「這一幀剛好還沒排到」，下一幀就會變成
+            /// <see cref="LastSoldState.Loading"/>；關著時它是「<b>永遠</b>不會有人去問」
+            /// ——通往 <c>LastSoldPriceSource.Request()</c> 的每一條路徑（這個面板的預取、
+            /// <c>BatchReprice</c> 的批次預取、以及它逐格的補查）都在
+            /// <c>RelistUseLastSoldPrice</c> 底下，所以那個開關關著時一個查詢都不會送出去。
+            /// </para>
+            /// <para>
+            /// 🔴 兩種都畫成「正在查…」的話，面板會<b>永遠</b>宣稱有一個根本不存在的查詢
+            /// 在跑（2026-09-13 之前就是這樣：只開市場價格欄、不開定價方式的人，三欄
+            /// 一直停在 <c>…</c>）。
+            /// </para>
+            /// </summary>
+            public bool SoldLookupEnabled { get; init; }
+
             /// <summary>成交單價；只有 <see cref="HasSold"/> 為 true 時才有意義。</summary>
             public long SoldUnitPrice { get; init; }
 
@@ -484,6 +503,10 @@ namespace Marketbuddy
                     (uint)inventoryManager->GetRetainerMarketPrice((short)i))
                 {
                     SoldState = soldState,
+                    // 🔴 與 soldState 一起抄進這一幀的快照，不要留到畫的時候才去讀
+                    //    conf：那會讓「這個 Unknown 是暫時的還是永久的」與它算出來的
+                    //    那一刻脫鉤。
+                    SoldLookupEnabled = conf.RelistUseLastSoldPrice,
                     HasSold = hasSold,
                     SoldExcluded = soldExcluded,
                     SoldUnitPrice = hasSold ? sold.UnitPrice : 0,
@@ -822,7 +845,7 @@ namespace Marketbuddy
                 return;
             }
 
-            DrawMissing(row.SoldState,
+            DrawMissing(row,
                 "Nobody has this listed there right now, as far as Universalis knows.".Loc());
         }
 
@@ -842,7 +865,7 @@ namespace Marketbuddy
         {
             if (!row.HasSold)
             {
-                DrawMissing(row.SoldState, "No sale on record for this item.".Loc(),
+                DrawMissing(row, "No sale on record for this item.".Loc(),
                     row.SoldExcluded);
                 return;
             }
@@ -1039,18 +1062,37 @@ namespace Marketbuddy
         }
 
         /// <summary>
-        /// 「查詢中」「連不上」「沒有資料」「全部來自被排除的世界」四種缺席狀態的統一畫法
-        /// ——四種都必須分得出來。
+        /// 「沒查過」「查詢中」「連不上」「沒有資料」「全部來自被排除的世界」五種缺席狀態的
+        /// 統一畫法——五種都必須分得出來。
         /// </summary>
         /// <param name="excludedWorldOnly">
         /// 有紀錄，但能用的那幾筆全部落在排除清單上的世界。⚠️ 預設 false：
         /// 最低掛售價那兩欄刻意不套排除清單，所以它們不傳這個參數。
         /// </param>
-        private static void DrawMissing(LastSoldState state, string noDataTooltip,
+        private static void DrawMissing(in Row row, string noDataTooltip,
             bool excludedWorldOnly = false)
         {
-            switch (state)
+            switch (row.SoldState)
             {
+                // 🔴 定價方式關著時 Unknown 是「終局」而不是「過程」：沒有任何一條路徑會去
+                //    問 Universalis（理由寫在 Row.SoldLookupEnabled）。這裡畫「正在查…」
+                //    的話，面板會永遠宣稱有一個不存在的查詢在跑。
+                // 🔑 這一格與下面「問過了、但沒有紀錄」共用灰色的 ?：列上要傳達的是同一句
+                //    「不知道」，而「為什麼不知道」照慣例放滑鼠提示。
+                // ⚠️ 兩者**有可能同時出現在同一張表上**，不要以為分得開：
+                //    LastSoldPriceSource.Cache 是 static 的，只在 Shutdown() 與換世界時
+                //    清空，**不會**因為使用者把定價方式關掉而清空 ⇒ 曾經開過又關掉的人，
+                //    舊道具畫「沒有紀錄」的 ?、之後新上架的畫這一格的 ?。
+                //    刻意接受：兩個提示各自說得清楚，而兩者的處置相同（這一欄沒有值）。
+                //    🔴 哪天覺得這不夠，正解是給這一格一個自己的符號 ——
+                //    … ! × ? 都已經被上面四種狀態占用了，要挑第五個。
+                case LastSoldState.Unknown when !row.SoldLookupEnabled:
+                    Grey("?");
+                    Tooltip(
+                        "Not looked up. These figures come from the Universalis request that the relist pricing sends, and that pricing is turned off - so nothing has been asked. Turn on 'Also price from the most recent sale, and use whichever is lower' to fill these in."
+                            .Loc());
+                    break;
+
                 case LastSoldState.Unknown:
                 case LastSoldState.Loading:
                     Grey("...");
