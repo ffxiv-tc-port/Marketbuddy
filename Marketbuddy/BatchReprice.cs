@@ -154,6 +154,41 @@ namespace Marketbuddy
             public bool ProbeRefused;
             /// <summary>伺服器明確回答「零掛售」（<c>errorCode == 0 &amp;&amp; listingCount == 0</c>）。</summary>
             public bool ProbeEmpty;
+
+            // ---------------------------------------------------------------
+            // 成交價候選（S）的原始觀測。
+            //
+            // 🔑 這裡刻意只存**原始資料**，不存算好的候選：異常低價保護要拿「這一格目前的
+            // 掛售價」當退路基準，而那個值要在真的要定價的那一刻（SlotPhase.Apply）才讀，
+            // 不然它與最終決策之間會隔著整條市場查詢的時間窗。
+
+            /// <summary>成交單價；<b>-1＝沒有可用的成交紀錄</b>（不是 0）。</summary>
+            public long SaleUnitPrice = -1;
+
+            /// <summary>那筆成交的時間；<see cref="DateTime.MinValue"/>＝不知道。</summary>
+            public DateTime SaleAtUtc = DateTime.MinValue;
+
+            /// <summary>那筆成交本身是優質品嗎（可能與這一格的品質不同——那就是「忽略優質」的意思）。</summary>
+            public bool SaleHq;
+
+            /// <summary>那筆成交發生在哪個世界；空＝回應裡沒帶世界。</summary>
+            public string SaleWorld = string.Empty;
+
+            /// <summary>
+            /// 異常低價保護在成交價這一側要用的同業基準（＝本世界目前最低掛售價）；-1＝不知道。
+            /// </summary>
+            public long SalePeerBaseline = -1;
+
+            // ---------------------------------------------------------------
+            // 巡檢補位（板上最低價 L 的第三來源）。
+
+            /// <summary>
+            /// 遊戲內查詢整個失敗之後，改用的巡檢記錄裡家世界那一列的最低價；-1＝沒有。
+            /// </summary>
+            public long SurveyLowest = -1;
+
+            /// <summary>上面那一列是什麼時候掃到的。</summary>
+            public DateTime SurveyAtUtc = DateTime.MinValue;
         }
 
         private readonly MarketGuiEventHandler gui;
@@ -567,6 +602,12 @@ namespace Marketbuddy
                     itemIds.Add(job.ItemId);
                 RequestLastSoldPrices(itemIds);
             }
+
+            // 巡檢補位要用的記憶體索引。🔴 讀檔在執行緒池上，這裡只是把它踢起來；
+            // 已經讀過就是一次 Interlocked 比較。⚠️ 它是**補位**，所以來不及讀完也只是
+            // 退回「查詢失敗就算失敗」的舊行為，不會讓任何一格拿到錯的價。
+            if (conf.RelistSurveyFallbackHours > 0)
+                PriceSurveySnapshot.EnsureLoaded();
             lastAcceptedRequestId = int.MinValue;
             offeringsPending = false;
             offeringsReceived = false;
@@ -656,13 +697,15 @@ namespace Marketbuddy
             switch (job.Phase)
             {
                 case SlotPhase.Throttle:
-                    // 「以歷史最近賣出價重掛」——這個定價方式完全不需要市場資料，所以排在
-                    // 最前面：命中的話這一格連一次遊戲內市場查詢都不會送出去。
-                    // 🔴 查不到的道具**不在這裡處理**，直接往下走既有的市場比價流程
-                    //    （不猜、不拿別的來源硬湊）。
+                    // 成交價候選（S）先解出來，但**不定價**：定價規則是「成交價與板上最低價
+                    // 取低者」，所以這一格照樣要往下走市場查詢流程去拿板上的最低價。
+                    // 🔴 2026-09-12 之前這裡命中就直接定價、完全不看板上掛單——板上有人開得
+                    //    更低時我們會掛在賣不掉的價。取低的那一步在 ApplySlot。
+                    // ⚠️ 排在最前面是因為它要等一個 HTTP 回應，而那段時間正好可以與
+                    //    MarketRequestGate 的間隔重疊。
                     if (conf.RelistUseLastSoldPrice && !job.LastSoldDone &&
-                        TickLastSoldPricing(job, now) is { } lastSoldResult)
-                        return lastSoldResult;
+                        TickSaleCandidate(job, now) is { } saleWaitResult)
+                        return saleWaitResult;
 
                     // Fresh cached market data for this item skips the whole
                     // request/wait pipeline (and the request throttle).
@@ -784,10 +827,8 @@ namespace Marketbuddy
                     {
                         offeringsPending = false;
                         if (job.Attempt >= MaxAttempts)
-                        {
-                            Fail(job, "market data request could not be sent".Loc());
-                            return TickTaskResult.Done;
-                        }
+                            return GiveUpOnMarketQuery(
+                                job, "market data request could not be sent".Loc(), "send-failed");
 
                         job.NotBefore = now.AddMilliseconds(RetryBackoffFor(job.Attempt));
                         job.Phase = SlotPhase.Throttle;
@@ -850,10 +891,8 @@ namespace Marketbuddy
                         job.RefusalGapMs = job.SendGapMs;
 
                         if (job.Attempt >= MaxAttempts)
-                        {
-                            Fail(job, "the server refused the market query".Loc());
-                            return TickTaskResult.Done;
-                        }
+                            return GiveUpOnMarketQuery(
+                                job, "the server refused the market query".Loc(), "refused");
 
                         job.NotBefore = now.AddMilliseconds(RetryBackoffFor(job.Attempt));
                         job.Phase = SlotPhase.Throttle;
@@ -917,10 +956,8 @@ namespace Marketbuddy
                         }
 
                         if (job.Attempt >= MaxAttempts)
-                        {
-                            Fail(job, "no market data received (timed out)".Loc());
-                            return TickTaskResult.Done;
-                        }
+                            return GiveUpOnMarketQuery(
+                                job, "no market data received (timed out)".Loc(), "timeout");
 
                         job.NotBefore = now.AddMilliseconds(RetryBackoffFor(job.Attempt));
                         job.Phase = SlotPhase.Throttle;
@@ -940,20 +977,27 @@ namespace Marketbuddy
         }
 
         /// <summary>
-        /// 「以歷史最近賣出價，無條件捨去到百位」這個定價方式的整條處理。
+        /// 把「資料中心最近一筆成交價」這個<b>候選</b>解出來並記在這一格上。
         ///
         /// <para>
-        /// 回傳值刻意是三態：<c>Done</c>＝這一格已經用這個價格處理完；<c>Continue</c>＝還在等
-        /// Universalis 回答；<b><c>null</c>＝這個定價方式不適用這一格</b>，呼叫端要繼續走既有的
-        /// 市場比價流程。用 <c>bool</c> 表示不了中間那一態，而把「還在等」誤當成「查不到」
-        /// 會讓第一批永遠拿不到歷史價。
+        /// 🔴 <b>它不再自己定價。</b>2026-09-12 之前這裡命中就直接把價格寫下去、完全不看板上
+        /// 掛單，於是板上有人開得比成交價更低時我們會掛在<b>賣不掉</b>的價。現在成交價只是
+        /// 兩個候選之一，取低的那一步在 <see cref="ApplySlot"/>（規則本體見
+        /// <see cref="RelistPricing"/>）。
         /// </para>
         ///
         /// <para>
-        /// 🔴 這條路徑<b>一次遊戲內市場查詢都不送</b>：價格來自 Universalis 的 HTTP API。
+        /// 回傳值刻意是兩態：<c>Continue</c>＝還在等 Universalis 回答；
+        /// <b><c>null</c>＝這一格的成交價候選已經有結論了</b>（可能有值、可能沒有），
+        /// 呼叫端要繼續往下走市場查詢流程。用 <c>bool</c> 表示不了「還在等」，
+        /// 而把「還在等」誤當成「查不到」會讓第一批永遠拿不到成交價。
+        /// </para>
+        ///
+        /// <para>
+        /// 🔴 這一段<b>一次遊戲內市場查詢都不送</b>：價格來自 Universalis 的 HTTP API。
         /// </para>
         /// </summary>
-        private TickTaskResult? TickLastSoldPricing(SlotJob job, DateTime now)
+        private TickTaskResult? TickSaleCandidate(SlotJob job, DateTime now)
         {
             var state = LastSoldPriceSource.StateOf(job.ItemId);
 
@@ -976,53 +1020,40 @@ namespace Marketbuddy
                 return TickTaskResult.Continue;
             }
 
+            job.LastSoldDone = true;
+
             if (state == LastSoldState.Ready &&
                 LastSoldPriceSource.TryGet(job.ItemId, job.IsHq, conf.RelistLastSoldIgnoreQuality, out var sold))
             {
-                var newPrice = LastSoldPriceSource.RoundDownToHundred(sold.UnitPrice);
-                var when = FormatSoldAt(sold.SoldAtUtc);
+                job.SaleUnitPrice = sold.UnitPrice;
+                job.SaleAtUtc = sold.SoldAtUtc;
+                job.SaleHq = sold.Hq;
+                job.SaleWorld = sold.World;
 
-                // 🔴 異常低價保護（成交價這一側）：有人買走了別人少打一個 0 的掛單時，
+                // 🔴 異常低價保護（成交價這一側）的同業基準：有人買走了別人少打一個 0 的掛單時，
                 //    那一筆成交會把我們整格拉到那個價。
                 //    這裡拿「本世界目前的最低掛售價」當正常價——那是與這筆成交
                 //    完全獨立的另一個觀測，整體崩盤時它會跟著低，所以不會把崩盤誤判成異常。
                 //    ⚠️ 它**不排除自家掛單**（Universalis 給的是伺服器端算好的單一最小值，
                 //    手上沒有原始清單，過濾不掉）⇒ 自己是唯一賣家時它退化成「拿自己的價比」，
                 //    也就是與 Own 基準同一個答案。這一點是已知的精度上限，不是 bug。
-                var soldListedPrice = CurrentListedPrice(job.Slot);
-                var soldPeer =
+                //    📌 刻意**不**改用這一輪查到的板上最低價：那個值同時也是候選 L 的參考價，
+                //    拿 L 去替 S 背書會讓兩個候選不再互相獨立。
+                job.SalePeerBaseline =
                     LastSoldPriceSource.TryGetMinPrices(job.ItemId, job.IsHq, out var minWorld, out _)
                     && minWorld is { } minWorldPoint
                         ? minWorldPoint.UnitPrice
                         : -1L;
-                var soldAnomaly = PriceAnomalyGuard.Evaluate(
-                    sold.UnitPrice, soldPeer, job.QuickListed ? -1L : soldListedPrice, conf);
-                if (soldAnomaly.IsAnomalous)
-                {
-                    HoldForAnomaly(job, soldAnomaly, soldListedPrice, $"sale@{when}", string.Empty);
-                    job.LastSoldDone = true;
-                    return TickTaskResult.Done;
-                }
-
-                Log.Information(
-                    $"{Diag} LASTSOLD item={job.ItemId} '{job.Name}' unit={sold.UnitPrice} " +
-                    $"rounded={newPrice} soldHq={sold.Hq} soldAt={when} world='{sold.World}' " +
-                    $"ignoreQuality={conf.RelistLastSoldIgnoreQuality}");
-                FinishPricing(job, newPrice, string.Empty,
-                    "[Marketbuddy] ??: last sold for ?? gil (??) → ?? gil".Loc(
-                        job.Name, sold.UnitPrice.ToString("N0"), when, newPrice.ToString("N0")));
-                job.LastSoldDone = true;
-                return TickTaskResult.Done;
+                return null;
             }
 
-            // 走到這裡有四種情形，處置相同：這一格落回它原本的定價方式（市場比價）。
+            // 走到這裡有四種情形，處置相同：這一格沒有成交價候選，只剩板上比價。
             //   (a) Universalis 沒有這件的成交紀錄；
             //   (b) 查詢失敗；
             //   (c) 有資料，但「不忽略優質」而這個品質剛好沒有成交紀錄；
             //   (d) 有成交紀錄，但全部來自世界排除清單上的世界（拉姆已停止營運那條）。
             //     🔴 這一種刻意<b>不</b>拿別的來源代打：沒有成交紀錄的往往正是稀有的東西，
-            //     湊一個價出來會賤賣。所以照樣落回市場比價，並在 log 裡標明是這個原因。
-            job.LastSoldDone = true;
+            //     湊一個價出來會賤賣。所以照樣只走板上比價，並在 log 裡標明是這個原因。
             if (state == LastSoldState.Failed)
                 WarnLastSoldFallback(job, "lookup failed");
             else
@@ -1032,14 +1063,17 @@ namespace Marketbuddy
                     "excludedWorldOnly=" +
                     LastSoldPriceSource.IsSaleExcluded(
                         job.ItemId, job.IsHq, conf.RelistLastSoldIgnoreQuality) +
-                    "; falling back to market pricing");
+                    "; pricing from the market board only");
 
             return null;
         }
 
-        /// <summary>「最近一次賣出」的時間；<see cref="DateTime.MinValue"/> 一律畫成 <c>?</c>，絕不畫成某個看起來合理的日期。</summary>
-        internal static string FormatSoldAt(DateTime soldAtUtc)
-            => soldAtUtc == DateTime.MinValue ? "?" : soldAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
+        /// <summary>
+        /// 「最近一次賣出」的時間；<see cref="DateTime.MinValue"/> 一律畫成 <c>?</c>，
+        /// 絕不畫成某個看起來合理的日期。
+        /// </summary>
+        /// <remarks>📌 實作只有一份，在 <see cref="RelistPricing.FormatAt"/>。</remarks>
+        internal static string FormatSoldAt(DateTime soldAtUtc) => RelistPricing.FormatAt(soldAtUtc);
 
         /// <summary>
         /// 🔴 只從 framework 執行緒呼叫：它會讀 <c>PlayerState</c>。
@@ -1067,62 +1101,278 @@ namespace Marketbuddy
                     .Loc());
         }
 
+        /// <summary>
+        /// 遊戲內市場查詢這條路走不通了（送不出去／被伺服器拒絕／逾時，而且重試次數已經用完）。
+        ///
+        /// <para>
+        /// 🔑 這裡<b>不再直接判失敗</b>：跨世界價格巡檢已經把全世界的掛售清單掃過一遍，
+        /// 家世界那一列可以補位（見 <see cref="TryUseSurveyFallback"/>）；補不到、但這一格
+        /// 有成交價候選時，照樣定得出價。<b>兩條都沒有才真的是失敗。</b>
+        /// </para>
+        /// <para>
+        /// 📌 台服的市場查詢會靜默被拒絕，而新的定價規則每一格都需要板上的最低價
+        /// ——這個補位就是為了那件事存在的。
+        /// </para>
+        /// </summary>
+        /// <param name="reason">真的失敗時給使用者看的原因（已在地化）。</param>
+        /// <param name="tag">失敗的形狀，只進 log：<c>send-failed</c>／<c>refused</c>／<c>timeout</c>。</param>
+        private TickTaskResult GiveUpOnMarketQuery(SlotJob job, string reason, string tag)
+        {
+            var haveSurvey = TryUseSurveyFallback(job, tag);
+            if (!haveSurvey && job.SaleUnitPrice <= 0)
+            {
+                Fail(job, reason);
+                return TickTaskResult.Done;
+            }
+
+            // 🔴 這一輪沒有拿到任何掛單，所以絕不能讓上一格留下來的內容被當成這一格的行情。
+            //    （Request 階段每次嘗試都會清，這裡只是把它變成無論走哪條路都成立的前提。）
+            captured.Clear();
+            job.FromCache = false;
+            LogQuerySummary(job, haveSurvey ? $"survey({tag})" : $"sale-only({tag})", 0, DateTime.UtcNow);
+            job.Phase = SlotPhase.Apply;
+            return TickTaskResult.Continue;
+        }
+
+        /// <summary>
+        /// 拿巡檢記錄裡<b>家世界</b>那一列當「板上別人的最低價」。
+        /// </summary>
+        /// <remarks>
+        /// 🔴 <b>只認家世界</b>。別的世界的掛單永遠不會變成定價依據——別人在別的世界比我便宜，
+        /// 不代表我在自己的市場上吃虧。（待處理清單上的 <c>survey-other</c> 是純顯示，那是另一件事。）
+        /// <para>
+        /// 🔴 讀的是 <see cref="PriceSurveySnapshot"/> 這份記憶體索引，<b>不是檔案</b>：
+        /// 這裡是 framework 執行緒，讀一個幾萬列的 CSV 就是掉幀。
+        /// </para>
+        /// <para>
+        /// ⚠️ 拿不到時寫一行 Information：「巡檢沒掃過這件」與「掃過但太舊」的處置相同，
+        /// 但使用者能做的事完全不同（前者去掃一輪就好）。
+        /// </para>
+        /// </remarks>
+        private bool TryUseSurveyFallback(SlotJob job, string tag)
+        {
+            if (conf.RelistSurveyFallbackHours <= 0)
+                return false;
+
+            // 🔴 家世界，不是「現在站著的世界」：僱員的掛單掛在家世界的市場上。
+            var homeWorldId = PlayerState.ContentId == 0 ? 0u : PlayerState.HomeWorld.RowId;
+            if (homeWorldId == 0)
+                return false;
+
+            if (!PriceSurveySnapshot.TryGetLowest(job.ItemId, job.IsHq, homeWorldId, DateTime.UtcNow,
+                    conf.RelistSurveyFallbackHours, out var lowest, out var atUtc))
+            {
+                Log.Information(
+                    $"{Diag} SURVEY-MISS item={job.ItemId} '{job.Name}' hq={job.IsHq} " +
+                    $"homeWorld={homeWorldId} reason={tag} maxAgeHours={conf.RelistSurveyFallbackHours} " +
+                    $"indexLoaded={PriceSurveySnapshot.IsLoaded} indexCount={PriceSurveySnapshot.Count}");
+                return false;
+            }
+
+            job.SurveyLowest = lowest;
+            job.SurveyAtUtc = atUtc;
+            Log.Information(
+                $"{Diag} SURVEY-FALLBACK item={job.ItemId} '{job.Name}' hq={job.IsHq} " +
+                $"lowest={lowest} at={RelistPricing.FormatAt(atUtc)} reason={tag}");
+            return true;
+        }
+
+        /// <summary>
+        /// 這一格的定價決策：算出 <b>L</b>（板上別人的最低價）與 <b>S</b>（資料中心最近一筆成交價）
+        /// 兩個候選，<b>取低者</b>，然後交給 <see cref="FinishPricing"/>。
+        ///
+        /// <para>
+        /// 🔑 規則本體在 <see cref="RelistPricing"/>，那裡是唯一真值來源，而且
+        /// <see cref="PendingActionsBuilder"/> 用的是<b>同一支</b>函式——清單上寫的建議價與
+        /// 按下按鈕之後真的掛出去的價因此不可能分岔。這一段只負責「把輸入在正確的執行緒上取好」。
+        /// </para>
+        /// <para>
+        /// 🔴 下架門檻（低於 NPC 淨價、低於最低價）的順序<b>沒有變</b>：目標價算出來之後照樣
+        /// 經過 <see cref="FinishPricing"/>。
+        /// </para>
+        /// </summary>
         private void ApplySlot(SlotJob job)
         {
             var cacheTag = job.FromCache ? " " + "(cached price)".Loc() : string.Empty;
+            var now = DateTime.UtcNow;
+            var listedPrice = CurrentListedPrice(job.Slot);
+            // 🔴 快速上架的那一格停在上限價，那不是一個真的價格，絕不能當異常判定的基準。
+            var ownBasis = job.QuickListed ? -1L : listedPrice;
 
-            if (captured.Count == 0)
+            var undercut = new RelistPricing.UndercutRule(
+                conf.UndercutUsePercent, conf.UndercutPercent, conf.UndercutPrice);
+            var anomalyRule = new RelistPricing.AnomalyRule(
+                conf.AnomalyGuardEnabled, conf.AnomalyGuardMinNormalPrice, conf.AnomalyGuardRatio);
+
+            // ---------------- 候選 L：板上（家世界）別人的最低掛售價 ----------------
+            long competitor = -1;
+            long peerBaseline = -1;
+            var ownIsLowest = false;
+            var ownLowest = -1L;
+            var listingSource = string.Empty;
+            var listingAt = DateTime.MinValue;
+
+            if (job.SurveyLowest > 0)
             {
-                HandleNoListings(job, cacheTag);
-                return;
+                // 遊戲內查詢整個失敗，用的是巡檢掃到的那一列。
+                // ⚠️ 那一列只有一個最低價、沒有原始掛單 ⇒ 同業基準拿不到（-1），
+                //    異常低價保護只能退回「拿自己的現價比」（AnomalyBaseline.Own）。
+                competitor = job.SurveyLowest;
+                listingSource = PriceSourceTag.Survey;
+                listingAt = job.SurveyAtUtc;
+            }
+            else if (captured.Count > 0)
+            {
+                competitor = RelistPricing.LowestCompetitor(
+                    captured, job.IsHq, conf.BatchCompareHqOnly, ownRetainerIds,
+                    out peerBaseline, out ownIsLowest, out ownLowest);
+                listingSource = job.FromCache ? PriceSourceTag.Cache : PriceSourceTag.Live;
+                listingAt = now;
             }
 
-            IEnumerable<(uint Price, bool IsHq, ulong RetainerId)> eligible = captured;
-            if (job.IsHq && conf.BatchCompareHqOnly && captured.Any(l => l.IsHq))
-                eligible = captured.Where(l => l.IsHq);
+            // 🔑 板上最便宜的那一筆是我們自己掛的時候，L 一律當成「沒有」：
+            //    板上沒有給我們任何「該降到多少」的新資訊，而且我們不會自己壓自己的價。
+            //    這是一直以來的行為，逐字保留（下面那組 own-is-lowest 的處置也是）。
+            var listing = ownIsLowest
+                ? PriceCandidate.None
+                : RelistPricing.FromListing(
+                    competitor, peerBaseline, ownBasis, listingSource, listingAt, undercut, anomalyRule);
 
-            var lowest = eligible.MinBy(l => l.Price);
-            if (ownRetainerIds.Contains(lowest.RetainerId))
+            // ---------------- 候選 S：資料中心最近一筆成交價 ----------------
+            var sale = RelistPricing.FromSale(
+                job.SaleUnitPrice, job.SaleAtUtc, job.SalePeerBaseline, ownBasis,
+                now, conf.RelistLastSoldMaxAgeDays, anomalyRule);
+
+            var decision = RelistPricing.Decide(listing, sale);
+            LogPricingDecision(job, listing, sale, decision, listedPrice, ownIsLowest, competitor);
+
+            switch (decision.Outcome)
             {
-                if (!job.QuickListed)
+                case RelistOutcome.Hold:
+                    HoldForAnomaly(job, decision.Winner.Anomaly, listedPrice,
+                        ReferenceKindOf(decision.Winner), cacheTag);
+                    return;
+
+                case RelistOutcome.NoData:
+                    if (ownIsLowest)
+                    {
+                        HandleOwnIsLowest(job, ownLowest, cacheTag);
+                        return;
+                    }
+
+                    HandleNoListings(job, cacheTag);
+                    return;
+            }
+
+            var target = decision.Price;
+
+            if (ownIsLowest)
+            {
+                // 走到這裡代表唯一的目標價來自成交價（L 在上面已經被當成「沒有」），
+                // 而成交價是與板上完全獨立的觀測 ⇒ 只往下用，絕不拿它把價格往上抬。
+                if (job.QuickListed)
                 {
-                    Skip(job, "[Marketbuddy] ??: your own listing is already the lowest (?? gil)".Loc(job.Name, lowest.Price) + cacheTag);
+                    // 停在上限價的那一格絕不能留在上限價上；與自家最低價齊平，除非成交價更低。
+                    if (ownLowest > 0 && ownLowest < target)
+                    {
+                        HandleOwnIsLowest(job, ownLowest, cacheTag);
+                        return;
+                    }
+                }
+                else if (listedPrice < 0 || listedPrice <= target)
+                {
+                    HandleOwnIsLowest(job, ownLowest, cacheTag);
                     return;
                 }
-
-                // The quick-listed slot is parked at the price cap and must
-                // never stay there: match our own lowest listing instead of
-                // undercutting ourselves.
-                FinishPricing(job, lowest.Price, cacheTag,
-                    "[Marketbuddy] ??: matched your own lowest listing at ?? gil".Loc(job.Name, lowest.Price) + cacheTag);
-                return;
             }
 
-            // 🔴 異常低價保護：整頁最低價看起來是打錯的（少打一個 0 之類）就不要跟著降。
-            //    判準是「離群」不是「變低」——完整取捨見 PriceAnomalyGuard 的類別註解。
-            //    🔑 這道檢查刻意排在算價之前、也排在 FinishPricing 那兩道下架門檻之前：
-            //    一個打錯的低價會同時觸發「照它降價」與「低於最低價就下架」，
-            //    而我們對這兩件事的答案都是「這一格不要動」。
-            var listedPrice = CurrentListedPrice(job.Slot);
-            var anomaly = PriceAnomalyGuard.Evaluate(
-                lowest.Price,
-                PriceAnomalyGuard.PeerBaseline(eligible, lowest.RetainerId, ownRetainerIds),
-                // 🔴 快速上架的那一格停在上限價，那不是一個真的價格，絕不能當基準。
-                job.QuickListed ? -1L : listedPrice,
-                conf);
-            if (anomaly.IsAnomalous)
+            FinishPricing(job, (uint)target, cacheTag, null, SourceNoteFor(decision.Winner));
+        }
+
+        /// <summary>
+        /// 板上最便宜的那一筆是我們自己掛的 ⇒ 一般格什麼都不做（文案沿用現行），
+        /// 快速上架那一格與自家最低價齊平（它停在上限價上，那代表沒有人買得到）。
+        /// </summary>
+        private void HandleOwnIsLowest(SlotJob job, long ownLowest, string cacheTag)
+        {
+            if (!job.QuickListed)
             {
-                HoldForAnomaly(job, anomaly, listedPrice, "listing", cacheTag);
+                Skip(job, "[Marketbuddy] ??: your own listing is already the lowest (?? gil)".Loc(
+                    job.Name, ownLowest) + cacheTag);
                 return;
             }
 
-            // Same undercut maths as the manual flow: float multiplication for
-            // percent mode (never integer division), then clamp.
-            var target = conf.UndercutUsePercent
-                ? (long)(lowest.Price * (1f - conf.UndercutPercent / 100f))
-                : lowest.Price - (long)conf.UndercutPrice;
-            var newPrice = (uint)Math.Clamp(target, Configuration.MIN_PRICE, Configuration.MAX_PRICE);
-            FinishPricing(job, newPrice, cacheTag, null);
+            if (ownLowest > 0)
+            {
+                FinishPricing(job,
+                    (uint)Math.Clamp(ownLowest, Configuration.MIN_PRICE, Configuration.MAX_PRICE), cacheTag,
+                    "[Marketbuddy] ??: matched your own lowest listing at ?? gil".Loc(job.Name, ownLowest)
+                    + cacheTag);
+                return;
+            }
+
+            HandleNoListings(job, cacheTag);
+        }
+
+        /// <summary>異常低價保護的 log 欄位 <c>refKind</c>：參考價是哪一種。</summary>
+        private static string ReferenceKindOf(PriceCandidate candidate)
+            => candidate.Source == PriceSourceTag.Sale
+                ? $"sale@{FormatSoldAt(candidate.AtUtc)}"
+                : candidate.Source.Length == 0
+                    ? "listing"
+                    : candidate.Source;
+
+        /// <summary>
+        /// 聊天成功訊息尾端那一句「這個價是怎麼來的」。
+        /// 🔑 使用者按下去之後唯一看得到的東西就是那一行聊天訊息，而「跟板上最低價」與
+        /// 「照最近成交價」是兩個完全不同的決定——不講清楚等於叫他去猜。
+        /// </summary>
+        private static string SourceNoteFor(PriceCandidate candidate)
+        {
+            if (!candidate.IsObserved)
+                return string.Empty;
+
+            var reference = candidate.Reference.ToString("N0");
+            return candidate.Source switch
+            {
+                PriceSourceTag.Sale => " " + "(last sold ?? gil, ??)".Loc(
+                    reference, FormatSoldAt(candidate.AtUtc)),
+                PriceSourceTag.Survey => " " + "(lowest listing ?? gil, cross-world scan ??)".Loc(
+                    reference, FormatSoldAt(candidate.AtUtc)),
+                PriceSourceTag.Live or PriceSourceTag.Cache => " " + "(lowest listing ?? gil)".Loc(reference),
+                _ => string.Empty,
+            };
+        }
+
+        /// <summary>
+        /// 一格一行的定價決策紀錄。
+        /// </summary>
+        /// <remarks>
+        /// 🔴 這一行是 <c>Information</c>：它就是「事後查得到為什麼那一件掛在這個價」的那一行，
+        /// 而使用者的 LogLevel 放行到 Debug 為止、Debug 單檔數十萬行會把它淹掉。
+        /// <para>
+        /// 📌 <c>boardCompetitor</c> 是獨立欄位而不是從 <c>L=</c> 讀：自家掛單是最低價時 L 會被
+        /// 當成「沒有」，那時候板上別人開多少仍然是判讀時必要的資訊。
+        /// </para>
+        /// </remarks>
+        private void LogPricingDecision(SlotJob job, PriceCandidate listing, PriceCandidate sale,
+            RelistDecision decision, long listedPrice, bool ownIsLowest, long competitor)
+        {
+            var winner = decision.Winner.Source.Length == 0 ? "?" : decision.Winner.Source;
+            var pick = decision.Outcome switch
+            {
+                RelistOutcome.Price => winner,
+                RelistOutcome.Hold => $"hold({winner})",
+                _ => "none",
+            };
+
+            Log.Information(
+                $"{Diag} PRICE item={job.ItemId} '{job.Name}' hq={job.IsHq} ours={listedPrice} " +
+                $"L={RelistPricing.Describe(listing)} S={RelistPricing.Describe(sale)} " +
+                $"ownIsLowest={ownIsLowest} boardCompetitor={competitor} listings={captured.Count} " +
+                $"pick={pick} final={(decision.Outcome == RelistOutcome.Price ? decision.Price.ToString() : "-")} " +
+                $"saleMaxAgeDays={conf.RelistLastSoldMaxAgeDays} " +
+                $"surveyHours={conf.RelistSurveyFallbackHours} quickListed={job.QuickListed}");
         }
 
         /// <summary>
@@ -1161,7 +1411,15 @@ namespace Marketbuddy
         }
 
         /// <summary>Slot re-validation, delist thresholds, then the actual price update.</summary>
-        private void FinishPricing(SlotJob job, uint newPrice, string cacheTag, string? successMessage)
+        /// <param name="successMessage">
+        /// 整句取代預設的成功訊息；null＝用預設那句（「道具：舊價 → 新價」）。
+        /// </param>
+        /// <param name="sourceNote">
+        /// 接在預設成功訊息尾端的「這個價是怎麼來的」。
+        /// 🔑 <paramref name="successMessage"/> 不為 null 時<b>不會</b>用到它（那一句自己就講完了）。
+        /// </param>
+        private void FinishPricing(SlotJob job, uint newPrice, string cacheTag, string? successMessage,
+            string sourceNote = "")
         {
             var inventoryManager = InventoryManager.Instance();
             var slot = GetMarketSlot(job.Slot);
@@ -1208,7 +1466,9 @@ namespace Marketbuddy
             PendingActions.ClearSlot(CurrentBatchRetainerId, job.Slot);
             ProcessedSlots++;
             RepricedCount++;
-            ChatGui.Print(successMessage ?? "[Marketbuddy] ??: ?? → ?? gil".Loc(job.Name, current, newPrice) + cacheTag);
+            ChatGui.Print(successMessage
+                          ?? "[Marketbuddy] ??: ?? → ?? gil".Loc(job.Name, current, newPrice)
+                          + sourceNote + cacheTag);
         }
 
         private void OnOfferingsReceived(IMarketBoardCurrentOfferings offerings)

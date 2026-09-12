@@ -133,6 +133,12 @@ namespace Marketbuddy
                 Pending.Add(row);
             }
 
+            // 🔴 記憶體索引要在**落地之前**就更新：重掛的巡檢補位讀的是索引（framework
+            // 執行緒不做檔案 I/O），而剛剛掃到的那一列正是最有價值的那一列。
+            // ⚠️ 刻意放在鎖**外**：Note 走 ConcurrentDictionary，不需要這把鎖，
+            // 而這把鎖的契約是「鎖內只碰 Pending」。
+            PriceSurveySnapshot.Note(row);
+
             Kick();
         }
 

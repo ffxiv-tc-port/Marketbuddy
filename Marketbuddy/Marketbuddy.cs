@@ -252,6 +252,9 @@ namespace Marketbuddy
             Safe(() => MarketDataCache.Shutdown());
             // 取消進行中的 HTTP 查詢並釋放 HttpClient。排在引擎之後：它們不再會排新的查詢。
             Safe(() => LastSoldPriceSource.Shutdown());
+            // 巡檢記錄的記憶體索引。注意讀檔那個 Task 可能還在跑，Reset 只是把狀態歸零；
+            // 它之後寫進去的內容會在下一次載入時被重建的索引取代（純快取，沒有副作用）。
+            Safe(() => PriceSurveySnapshot.Reset());
             // Last: must run after every engine released its reference so a
             // leftover suppression can never survive an unload.
             Safe(() => AutoRetainerBridge.Shutdown());

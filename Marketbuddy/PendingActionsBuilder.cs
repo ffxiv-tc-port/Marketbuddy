@@ -257,7 +257,10 @@ namespace Marketbuddy
             int AnomalyMinNormalPrice,
             int AnomalyRatio,
             string? CsvPath,
-            IReadOnlySet<uint> ExcludedWorlds);
+            IReadOnlySet<uint> ExcludedWorlds,
+            bool UseLastSold,
+            bool IgnoreQuality,
+            int MaxSaleAgeDays);
 
         /// <summary>執行緒池那一段的產出：純資料，沒有任何遊戲指標。</summary>
         private sealed class Prepared
@@ -346,9 +349,13 @@ namespace Marketbuddy
                 //    這裡是 framework 執行緒，當場拍一份快照帶走，
                 //    執行緒池那一段與組清單那一段都只讀快照。
                 //    🔴 「自己掛售的那個世界」在這一步就被扣掉了（唯一實作點）。
-                //    ⚠️ ResolveSuggestion 的①②本來就是「家世界不看排除清單」那個結構，
+                //    ⚠️ Observe 的①②本來就是「家世界不看排除清單」那個結構，
                 //       兩者結論相同；留著是因為那一段的正確性不該依賴清單是怎麼來的。
-                conf.BuildPricingExclusions());
+                conf.BuildPricingExclusions(),
+                // 拍成快照帶走（同上）：這三個決定「成交價這一側算不算數」。
+                conf.RelistUseLastSoldPrice,
+                conf.RelistLastSoldIgnoreQuality,
+                conf.RelistLastSoldMaxAgeDays);
 
             prepareRequest = request;
             StatusText = "Recomputing...".Loc();
@@ -385,16 +392,39 @@ namespace Marketbuddy
         }
 
         /// <summary>建議價與它的出處。價格 -1＝沒有任何可用的參考價。</summary>
-        /// <param name="Price">套過降價設定之後的建議掛售價。</param>
-        /// <param name="Reference">算出 <paramref name="Price"/> 用的<b>原始</b>參考價（尚未套降價）；-1＝不知道。</param>
+        /// <param name="Price">套過定價規則之後的建議掛售價。</param>
+        /// <param name="Reference">算出 <paramref name="Price"/> 用的<b>原始</b>參考價；-1＝不知道。</param>
         /// <param name="PeerBaseline">
         /// 下一位賣家的最低價，異常低價保護要用（見 <see cref="PriceAnomalyGuard"/>）。
         /// 🔴 <b>只有 <c>live</c> 這條路算得出來</b>：巡檢記錄每個世界只存一個最低價、
         /// 沒有原始掛單，所以 <c>survey</c>／<c>survey-other</c> 一律 -1（＝不知道），
         /// 那兩條上的異常判定只能退回「拿自己的現價比」。
         /// </param>
+        /// <param name="Held">
+        /// 這個建議價被異常低價保護擋下來了（<see cref="Price"/> 因此是 -1）。
+        /// </param>
+        /// <param name="Anomaly">
+        /// 上面那個判定的完整結果。⚠️ <b>只有 <paramref name="Held"/> 為 true 時才有意義</b>
+        /// ——預設值是 <c>default</c> 而不是 <see cref="PriceAnomaly.Clear"/>（靜態欄位不能當
+        /// 預設參數），兩者的 <c>IsAnomalous</c> 都是 false，但價格欄位是 0 不是 -1。
+        /// </param>
         private readonly record struct Suggestion(long Price, string Source, string World, DateTime At,
-            long Reference = -1, long PeerBaseline = -1);
+            long Reference = -1, long PeerBaseline = -1, bool Held = false, PriceAnomaly Anomaly = default);
+
+        /// <summary>
+        /// 某一件道具（<b>某個品質</b>）的兩個定價候選的<b>原始觀測</b>。
+        ///
+        /// <para>
+        /// 🔑 刻意與「這一格目前掛多少」分開：觀測是<b>每個道具</b>算一次（同一件掛在好幾格
+        /// 是常態），而異常低價保護的退路基準是<b>每一格自己</b>的現價。合在一起算的話
+        /// 第一格的價格會被套到其他每一格身上，而那種錯是靜默的。
+        /// </para>
+        /// </summary>
+        private readonly record struct Observations(
+            long ListingReference, long ListingPeer, string ListingSource, string ListingWorld,
+            DateTime ListingAt,
+            long SaleReference, long SalePeer, string SaleWorld, DateTime SaleAt,
+            long OtherReference, string OtherSource, string OtherWorld, DateTime OtherAt);
 
         /// <summary>
         /// 巡檢記錄裡有資料、但被排除清單擋下來的那些世界的名字（已排序）。
@@ -402,7 +432,7 @@ namespace Marketbuddy
         /// <remarks>
         /// 🔑 只列<b>記錄檔裡真的有</b>的世界：清單上勾著、卻從來沒掃過的
         /// 世界說出來只是雜訊。家世界不算——它從來就不受排除清單影響
-        /// （見 <see cref="ResolveSuggestion"/>）。
+        /// （見 <see cref="Observe"/>）。
         /// </remarks>
         private static List<string> CollectExcludedWorldsInLog(Prepared prepared, Request request)
         {
@@ -458,7 +488,9 @@ namespace Marketbuddy
             }
 
             var now = DateTime.UtcNow;
-            var suggestions = new Dictionary<(uint ItemId, bool Hq), Suggestion>();
+            // 記憶化的是**觀測**而不是建議價：同一件道具掛在好幾格是常態，而異常低價
+            // 保護的退路基準是每一格自己的現價（見 BuildSuggestion）。
+            var observations = new Dictionary<(uint ItemId, bool Hq), Observations>();
             var placed = new HashSet<(uint ItemId, bool Hq)>();
             var result = new List<PendingActionRow>();
 
@@ -469,10 +501,11 @@ namespace Marketbuddy
                 var key = (placement.ItemId, placement.Hq);
                 placed.Add(key);
 
-                if (!suggestions.TryGetValue(key, out var suggestion))
-                    suggestions[key] = suggestion = ResolveSuggestion(placement.ItemId, placement.Hq, request,
+                if (!observations.TryGetValue(key, out var observed))
+                    observations[key] = observed = Observe(placement.ItemId, placement.Hq, request,
                         prepared, ownRetainers);
 
+                var suggestion = BuildSuggestion(observed, placement.Price, request);
                 prepared.Latest.TryGetValue((placement.ItemId, placement.Hq, request.HomeWorldId), out var homeRow);
                 var kind = Classify(placement.Price, suggestion, request, homeRow, out var anomaly);
                 if (kind == null)
@@ -493,9 +526,10 @@ namespace Marketbuddy
                 if (placed.Contains(key))
                     continue;
 
-                if (!suggestions.TryGetValue(key, out var suggestion))
-                    suggestions[key] = suggestion = ResolveSuggestion(itemId, hq, request, prepared, ownRetainers);
+                if (!observations.TryGetValue(key, out var observed))
+                    observations[key] = observed = Observe(itemId, hq, request, prepared, ownRetainers);
 
+                var suggestion = BuildSuggestion(observed, row.OurPrice, request);
                 var kind = Classify(row.OurPrice, suggestion, request, row, out var anomaly);
                 if (kind == null)
                     continue;
@@ -510,14 +544,28 @@ namespace Marketbuddy
         /// <summary>
         /// 建議價的來源優先序（<b>這裡是唯一真值來源</b>）：
         /// <list type="number">
-        ///   <item><c>live</c>：本世界的即時市場快取（<see cref="MarketDataCache"/>）。
-        ///         🔴 只有人現在就在家世界時才算數——那份快取是<b>綁世界</b>的，
-        ///         在別的世界讀它拿到的是別的世界的行情。</item>
-        ///   <item><c>survey</c>：巡檢記錄裡<b>家世界自己</b>那一列。</item>
-        ///   <item><c>survey-other</c>：巡檢記錄裡別的世界最便宜的那一列。
-        ///         🔴 那是另一個市場，只能當參考——UI 必須把世界名與日期畫在列上。</item>
+        ///   <item><b>L</b>（板上別人的最低掛售價）：
+        ///     <list type="bullet">
+        ///       <item><c>live</c>：本世界的即時市場快取（<see cref="MarketDataCache"/>）。
+        ///             🔴 只有人現在就在家世界時才算數——那份快取是<b>綁世界</b>的，
+        ///             在別的世界讀它拿到的是別的世界的行情。</item>
+        ///       <item><c>survey</c>：巡檢記錄裡<b>家世界自己</b>那一列。</item>
+        ///     </list>
+        ///   </item>
+        ///   <item><b>S</b>（<c>sale</c>）：Universalis 的「資料中心最近一次實際成交」。
+        ///         ⚠️ <b>只讀已經抓回來的</b>——這裡不會發動任何 HTTP 查詢（清單重算可以由
+        ///         「巡檢跑完自動重算」觸發，在那條路上發網路請求等於長出一條自動鏈）。
+        ///         ⇒ 沒去過出售品清單的道具在這張清單上看不到成交價這一側，那是刻意的。</item>
+        ///   <item><c>survey-other</c>：巡檢記錄裡<b>別的世界</b>最便宜的那一列。
+        ///         🔴 那是另一個市場，<b>永遠不會變成 L</b>——別人在別的世界比我便宜不代表我在
+        ///         自己的市場上吃虧。它只在 L 與 S 都沒有時當<b>純顯示</b>的最後估計值，
+        ///         而且 UI 必須把世界名與日期畫在列上。語意與 2026-09-12 之前完全相同。</item>
         /// </list>
-        /// 三條都沒有就回 -1（＝不知道）。<b>絕不回 0</b>：0 在價格欄是一個合法但荒謬的值。
+        /// 全都沒有就回 -1（＝不知道）。<b>絕不回 0</b>：0 在價格欄是一個合法但荒謬的值。
+        /// <para>
+        /// 🔑 <b>L 與 S 的「取低者」由 <see cref="RelistPricing.Decide"/> 決定，而那正是重掛
+        /// 引擎用的同一支函式</b>——清單上寫的建議價與按下按鈕之後真的掛出去的價因此不可能分岔。
+        /// </para>
         /// <para>
         /// 🔴 <b>第③條會跳過排除清單上的世界</b>（台服的拉姆已經停止營運、
         /// 切不過去）：拿一個到不了的市場的殘留行情來調價，
@@ -532,32 +580,68 @@ namespace Marketbuddy
         /// 不是「不要幫我在這裡定價」。
         /// </para>
         /// <para>
-        /// 📌 沒有 Universalis 這一條：本外掛對使用者的承諾是「不自己連任何網站」
-        /// （巡檢分頁上那一句），而艦隊裡唯一有 Universalis 客戶端的 PriceInsight
-        /// 沒有開任何 IPC 端點（2026-09-08 實查）。要加只能等對方開端點。
+        /// ⚠️ <b>② 刻意不套新鮮度窗</b>（重掛引擎的巡檢補位有，見
+        /// <c>Configuration.RelistSurveyFallbackHours</c>）。這裡是<b>估計值</b>而且 UI 就把
+        /// 世界名與日期畫在列上，使用者看得到它有多舊；那裡是<b>真的要寫進市場的價格</b>。
+        /// 兩邊對「多舊算太舊」的答案不同是刻意的，不是漏掉。
         /// </para>
         /// </summary>
-        private static Suggestion ResolveSuggestion(uint itemId, bool hq, Request request, Prepared prepared,
+        private static Observations Observe(uint itemId, bool hq, Request request, Prepared prepared,
             HashSet<ulong> ownRetainers)
         {
+            long listingRef = -1;
+            long listingPeer = -1;
+            var listingSource = string.Empty;
+            var listingWorld = string.Empty;
+            var listingAt = DateTime.MinValue;
+
             // ① 本世界的即時快取。🔴 只能在 framework 執行緒上讀（裸 Dictionary）。
             if (request.CurrentWorldId == request.HomeWorldId
                 && MarketDataCache.TryGet(itemId, request.CacheSeconds, out var listings, out var ageMs))
             {
-                var lowest = LowestCompetitor(listings, hq, request.CompareHqOnly, ownRetainers,
-                    out var peerBaseline);
+                var lowest = RelistPricing.LowestCompetitor(listings, hq, request.CompareHqOnly,
+                    ownRetainers, out var peerBaseline, out _, out _);
                 if (lowest >= 0)
-                    return new Suggestion(ApplyUndercut(lowest, request), "live", request.HomeWorldName,
-                        DateTime.UtcNow.AddMilliseconds(-Math.Max(0d, ageMs)), lowest, peerBaseline);
+                {
+                    listingRef = lowest;
+                    listingPeer = peerBaseline;
+                    listingSource = PriceSourceTag.Live;
+                    listingWorld = request.HomeWorldName;
+                    listingAt = DateTime.UtcNow.AddMilliseconds(-Math.Max(0d, ageMs));
+                }
             }
 
             // ② 巡檢記錄，家世界那一列。
-            if (prepared.Latest.TryGetValue((itemId, hq, request.HomeWorldId), out var homeRow)
+            if (listingRef < 0
+                && prepared.Latest.TryGetValue((itemId, hq, request.HomeWorldId), out var homeRow)
                 && homeRow.Verdict == "ok" && homeRow.LowestIsOurs == 0 && homeRow.LowestForQuality >= 0)
-                return new Suggestion(ApplyUndercut(homeRow.LowestForQuality, request), "survey",
-                    homeRow.WorldName, homeRow.AtUtc, homeRow.LowestForQuality);
+            {
+                listingRef = homeRow.LowestForQuality;
+                listingSource = PriceSourceTag.Survey;
+                listingWorld = homeRow.WorldName;
+                listingAt = homeRow.AtUtc;
+            }
 
-            // ③ 巡檢記錄，別的世界最便宜的那一列。
+            // S：資料中心最近一次實際成交。⚠️ 只讀快取，絕不在這裡發 HTTP 查詢。
+            long saleRef = -1;
+            long salePeer = -1;
+            var saleWorld = string.Empty;
+            var saleAt = DateTime.MinValue;
+            if (request.UseLastSold
+                && LastSoldPriceSource.TryGet(itemId, hq, request.IgnoreQuality, out var sold))
+            {
+                saleRef = sold.UnitPrice;
+                saleAt = sold.SoldAtUtc;
+                saleWorld = sold.World;
+                // 異常低價保護在成交價這一側的同業基準＝本世界目前最低掛售價，
+                // 與重掛引擎用的是同一個來源（理由見 BatchReprice.TickSaleCandidate）。
+                salePeer = LastSoldPriceSource.TryGetMinPrices(itemId, hq, out var minWorld, out _)
+                           && minWorld is { } minWorldPoint
+                    ? minWorldPoint.UnitPrice
+                    : -1L;
+            }
+
+            // ③ 巡檢記錄，別的世界最便宜的那一列（純顯示的最後手段）。
             long best = -1;
             var bestWorld = string.Empty;
             var bestAt = DateTime.MinValue;
@@ -598,83 +682,81 @@ namespace Marketbuddy
                 bestAt = row.AtUtc;
             }
 
-            if (best >= 0)
-                return new Suggestion(ApplyUndercut(best, request), "survey-other", bestWorld, bestAt, best);
-
             // 🔑 「不知道」與「知道但故意不用」在畫面上必須分得出來。
             //    後者照樣回 -1（絕不回 0），但帶著出處，UI 才畫得出
             //    「只有某個世界有資料，而那個世界被你排除了」。
-            return excludedBest >= 0
-                ? new Suggestion(-1, "survey-excluded", excludedWorld, excludedAt)
-                : new Suggestion(-1, string.Empty, string.Empty, DateTime.MinValue);
+            var otherSource = best >= 0
+                ? "survey-other"
+                : excludedBest >= 0
+                    ? "survey-excluded"
+                    : string.Empty;
+
+            return new Observations(
+                listingRef, listingPeer, listingSource, listingWorld, listingAt,
+                saleRef, salePeer, saleWorld, saleAt,
+                best >= 0 ? best : -1,
+                otherSource,
+                best >= 0 ? bestWorld : excludedWorld,
+                best >= 0 ? bestAt : excludedAt);
         }
 
         /// <summary>
-        /// 這一頁掛單裡<b>別人</b>的最低單價；沒有別人在賣時回 -1。
-        ///
-        /// <para>
-        /// ⚠️ 與 <c>BatchReprice.ApplySlot</c> 的差別是刻意的：那裡取整頁最低價之後才判斷
-        /// 「這個最低價是不是我自己的」，因為它要決定的是「要不要降價」；這裡要的是
-        /// 「別人開多少」，所以一開始就把自家僱員的掛單排除掉。兩者都不會自己壓自己的價。
-        /// </para>
-        ///
-        /// HQ／NQ 的取捨逐字比照重掛：這一格是優質品、使用者開著「只比優質品」、
-        /// 而且這一頁真的有優質品掛單時，才只看優質品。
+        /// 把一件道具的觀測換算成<b>這一格</b>的建議價：兩候選各自過異常低價保護，再取低者。
         /// </summary>
-        private static long LowestCompetitor(List<(uint Price, bool IsHq, ulong RetainerId)> listings, bool hq,
-            bool compareHqOnly, HashSet<ulong> ownRetainers, out long peerBaseline)
+        /// <param name="currentPrice">
+        /// 這一格目前的掛售價；異常低價保護沒有同業基準時拿它當退路。-1＝不知道。
+        /// </param>
+        /// <remarks>
+        /// 🔑 規則本體在 <see cref="RelistPricing"/>，與重掛引擎<b>共用同一支</b>。
+        /// 這一段只負責「把該格自己的現價餵進去」與「兩個候選都沒有時退回純顯示的估計值」。
+        /// </remarks>
+        private static Suggestion BuildSuggestion(Observations observed, long currentPrice, Request request)
         {
-            peerBaseline = -1;
-            var hqOnly = false;
-            if (hq && compareHqOnly)
+            var undercut = new RelistPricing.UndercutRule(
+                request.UsePercent, request.UndercutPercent, request.UndercutAmount);
+            var anomalyRule = new RelistPricing.AnomalyRule(
+                request.AnomalyEnabled, request.AnomalyMinNormalPrice, request.AnomalyRatio);
+
+            var listing = RelistPricing.FromListing(
+                observed.ListingReference, observed.ListingPeer, currentPrice,
+                observed.ListingSource, observed.ListingAt, undercut, anomalyRule);
+            var sale = RelistPricing.FromSale(
+                observed.SaleReference, observed.SaleAt, observed.SalePeer, currentPrice,
+                DateTime.UtcNow, request.MaxSaleAgeDays, anomalyRule);
+
+            var decision = RelistPricing.Decide(listing, sale);
+            switch (decision.Outcome)
             {
-                foreach (var listing in listings)
+                case RelistOutcome.Price:
                 {
-                    if (!listing.IsHq)
-                        continue;
-                    hqOnly = true;
-                    break;
+                    var winner = decision.Winner;
+                    var world = winner.Source == PriceSourceTag.Sale
+                        ? observed.SaleWorld
+                        : observed.ListingWorld;
+                    return new Suggestion(decision.Price, winner.Source, world, winner.AtUtc,
+                        winner.Reference, observed.ListingPeer);
+                }
+
+                case RelistOutcome.Hold:
+                {
+                    var winner = decision.Winner;
+                    var world = winner.Source == PriceSourceTag.Sale
+                        ? observed.SaleWorld
+                        : observed.ListingWorld;
+                    return new Suggestion(-1, winner.Source, world, winner.AtUtc,
+                        winner.Reference, observed.ListingPeer, true, winner.Anomaly);
                 }
             }
 
-            // 品質篩選只做一次，最低價與同業基準共用同一份，兩者的取捨才不會分岔。
-            var considered = new List<(uint Price, bool IsHq, ulong RetainerId)>(listings.Count);
-            foreach (var listing in listings)
-            {
-                if (hqOnly && !listing.IsHq)
-                    continue;
-                considered.Add(listing);
-            }
+            // 兩個候選都沒有 ⇒ 退回純顯示的估計值（語意與 2026-09-12 之前完全相同）。
+            if (observed.OtherSource == "survey-other")
+                return new Suggestion(
+                    RelistPricing.ApplyUndercut(observed.OtherReference, undercut), "survey-other",
+                    observed.OtherWorld, observed.OtherAt, observed.OtherReference);
 
-            long lowest = -1;
-            ulong lowestRetainerId = 0;
-            foreach (var listing in considered)
-            {
-                if (ownRetainers.Contains(listing.RetainerId))
-                    continue;
-                if (lowest >= 0 && listing.Price >= lowest)
-                    continue;
-                lowest = listing.Price;
-                lowestRetainerId = listing.RetainerId;
-            }
-
-            if (lowest >= 0)
-                peerBaseline = PriceAnomalyGuard.PeerBaseline(considered, lowestRetainerId, ownRetainers);
-
-            return lowest;
-        }
-
-        /// <summary>
-        /// 把參考價換算成建議掛售價。算式與 <c>BatchReprice.ApplySlot</c> 逐字相同
-        /// （百分比模式用浮點乘法，絕不用整數除法），所以清單上的估計值與真的按下去之後
-        /// 引擎算出來的價是同一套規則。
-        /// </summary>
-        private static long ApplyUndercut(long reference, Request request)
-        {
-            var target = request.UsePercent
-                ? (long)(reference * (1f - request.UndercutPercent / 100f))
-                : reference - request.UndercutAmount;
-            return Math.Clamp(target, Configuration.MIN_PRICE, Configuration.MAX_PRICE);
+            return observed.OtherSource.Length > 0
+                ? new Suggestion(-1, observed.OtherSource, observed.OtherWorld, observed.OtherAt)
+                : new Suggestion(-1, string.Empty, string.Empty, DateTime.MinValue);
         }
 
         /// <summary>
@@ -687,7 +769,8 @@ namespace Marketbuddy
         /// </para>
         ///
         /// <para>
-        /// ⚠️ 「該下架」刻意只認 <c>live</c>／<c>survey</c> 這兩種<b>本世界</b>的參考價：
+        /// ⚠️ 「該下架」刻意只認 <c>live</c>／<c>survey</c>／<c>sale</c> 這三種<b>引擎真的會
+        /// 拿去定價</b>的參考價：
         /// 拿別的世界的行情去建議「把東西從市場上撤下來」是不成立的。
         /// </para>
         /// </summary>
@@ -703,15 +786,15 @@ namespace Marketbuddy
             //    所以那裡根本沒有東西需要被保護。少了這道限制，一件「家世界查不到、
             //    但別的世界有人掛很便宜」的東西會憑空長出一列「已經替你擋下來了」——
             //    而其實什麼都沒有發生過。
-            anomaly = suggestion.Source is "live" or "survey"
-                ? PriceAnomalyGuard.Evaluate(suggestion.Reference, suggestion.PeerBaseline, currentPrice,
-                    request.AnomalyEnabled, request.AnomalyMinNormalPrice, request.AnomalyRatio)
-                : PriceAnomaly.Clear;
+            // 判定由引擎用的同一支函式算好（RelistPricing.Decide，經 BuildSuggestion）。
+            // BuildSuggestion 只對 live/survey/sale 這三種**引擎真的會拿去定價**的來源設 Held，
+            // 所以 survey-other 不會憑空長出一列「已經替你擋下來了」——那裡什麼都沒發生過。
+            anomaly = suggestion.Held ? suggestion.Anomaly : PriceAnomaly.Clear;
             if (anomaly.IsAnomalous)
                 return PendingActionKind.PriceAnomaly;
 
             if (request.MinPrice > 0 && suggestion.Price >= 0
-                && suggestion.Source is "live" or "survey"
+                && suggestion.Source is "live" or "survey" or PriceSourceTag.Sale
                 && suggestion.Price < request.MinPrice)
                 return PendingActionKind.BelowMinimum;
 

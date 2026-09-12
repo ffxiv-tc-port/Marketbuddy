@@ -72,6 +72,7 @@ namespace Marketbuddy
     /// <param name="SuggestedPrice">建議的掛售單價；-1＝沒有任何可用的參考價。</param>
     /// <param name="SuggestionSource">
     /// 建議價的來源：<c>live</c>＝本世界的即時市場快取、<c>survey</c>＝巡檢記錄（同一個世界）、
+    /// <c>sale</c>＝Universalis 的資料中心最近一次實際成交、
     /// <c>survey-other</c>＝巡檢記錄（別的世界，只能當參考）、空＝沒有來源。
     /// <c>survey-excluded</c>＝只有被排除的世界有資料，
     /// 所以沒有建議價：此時 <paramref name="SuggestedPrice"/> 是 -1，
@@ -99,8 +100,13 @@ namespace Marketbuddy
         public PendingActionKey Key => new(Kind, ItemId, Hq, RetainerId, Slot);
 
         /// <summary>這一列的建議價能不能真的拿來用（有價、而且不是別的世界的參考值）。</summary>
+        /// <remarks>
+        /// 🔴 <c>sale</c> 也算<b>本地</b>：那是整個資料中心真的成交過的價，重掛引擎會拿它定價
+        /// （見 <see cref="RelistPricing"/>）。漏掉它的話那些列會被畫成灰色的「別的世界，只能
+        /// 當參考」，而那句話是錯的——按下去真的會照它掛。
+        /// </remarks>
         public bool SuggestionIsLocal
-            => SuggestedPrice >= 0 && SuggestionSource is "live" or "survey";
+            => SuggestedPrice >= 0 && SuggestionSource is "live" or "survey" or PriceSourceTag.Sale;
     }
 
     /// <summary>

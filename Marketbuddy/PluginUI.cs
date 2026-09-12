@@ -563,7 +563,8 @@ namespace Marketbuddy
                 return;
 
             ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudYellow);
-            ImGui.TextWrapped("Pricing from the most recent sale, rounded down to 100 gil".Loc());
+            ImGui.TextWrapped(
+                "Pricing from the recent sale price or the cheapest listing, whichever is lower".Loc());
             ImGui.PopStyleColor();
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip(PricingRuleText());
@@ -1054,14 +1055,14 @@ namespace Marketbuddy
                 conf.Save();
 
             DrawNestIndicator(1);
-            if (ImGui.Checkbox("Price from the most recent sale instead, rounded down to 100 gil".Loc(),
+            if (ImGui.Checkbox("Also price from the most recent sale, and use whichever is lower".Loc(),
                     ref conf.RelistUseLastSoldPrice))
                 conf.Save();
 
             DrawNestIndicator(2);
             ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
             ImGui.TextWrapped(
-                "Takes the price the item most recently actually sold for anywhere on your data centre and rounds it down to the nearest 100 gil. The figure comes from the Universalis web API - the same source PriceInsight uses - so the game's own market board is never queried and no listing is looked up in game. Items with no sale on record keep their usual pricing (lowest listing minus your undercut); nothing is guessed. What each item would be relisted at is shown in the live listings panel before you press the button."
+                "Adds a second reference price: what the item most recently actually sold for anywhere on your data centre, rounded down to the nearest 100 gil. Each item is then relisted at whichever is lower - that sale price, or the cheapest listing on your own world that is not yours. The sale figure comes from the Universalis web API, the same source PriceInsight uses. Items with no recent sale on record simply use the cheapest listing, as they always did; nothing is guessed. What each item would be relisted at is shown in the live listings panel before you press the button."
                     .Loc());
             ImGui.PopStyleColor();
 
@@ -1071,6 +1072,44 @@ namespace Marketbuddy
                     ref conf.RelistLastSoldIgnoreQuality))
                 conf.Save();
             if (!conf.RelistUseLastSoldPrice) PopStyleDisabled();
+
+            DrawNestIndicator(2);
+            if (!conf.RelistUseLastSoldPrice) PushStyleDisabled();
+            ImGui.TextUnformatted("Only use sales from the last".Loc());
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(70);
+            if (ImGui.InputInt("day(s) (0 = any age)".Loc() + "##mbsalemaxage",
+                    ref conf.RelistLastSoldMaxAgeDays, 0))
+            {
+                conf.RelistLastSoldMaxAgeDays = Math.Clamp(conf.RelistLastSoldMaxAgeDays, 0, 3650);
+                conf.Save();
+            }
+
+            DrawNestIndicator(3);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "A sale from months ago cannot tell you what it takes to sell the item today, and it would otherwise override the current listings. Sales older than this are ignored and the item just uses the cheapest listing instead. Sales whose date Universalis does not give are treated as too old."
+                    .Loc());
+            ImGui.PopStyleColor();
+            if (!conf.RelistUseLastSoldPrice) PopStyleDisabled();
+
+            DrawNestIndicator(1);
+            ImGui.TextUnformatted("If the market query fails, fall back to survey rows newer than".Loc());
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(70);
+            if (ImGui.InputInt("hour(s) (0 = off)".Loc() + "##mbsurveyfallback",
+                    ref conf.RelistSurveyFallbackHours, 0))
+            {
+                conf.RelistSurveyFallbackHours = Math.Clamp(conf.RelistSurveyFallbackHours, 0, 8760);
+                conf.Save();
+            }
+
+            DrawNestIndicator(2);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "The server sometimes refuses a market query without saying so. When that happens the cross-world survey log already holds a price for your own world, so it is used instead of giving up on the item. Only your own world is ever used - another world being cheaper does not mean you are being undercut at home. Survey rows only record one lowest price, so the mistyped-price check has to fall back on comparing against your own listing."
+                    .Loc());
+            ImGui.PopStyleColor();
 
             DrawNestIndicator(1);
             if (ImGui.Checkbox("HQ items only undercut other HQ listings".Loc(), ref conf.BatchCompareHqOnly))
@@ -1475,22 +1514,33 @@ namespace Marketbuddy
         private bool UndercutIsZero =>
             conf.UndercutUsePercent ? conf.UndercutPercent == 0 : conf.UndercutPrice == 0;
 
-        /// <summary>按鈕的滑鼠提示：把從標題省掉的定價規則交代清楚，而且完全不佔版面。</summary>
+        /// <summary>
+        /// 按鈕的滑鼠提示：把從標題省掉的定價規則交代清楚，而且完全不佔版面。
+        /// </summary>
+        /// <remarks>
+        /// 🔴 <b>講錯的規則比不講更糟。</b>定價規則是「板上最低價」與「最近成交價」
+        /// <b>取低者</b>（規則本體見 <see cref="RelistPricing"/>），所以兩句都要說，
+        /// 而且要說清楚「只有一個知道時用那一個」。
+        /// </remarks>
         private string PricingRuleText()
         {
-            // 新的定價方式開著時，「最低價 -N」那句話就不是這顆按鈕會做的事了——
-            // 講錯的規則比不講更糟。查不到成交紀錄的道具仍然走舊規則，所以兩句都要說。
-            if (conf.RelistUseLastSoldPrice)
-            {
-                return "Prices at the most recent sale on the data centre, rounded down to 100 gil.".Loc() + "\n" +
-                       (UndercutIsZero
-                           ? "Items with no sale on record: the lowest listing (no undercut).".Loc()
-                           : "Items with no sale on record: the lowest listing minus ??.".Loc(GetUndercutText()));
-            }
+            var board = UndercutIsZero
+                ? "the cheapest listing on your own world that is not yours".Loc()
+                : "the cheapest listing on your own world that is not yours, minus ??".Loc(
+                    GetUndercutText());
 
-            return UndercutIsZero
-                ? "Prices at the lowest listing (no undercut)".Loc()
-                : "Prices at the lowest listing minus ??".Loc(GetUndercutText());
+            if (!conf.RelistUseLastSoldPrice)
+                return "Prices at ??".Loc(board);
+
+            var sale = conf.RelistLastSoldMaxAgeDays > 0
+                ? "the most recent sale on your data centre within the last ?? day(s), rounded down to 100 gil"
+                    .Loc(conf.RelistLastSoldMaxAgeDays)
+                : "the most recent sale on your data centre, rounded down to 100 gil".Loc();
+
+            return "Prices at whichever of these is lower:".Loc() + "\n  - " + board + "\n  - " + sale
+                   + "\n"
+                   + "If only one of the two is known, that one is used; if neither is, the item is left alone."
+                       .Loc();
         }
 
         private string GetUndercutText(bool escape = false)

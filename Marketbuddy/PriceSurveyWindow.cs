@@ -1964,6 +1964,14 @@ namespace Marketbuddy
                     ImGui.TextUnformatted("survey  ??  ??".Loc(world, age));
                     Tooltip("From the cross-world survey log, the row for your own world.".Loc());
                     return;
+                case PriceSourceTag.Sale:
+                    // 🔑 這一格的年齡就是「那筆成交是多久以前的事」——新的定價規則只採
+                    //    新鮮度窗內的成交，所以它是判讀「為什麼這一件走成交價」的關鍵欄位。
+                    ImGui.TextUnformatted("last sale  ??  ??".Loc(world, age));
+                    Tooltip(
+                        "What this item actually sold for on your data centre, rounded down to 100 gil. The relist engine uses whichever is lower - this, or the cheapest listing on your own world."
+                            .Loc());
+                    return;
                 case "anomaly-peer":
                     // 🔑 「拿什麼當正常價」必須在列上看得見：那是整個判定的全部依據。
                     ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudOrange);

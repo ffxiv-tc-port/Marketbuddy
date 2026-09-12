@@ -486,6 +486,54 @@ namespace Marketbuddy
         public bool RelistLastSoldIgnoreQuality = true;
 
         /// <summary>
+        /// 成交紀錄的<b>新鮮度窗（天）</b>：只有這麼多天之內的成交價才拿來定價。
+        /// <b>0 = 不限</b>（＝保留舊行為的路）。
+        /// </summary>
+        /// <remarks>
+        /// 📌 預設 <b>7</b>。使用者的原話：「看歷史價格是需要知道是否其他世界成功賣出需要更低價格」
+        /// ——半年前的一筆成交回答不了「現在要多低才賣得掉」，而它會無條件蓋過板上的行情。
+        /// <para>
+        /// 🔴 <b>時間戳不知道的成交紀錄一律當成過期</b>（見
+        /// <see cref="RelistPricing.IsSaleStale"/>）：Universalis 的回應不保證帶時間，
+        /// 把「不知道年代」當成「剛剛」正是「掛在賣不掉的價」的成因。
+        /// </para>
+        /// <para>
+        /// ⚠️ 過期<b>不是失敗</b>：那一格改用板上（家世界）別人的最低掛售價，也就是這個外掛
+        /// 一直以來的定價方式。
+        /// </para>
+        /// <para>
+        /// 📌 <b>改預設對既有使用者確實生效</b>：本外掛走 Dalamud 自己那條
+        /// <c>GetPluginConfig()</c>／<c>SavePluginConfig()</c>，JSON 缺鍵時保留的是 C# 的欄位初始值。
+        /// </para>
+        /// </remarks>
+        public int RelistLastSoldMaxAgeDays = 7;
+
+        /// <summary>
+        /// 遊戲內市場查詢被拒絕／逾時之後，改用<b>跨世界價格巡檢</b>記錄裡家世界那一列
+        /// 當「板上最低價」的時限（<b>小時</b>）。<b>0 = 不使用巡檢補位</b>。
+        /// </summary>
+        /// <remarks>
+        /// 📌 存在的理由：台服的市場查詢會<b>靜默被拒絕</b>，而新的定價規則每一格都需要
+        /// 板上的最低價。巡檢已經把全世界的掛售清單掃過一遍，那份資料本來就在手上。
+        /// <para>
+        /// 🔴 <b>刻意不重用 <see cref="PriceSurveySkipHours"/></b>：那一個的語意是
+        /// 「續掃時同一個世界幾小時內掃過的就跳過」，而且它的 <b>0 是「不跳過」</b>——
+        /// 拿它當新鮮度窗的話，0 會變成「不限年代」，剛好是最危險的方向。兩個數字的
+        /// 用途與安全方向都相反，共用一個欄位遲早會被其中一邊的調整弄壞另一邊。
+        /// </para>
+        /// <para>
+        /// ⚠️ 巡檢那一列<b>只有一個最低價、沒有原始掛單</b>，所以異常低價保護的「同業基準」
+        /// 拿不到，只能退回「拿自己的現價比」（<see cref="AnomalyBaseline.Own"/>）。
+        /// 那是誤判率最高的一種，但仍然比完全不保護好。
+        /// </para>
+        /// <para>
+        /// 🔴 <b>只補家世界</b>。別的世界的掛單永遠不會變成定價依據——別人在別的世界比我便宜，
+        /// 不代表我在自己的市場上吃虧。
+        /// </para>
+        /// </remarks>
+        public int RelistSurveyFallbackHours = 24;
+
+        /// <summary>
         /// 在「即時出售品清單」面板上多畫三欄：本世界目前最低價、整個資料中心目前最低價、
         /// 以及最近一次成交（價格＋時間）。
         /// </summary>
@@ -734,6 +782,10 @@ namespace Marketbuddy
                 conf.MarketDataCacheSeconds = Math.Clamp(conf.MarketDataCacheSeconds, 0, 3600);
                 conf.PriceSurveyCacheSeconds = Math.Clamp(conf.PriceSurveyCacheSeconds, 0, 3600);
                 conf.PriceSurveySkipHours = Math.Clamp(conf.PriceSurveySkipHours, 0, 168);
+                // 🔑 兩者的 0 都是「關閉」而不是「不限」，所以夾到 0 是安全方向
+                //    （見各自的欄位說明）。上界只是避免設定檔被手改成荒謬值。
+                conf.RelistLastSoldMaxAgeDays = Math.Clamp(conf.RelistLastSoldMaxAgeDays, 0, 3650);
+                conf.RelistSurveyFallbackHours = Math.Clamp(conf.RelistSurveyFallbackHours, 0, 8760);
                 // 舊設定檔沒有這個鍵時欄位初始值（空清單）會留著；只有檔案裡明寫 null
                 // 才會變成 null，而那之後每一個 Contains 都會 NRE。
                 conf.PriceSurveyExcludedWorlds ??= [];

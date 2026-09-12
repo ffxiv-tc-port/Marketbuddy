@@ -90,8 +90,26 @@ namespace Marketbuddy
             /// </summary>
             public bool SoldExcluded { get; init; }
 
-            /// <summary>按下重掛會掛出去的價格（成交價無條件捨去到百位）。</summary>
+            /// <summary>按下重掛會掛出去的價格；<b>0＝算不出來</b>（絕不代表 0 gil）。</summary>
             public uint RelistPrice { get; init; }
+
+            /// <summary>
+            /// 上面那個價是<b>哪一個來源</b>贏的（見 <see cref="PriceSourceTag"/>）；空＝沒有來源。
+            /// </summary>
+            /// <remarks>
+            /// 🔑 「跟板上最低價」與「照最近成交價」是兩個完全不同的決定，
+            /// 而這一欄是使用者在按下去之前唯一分得出來的地方。
+            /// </remarks>
+            public string? RelistSource { get; init; }
+
+            /// <summary>算出 <see cref="RelistPrice"/> 用的原始參考價；-1＝不知道。</summary>
+            public long RelistReference { get; init; }
+
+            /// <summary>那個參考價是什麼時候的觀測；<see cref="DateTime.MinValue"/>＝不知道。</summary>
+            public DateTime RelistAtUtc { get; init; }
+
+            /// <summary>參考價被異常低價保護擋下來了 ⇒ 按下去這一格不會動。</summary>
+            public bool RelistHeld { get; init; }
 
             /// <summary>本世界目前的最低掛售價；<b>null＝查不到，不是 0</b>。</summary>
             public MarketPricePoint? MinWorld { get; init; }
@@ -184,6 +202,13 @@ namespace Marketbuddy
             //    定價方式關著（預設）時整條路徑一個位元組都不會動。
             if (conf.RelistUseLastSoldPrice && gui.IsRetainerSellListOpen)
                 PrefetchLastSoldPrices();
+
+            // 巡檢記錄的記憶體索引（市場查詢被拒絕時的補位來源）。
+            // 刻意在出售品視窗一開就踢，不等到按下重掛：讀檔在執行緒池上、要幾百毫秒，
+            // 而重掛的第一格如果還沒讀完就只能退回「查詢失敗就算失敗」。
+            // 已經讀過的話這一行只是一次 Interlocked 比較。
+            if (conf.RelistSurveyFallbackHours > 0 && gui.IsRetainerSellListOpen)
+                PriceSurveySnapshot.EnsureLoaded();
 
             // 「這件賣掉過嗎」的彙總：讀檔與統計全部在執行緒池上，這裡只收工作。
             // 🔴 繪製路徑一個位元組的 I/O 都不做，而且只在那一欄真的會被畫出來時才推進。
@@ -282,6 +307,24 @@ namespace Marketbuddy
                 }
             }
 
+            // 「按下重掛會掛出去多少」要用的共用輸入，在迴圈外算一次。
+            // 🔴 這一段純唯讀而且<b>不送任何市場查詢</b>：面板只是預告，真正的查詢在引擎那側。
+            var ownRetainers = new HashSet<ulong>();
+            if (retainerManager != null)
+            {
+                foreach (var retainer in retainerManager->Retainers)
+                {
+                    if (retainer.RetainerId != 0)
+                        ownRetainers.Add(retainer.RetainerId);
+                }
+            }
+
+            var homeWorldId = PlayerState.ContentId == 0 ? 0u : PlayerState.HomeWorld.RowId;
+            var undercutRule = new RelistPricing.UndercutRule(
+                conf.UndercutUsePercent, conf.UndercutPercent, conf.UndercutPrice);
+            var anomalyRule = new RelistPricing.AnomalyRule(
+                conf.AnomalyGuardEnabled, conf.AnomalyGuardMinNormalPrice, conf.AnomalyGuardRatio);
+
             // 「賣出/下架」那一欄的資料基礎。🔑 這幾個判斷的唯一目的是讓
             // 「我們沒看過」與「看過但沒賣掉」在畫面上分得出來——兩者長得一模一樣，
             // 而把前者畫成 0 會讓使用者做出相反的決定。
@@ -343,14 +386,83 @@ namespace Marketbuddy
                     soldState = LastSoldPriceSource.StateOf(slot->ItemId);
                     hasSold = LastSoldPriceSource.TryGet(slot->ItemId, isHq,
                         conf.RelistLastSoldIgnoreQuality, out sold);
-                    if (hasSold)
-                        relistPrice = LastSoldPriceSource.RoundDownToHundred(sold.UnitPrice);
-                    else
+                    // 🔴 成交價**不再**直接等於重掛後的金額：定價規則是「成交價與板上
+                    //    最低價取低者」，所以最終金額在下面那一段才算得出來。
+                    if (!hasSold)
                         // 🔑 只有取不到價格時才問原因：取到了的話「某個品質被排除」
                         //    不是使用者要看的事。
                         soldExcluded = LastSoldPriceSource.IsSaleExcluded(
                             slot->ItemId, isHq, conf.RelistLastSoldIgnoreQuality);
                     LastSoldPriceSource.TryGetMinPrices(slot->ItemId, isHq, out minWorld, out minDc);
+                }
+
+                // 「按下重掛會掛出去多少」的預告：與引擎<b>共用同一支</b>定價函式
+                // （<see cref="RelistPricing"/>），所以面板上的數字與真的掛出去的價是同一套規則。
+                // 🔴 這裡拿不到「這一輪真的向伺服器問到的掛單」——那要送查詢，而面板不送。
+                //    所以 L 只能來自外掛自己的市場快取，快取沒有就退到巡檢那一列。
+                //    ⇒ 兩者都沒有時面板會顯示成交價，而引擎（它真的會去問）可能得到更低的板上價。
+                //    那是預告與實際的已知落差，<b>方向只會是「實際更低」</b>，不會更高。
+                var relistSource = string.Empty;
+                var relistReference = -1L;
+                var relistAtUtc = DateTime.MinValue;
+                var relistHeld = false;
+                if (conf.RelistUseLastSoldPrice)
+                {
+                    var listedPrice = (long)inventoryManager->GetRetainerMarketPrice((short)i);
+                    long competitor = -1;
+                    long peerBaseline = -1;
+                    var listingSource = string.Empty;
+                    var listingAt = DateTime.MinValue;
+
+                    // L ① 外掛自己的市場快取。🔴 裸 Dictionary，只有 framework 執行緒能讀
+                    //    ——這裡就是 framework 執行緒（OnFrameworkUpdate）。
+                    if (MarketDataCache.TryGet(slot->ItemId, conf.MarketDataCacheSeconds,
+                            out var cachedListings, out var cacheAgeMs))
+                    {
+                        competitor = RelistPricing.LowestCompetitor(
+                            cachedListings, isHq, conf.BatchCompareHqOnly, ownRetainers,
+                            out peerBaseline, out var ownIsLowest, out _);
+                        if (ownIsLowest)
+                        {
+                            // 與引擎同一條規則：自家掛單已經是最低時板上不提供目標價。
+                            competitor = -1;
+                            peerBaseline = -1;
+                        }
+                        else if (competitor >= 0)
+                        {
+                            listingSource = PriceSourceTag.Cache;
+                            listingAt = DateTime.UtcNow.AddMilliseconds(-Math.Max(0d, cacheAgeMs));
+                        }
+                    }
+                    // L ② 巡檢記錄裡家世界那一列（引擎在查詢失敗時用的那一條）。
+                    else if (conf.RelistSurveyFallbackHours > 0 && homeWorldId != 0
+                             && PriceSurveySnapshot.TryGetLowest(slot->ItemId, isHq, homeWorldId,
+                                 DateTime.UtcNow, conf.RelistSurveyFallbackHours,
+                                 out var surveyLowest, out var surveyAt))
+                    {
+                        competitor = surveyLowest;
+                        listingSource = PriceSourceTag.Survey;
+                        listingAt = surveyAt;
+                    }
+
+                    var listingCandidate = RelistPricing.FromListing(
+                        competitor, peerBaseline, listedPrice, listingSource, listingAt,
+                        undercutRule, anomalyRule);
+                    var saleCandidate = hasSold
+                        ? RelistPricing.FromSale(
+                            sold.UnitPrice, sold.SoldAtUtc,
+                            minWorld is { } salePeer ? salePeer.UnitPrice : -1L,
+                            listedPrice, DateTime.UtcNow, conf.RelistLastSoldMaxAgeDays, anomalyRule)
+                        : PriceCandidate.None;
+
+                    var decision = RelistPricing.Decide(listingCandidate, saleCandidate);
+                    relistSource = decision.Winner.Source;
+                    relistReference = decision.Winner.Reference;
+                    relistAtUtc = decision.Winner.AtUtc;
+                    relistHeld = decision.Outcome == RelistOutcome.Hold;
+                    if (decision.Outcome == RelistOutcome.Price)
+                        relistPrice = (uint)Math.Clamp(
+                            decision.Price, Configuration.MIN_PRICE, Configuration.MAX_PRICE);
                 }
 
                 // 這個品質自己的紀錄；另一個品質只用來在滑鼠提示裡補一句
@@ -379,6 +491,10 @@ namespace Marketbuddy
                     SoldHq = hasSold && sold.Hq,
                     SoldWorld = hasSold ? sold.World : string.Empty,
                     RelistPrice = relistPrice,
+                    RelistSource = relistSource,
+                    RelistReference = relistReference,
+                    RelistAtUtc = relistAtUtc,
+                    RelistHeld = relistHeld,
                     MinWorld = minWorld,
                     MinDc = minDc,
                     Age = conf.LiveSellListMarketColumns
@@ -606,20 +722,39 @@ namespace Marketbuddy
         /// </summary>
         private static void DrawRelistCell(in Row row)
         {
-            if (row.HasSold)
+            if (row.RelistPrice > 0)
             {
                 ImGui.TextUnformatted(row.RelistPrice.ToString("N0"));
                 if (!ImGui.IsItemHovered())
                     return;
 
-                var world = string.IsNullOrEmpty(row.SoldWorld) ? "?" : row.SoldWorld;
-                ImGui.SetTooltip(
-                    "Last sold for ?? gil on ?? (??, ??) - rounded down to ?? gil".Loc(
-                        row.SoldUnitPrice.ToString("N0"),
-                        BatchReprice.FormatSoldAt(row.SoldAtUtc),
-                        row.SoldHq ? "HQ".Loc() : "NQ".Loc(),
-                        world,
-                        row.RelistPrice.ToString("N0")));
+                var reference = row.RelistReference < 0 ? "?" : row.RelistReference.ToString("N0");
+                var when = BatchReprice.FormatSoldAt(row.RelistAtUtc);
+                ImGui.SetTooltip(row.RelistSource switch
+                {
+                    PriceSourceTag.Sale =>
+                        "Last sold for ?? gil (??), rounded down to ?? gil. That is lower than the cheapest listing on your own world, or there is none."
+                            .Loc(reference, when, row.RelistPrice.ToString("N0")),
+                    PriceSourceTag.Survey =>
+                        "From the cross-world survey taken ??: the cheapest listing on your own world was ?? gil. Used because the live market data is not available."
+                            .Loc(when, reference),
+                    _ =>
+                        "The cheapest listing on your own world that is not yours is ?? gil, with your undercut applied. That is lower than the last sale, or there is none."
+                            .Loc(reference),
+                });
+                return;
+            }
+
+            // 🔑 「被異常低價保護擋下來」與「沒有資料」是兩件事，而且處置相同、原因相反
+            //    ——畫成同一個灰色問號的話使用者無從知道「那個價其實有，只是看起來是打錯的」。
+            if (row.RelistHeld)
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudOrange);
+                ImGui.TextUnformatted("!");
+                ImGui.PopStyleColor();
+                Tooltip(
+                    "The reference price looks like somebody dropped a zero, so this item would keep the price it has now. The pending list says what it was compared against."
+                        .Loc());
                 return;
             }
 
@@ -652,7 +787,7 @@ namespace Marketbuddy
 
                     Grey("?");
                     Tooltip(
-                        "No sale on record for this item on the data centre, so relisting leaves it on the usual pricing (lowest listing minus your undercut)."
+                        "No sale on record on the data centre, and no listing on your own world to compare against either, so relisting would leave this item alone."
                             .Loc());
                     break;
             }
