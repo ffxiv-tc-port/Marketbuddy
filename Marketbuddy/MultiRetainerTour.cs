@@ -21,7 +21,6 @@ namespace Marketbuddy
     /// <summary>
     /// 全僱員巡迴：從僱員選單出發，逐一拜訪有掛單的僱員，開它的出售品視窗，
     /// 跑單僱員引擎（重掛或下架，見 <see cref="TourMode"/>），然後離開換下一個。
-    ///
     /// Navigation follows the TC-production-proven AutoRetainer recipes:
     /// RetainerList Callback(2, index), SelectString menu entries matched via
     /// Lumina Addon sheet text (row 2380 = "sell items", row 2383 = "quit"),
@@ -29,7 +28,6 @@ namespace Marketbuddy
     /// hardcoded. Strictly manual trigger; cancellable at any time (button or
     /// ESC); every navigation step has a watchdog so a stall aborts the tour
     /// instead of hanging.
-    ///
     /// 🔴 兩種模式**共用同一個佇列與同一份導航**，所以「重掛巡迴」與「下架巡迴」
     /// 在結構上不可能同時跑，<see cref="IsRunning"/> 同時就是兩者的互斥閘。
     /// </summary>
@@ -82,7 +80,6 @@ namespace Marketbuddy
         /// <summary>
         /// 這一趟下架巡迴的目的地快照（true = 各僱員自己的物品欄）。
         /// 引擎自己也各自抄一份，這裡抄是為了讓**巡迴層**的結束語講對容器。
-        ///
         /// ⚠️ 已知的取捨：目的地是僱員物品欄時，「某一名僱員的物品欄滿了」其實**不代表
         /// 下一名也滿**（每名僱員的物品欄各自獨立），照理可以跳過去繼續跑。但目前撞到
         /// 滿一律停整趟——這是收回玩家背包時的正確行為（共用同一個背包，去下一個也只會
@@ -295,7 +292,6 @@ namespace Marketbuddy
         /// 這個角色目前所有可用的僱員（**不看有沒有掛單**）。
         /// 巡迴的目標清單與設定視窗的「跳過哪些僱員」都從這一份長出來，所以兩邊
         /// 看到的僱員集合不可能分岔。
-        ///
         /// ⚠️ 只在 <c>IsReady</c> 時回傳資料：設定視窗隨時可以開（包括還沒登入時），
         /// 沒有這個閘門就會去問一份還沒載入的僱員表。既有呼叫端（<see cref="CanStart"/>）
         /// 本來就已經在外面檢查過 <c>IsReady</c>，所以這一行對它們是 no-op。
@@ -622,7 +618,6 @@ namespace Marketbuddy
 
         /// <summary>
         /// 現在還有幾名僱員、共幾件掛單沒下架（每次重新數，不留狀態）。
-        ///
         /// ⚠️ 其他僱員只能用 <c>MarketItemCount</c>（僱員結構上的計數器）——巡迴本來就是
         /// 靠它挑目標的，所以這裡沿用同一個來源不會多出新的不一致。但**我們剛剛動過的
         /// 那名僱員**風險最高（那個計數器已知會落後於容器實況），而她正好是我們此刻
@@ -735,7 +730,6 @@ namespace Marketbuddy
             // 🔑 「佔掉幾格」是這個功能的**產出**不只是副作用：使用者要的就是把散在各個
             // 僱員身上的同款道具併成堆疊，而「下架 N 件只佔掉 M 格」正是合併的證據。
             // 這是實際量到的（開跑前後各數一次空格），不是推估——量不到就不講。
-            //
             // ⚠️ 上面那段只在收回**玩家背包**時成立。目的地是各僱員自己的物品欄時，
             // 跨僱員合併根本不會發生，而且我們也量不到跨僱員的總量——那種情況
             // BagSlotsUsed() 回 null，於是自動走下面那句不帶數字的版本。

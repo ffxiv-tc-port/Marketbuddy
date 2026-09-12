@@ -10,24 +10,12 @@ namespace Marketbuddy;
 /// <remarks>
 /// 🔴 <b>零組件相依。</b>只用 Dalamud 原生 CallGate 的字串契約（本外掛沒有 ECommons），
 /// 對方沒安裝時本檔的每一條路徑都是 no-op。
-/// <para>
 /// 🔴 契約名逐字取自 TataruPraise 的 <c>IpcContract.cs</c> 與 <c>PraiseCategory.cs</c>。
 /// CallGate 是純字串比對，名字打錯不會有任何錯誤訊息，只會永遠得到
 /// 「這個頻道沒有人註冊」——<b>靜默斷線</b>。所以字串都寫成常數，不散在呼叫點上。
-/// </para>
-/// <para>
-/// 🔴 <b>只能從主執行緒(framework tick)呼叫。</b>IPC 的實作是在呼叫端的執行緒上跑的，
-/// 從背景 Task 叫過去等於把對方的程式碼拉到背景執行緒。目前每一個呼叫點都在
-/// <c>Framework.Update</c> 的鏈上：<see cref="BatchReprice"/> 與
-/// <see cref="MultiRetainerTour"/> 各自訂閱 <c>Framework.Update</c>，在那裡呼叫
-/// <c>TickTaskQueue.Update()</c>，而 <c>Completed</c> 事件是 <c>Update()</c> 同步叫出來的；
-/// <see cref="MultiCharacterTour"/> 的整輪收尾與 <see cref="PriceSurvey"/> 的
-/// <c>Finish</c> 也都在同一條鏈上。
-/// </para>
-/// <para>
+/// 🔴 <b>只能從主執行緒(framework tick)呼叫。</b>IPC 的實作是在呼叫端的執行緒上跑的，從背景 Task 叫過去等於把對方的程式碼拉到背景執行緒。
 /// ⚠️ 這是<b>單向通知</b>：回傳值只拿來寫記錄，不影響 Marketbuddy 的任何流程，
 /// 不重試，也不會因此觸發任何市場操作。
-/// </para>
 /// </remarks>
 internal static class TataruPraiseIPC
 {
@@ -42,14 +30,10 @@ internal static class TataruPraiseIPC
     /// 🔴 <b>閘門要問的是這一個，不是 <see cref="TagIsAvailable"/>。</b>後者問的是
     /// 「整池<b>有某個情境</b>播得出來」，於是「別的情境有語音、<b>市場</b>一句都沒有」時
     /// 照樣通過，接著 <c>Praise</c> 回 <c>false</c>——呼叫端就分不出「不能出聲」與「這次剛好沒出聲」。
-    /// <para>
     /// 📌 它刻意<b>不看冷卻</b>：冷卻是「這次剛好不出聲」，不是「不能出聲」。
-    /// </para>
-    /// <para>
     /// 🔴 舊版 TataruPraise 沒有註冊這個端點，<c>InvokeFunc</c> 會擲 <c>IpcNotReadyError</c>，
     /// 剛好落進既有的 catch＝安靜不出聲，這是正確的 fail-safe。
     /// <b>失敗時絕不可以退回去叫 <see cref="TagIsAvailable"/></b>——那樣就把這個端點的意義整個抵銷掉了。
-    /// </para>
     /// </remarks>
     internal const string TagIsAvailableFor = "TataruPraise.IsAvailableFor";
 

@@ -16,7 +16,6 @@ namespace Marketbuddy
         /// 端點跑在<b>呼叫端外掛的執行緒</b>上、<see cref="IsLocked"/> 每幀在 framework
         /// 執行緒被好幾個模組讀、設定視窗在繪製執行緒列出內容並可能整批清掉。
         /// 裸 <c>HashSet</c> 的失敗形式不是「讀到舊值」，而是<b>集合本身壞掉</b>
-        /// （或列舉到一半擲 <c>InvalidOperationException</c>）。
         /// ⇒ 一律走本類別的包裝方法，不要把集合本身或它的方法群組交出去。
         /// </summary>
         private static readonly HashSet<string> Locks = new();
@@ -106,7 +105,6 @@ namespace Marketbuddy
 
         // ---------------------------------------------------------------
         // Marketbuddy.MarketCache.*(唯讀,給 PriceInsight 之類的查價外掛用)
-        //
         // 🔴 新功能一律開**新名字**的端點。既有的 Lock／Unlock／IsLocked 名字與型別一個字
         //    都沒動——同名改型別是最兇的一種破壞,而且有些方向會靜默成功。
         // 🔴 這兩個端點跑在**呼叫端外掛的執行緒**上,所以它們只碰 MarketDataCache 的
@@ -135,8 +133,6 @@ namespace Marketbuddy
         /// </summary>
         /// <remarks>
         /// 🔴 純讀取,零副作用:不送任何市場查詢、不觸發任何遊戲操作。
-        /// 這與 MarketDataCache「純被動接收」的設計約束一致——對外開放的是**已經看到的東西**,
-        /// 不是「幫你去查一次」。
         /// </remarks>
         private static MarketDataCache.PublicSnapshot? QueryMarketCache(uint itemId)
             => MarketDataCache.GetPublished(itemId);
@@ -213,9 +209,6 @@ namespace Marketbuddy
         }
 
         // AutoRetainer character postprocess
-        //
-        // 🔴 契約名逐字抄自 AutoRetainer 的 AutoRetainerAPI/ApiConsts.cs 與
-        //    AutoRetainer/Modules/IPC.cs（2026-08-31 實讀本 fork 原始碼）。
         //    CallGate 是純字串比對：名字打錯不會有任何錯誤訊息，只會永遠收不到事件。
         // 📌 AR 端註冊的是 void 動作 ⇒ 消費端用 ICallGateSubscriber<…, object> + InvokeAction。
         internal const string TagOnCharacterAdditionalTask = "AutoRetainer.OnCharacterAdditionalTask";
@@ -234,11 +227,6 @@ namespace Marketbuddy
         /// 🔴 <b>欄位名必須與 AR 端逐字相同。</b>型別對不上時 Dalamud 的 CallGate 會把物件
         /// 做一次 JSON 來回轉（<c>CallGateChannel.ConvertObject</c>），名字打錯不會報錯，
         /// 只會靜默拿到預設值（false／0／null）。
-        /// <para>
-        /// 來源：<c>AutoRetainer/AutoRetainerAPI/AutoRetainerAPI/Configuration/OfflineCharacterData.cs</c>
-        /// （2026-08-31 實讀）。只抄這裡真的會用到的幾個欄位，其餘欄位反序列化時被忽略。
-        /// </para>
-        /// </remarks>
         // CS0649「從未指派」：這些欄位是 Newtonsoft 反序列化時填的（CallGate 的
         // ConvertObject 走 JSON 來回轉），編譯器看不到那條路徑。**不要**改成屬性或加初始值
         // 去消警告——欄位名與形狀必須跟 AR 端一致。
@@ -372,8 +360,6 @@ namespace Marketbuddy
 
         // ---------------------------------------------------------------
         // Lifestream（世界轉移）
-        //
-        // 🔴 端點名與型別逐字取自 Lifestream/Lifestream/IPC/IPCProvider.cs（2026-09-07 實讀）：
         //    EzIPC 的預設前綴是對方的 InternalName，所以是 Lifestream.<方法名>。
         //    ChangeWorld(string) -> bool、IsBusy() -> bool、
         //    CanVisitSameDC(string) -> bool、CanVisitCrossDC(string) -> bool。
@@ -426,7 +412,6 @@ namespace Marketbuddy
         /// </summary>
         /// <remarks>
         /// 🔴 <b>呼叫一次只換一次。</b>這裡沒有重試、沒有佇列、沒有「到了就繼續」的串接；
-        /// 回 false 就是這一次沒成功，要不要再試由使用者再按一次按鈕決定。
         /// 🔴 絕不用聊天指令（空參數的 /li 等於跨世界傳送），一律走具名的 IPC 端點。
         /// </remarks>
         /// <returns>Lifestream 接受了這次請求才回 true；沒裝、忙碌中、去不了都回 false。</returns>

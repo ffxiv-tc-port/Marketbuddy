@@ -6,7 +6,6 @@ namespace Marketbuddy
 {
     /// <summary>
     /// Single point of contact with AutoRetainer.
-    ///
     /// - Caches "is AutoRetainer busy" at 1 Hz (callers ask every frame, an IPC
     ///   invoke per frame would be wasteful).
     /// - Suppresses AutoRetainer for the duration of a user-triggered
@@ -14,13 +13,9 @@ namespace Marketbuddy
     ///   and never un-suppresses a suppression somebody else owns).
     /// - Raises the "AutoRetainer finished, you can run it now" notice, but
     ///   only when the user was actually blocked before.
-    ///
     /// Suppression is strictly scoped to operations the user started by hand.
-    ///
-    /// 📌 2026-08-31 起 AutoRetainer 的 character-postprocess 契約**有**被用到:
     /// <see cref="MultiCharacterTour"/> 會在 AR 換角前接手跑一輪全僱員重掛。
     /// 那條路徑仍然要使用者手動武裝、一輪跑完就自己解除,不是常駐的事件驅動自動化。
-    /// （這段註解原本寫著「post-process API 刻意不使用」——那個描述已經過時。）
     /// </summary>
     internal static class AutoRetainerBridge
     {
@@ -40,10 +35,8 @@ namespace Marketbuddy
         /// 這段期間 AR 不是在跟我們搶,而是<b>停在無限等待上等我們回覆</b>,
         /// 所以本外掛內部所有「AutoRetainer 忙碌中就不要動」的閘門都必須讓開,
         /// 否則巡迴與批次引擎會拒絕起跑 ⇒ 我們永遠做不完 ⇒ AR 永遠等下去。
-        /// <para>
         /// ⚠️ 這個旗標只由 <see cref="MultiCharacterTour"/> 設定,而且它每一條離開路徑
         /// （成功／跳過／中止／逾時／使用者停止／卸載）都會把它清掉。
-        /// </para>
         /// </remarks>
         internal static bool ExternalDriveActive { get; set; }
 

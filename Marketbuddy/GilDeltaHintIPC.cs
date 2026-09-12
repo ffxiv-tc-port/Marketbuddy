@@ -10,32 +10,21 @@ namespace Marketbuddy;
 /// <remarks>
 /// 🔴 <b>零組件相依。</b>只用 Dalamud 原生 CallGate 的字串契約（本外掛沒有 ECommons），
 /// 對方沒安裝時本檔的每一條路徑都是 no-op。
-/// <para>
-/// 🔴 契約逐字取自 GilDelta 的 <c>Ipc/GilDeltaIpc.cs</c> 與 <c>Events/GilEventCategory.cs</c>
-/// （2026-09-08 實讀）：<c>Func&lt;string, string, int, bool&gt;</c>，分類字串是
+/// 🔴 契約逐字取自 GilDelta 的 <c>Ipc/GilDeltaIpc.cs</c> 與 <c>Events/GilEventCategory.cs</c>：<c>Func&lt;string, string, int, bool&gt;</c>，分類字串是
 /// <c>GilEventCategory</c> 的<b>成員名</b>（大小寫不拘，但**純數字會被拒絕**——對方刻意擋掉
 /// <c>Enum.TryParse</c> 也接受數字形式那條路，免得誰的雜訊數字變成一次自信的誤分類）。
 /// CallGate 是純字串比對，名字打錯不會有任何錯誤訊息，只會永遠得到「這個頻道沒有人註冊」——
 /// <b>靜默斷線</b>。所以字串都寫成常數，不散在呼叫點上。
-/// </para>
-/// <para>
 /// 🔴 <b>只能從主執行緒(framework tick)呼叫。</b>IPC 的實作是在<b>呼叫端</b>的執行緒上跑的。
 /// 對方的 <c>GilHintStore.Submit</c> 自己只碰 concurrent 集合，所以它那一側是安全的；
 /// 但我們這一側在算 note 的時候會去讀遊戲狀態，那必須在 framework 執行緒上。
 /// 目前唯一的呼叫點 <see cref="MarketPurchaseWatcher"/> 就掛在 <c>Framework.Update</c> 上。
-/// </para>
-/// <para>
-/// ⚠️ 這是<b>單向通知</b>：回傳值只拿來寫記錄，不影響 Marketbuddy 的任何流程，不重試，
-/// 也不會因此觸發任何市場操作。
-/// </para>
-/// <para>
 /// 🔑 <b>什麼時候「不要」送提示，比送什麼更重要。</b>對方的規則鏈是
 /// <c>PairedTransferRule → HintRule → …各種以「哪個視窗開著」推斷的規則… → MiscRule</c>
-/// （<c>Plugin.cs:140-162</c>），也就是說<b>我們的提示會壓過對方所有以視窗推斷的規則</b>。
+/// 也就是說<b>我們的提示會壓過對方所有以視窗推斷的規則</b>。
 /// 所以只在「對方推不出來、而我們確定知道」的時候送；對方本來就會答對的事情不要插手，
 /// 那只會把一個更好的推論換成一個我們的猜測。理由逐條寫在
 /// <see cref="MarketPurchaseWatcher"/> 的類別註解裡。
-/// </para>
 /// </remarks>
 internal static class GilDeltaHintIPC
 {
