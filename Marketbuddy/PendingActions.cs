@@ -31,12 +31,12 @@ namespace Marketbuddy
         /// <remarks>
         /// 🔴 這個桶記的是「<b>已經替你擋下來了</b>」，不是「你該做什麼」——
         /// 價格一個 gil 都沒有被改動。判準與門檻見 <see cref="PriceAnomalyGuard"/>。
-        /// ⚠️ 這一桶的兩個欄位語意與其他桶不同（沒有別的欄位可以放，而加一欄 CSV
+        /// <para>⚠️ 這一桶的兩個欄位語意與其他桶不同（沒有別的欄位可以放，而加一欄 CSV
         /// 會讓既有的清單檔整份讀不回來）：
         /// <c>SuggestedPrice</c>＝<b>被擋下來的那個可疑價</b>（不是建議你掛的價），
         /// <c>SuggestionWorld</c>＝拿來比的那個<b>正常價</b>（已經格式化成字串）。
         /// <c>SuggestionSource</c> 是 <c>anomaly-peer</c>／<c>anomaly-own</c>，
-        /// UI 靠它分辨這兩個欄位該怎麼讀。
+        /// UI 靠它分辨這兩個欄位該怎麼讀。</para>
         /// </remarks>
         PriceAnomaly = 3,
     }
@@ -72,10 +72,10 @@ namespace Marketbuddy
     /// 建議價的來源：<c>live</c>＝本世界的即時市場快取、<c>survey</c>＝巡檢記錄（同一個世界）、
     /// <c>sale</c>＝Universalis 的資料中心最近一次實際成交、
     /// <c>survey-other</c>＝巡檢記錄（別的世界，只能當參考）、空＝沒有來源。
-    /// <c>survey-excluded</c>＝只有被排除的世界有資料，
+    /// <para><c>survey-excluded</c>＝只有被排除的世界有資料，
     /// 所以沒有建議價：此時 <paramref name="SuggestedPrice"/> 是 -1，
     /// 而 <paramref name="SuggestionWorld"/> 是那個被排除的世界，
-    /// 畫面才說得出「為什麼沒有」。
+    /// 畫面才說得出「為什麼沒有」。</para>
     /// </param>
     /// <param name="SuggestionWorld">建議價是哪一個世界的行情；空＝不知道。</param>
     /// <param name="SuggestionAtUtc">建議價的資料時間；<see cref="DateTime.MinValue"/>＝不知道。</param>
@@ -113,13 +113,13 @@ namespace Marketbuddy
     /// 🔴 <b>這個類別不會改任何價格。</b>它只記錄「哪一格需要人去看一下」。
     /// 真正的改價一律仍然由使用者在畫面上按下按鈕，走既有的
     /// <c>BatchReprice.StartQuickReprice</c>。
-    /// 執行緒：形狀比照 <see cref="PriceSurveyLog"/> —— <b>鎖只用來動字典</b>，
+    /// <para>執行緒：形狀比照 <see cref="PriceSurveyLog"/> —— <b>鎖只用來動字典</b>，
     /// 真正的檔案 I/O 一律在鎖外、在執行緒池上做。鎖內絕不做 I/O、不寫 log、
-    /// 不呼叫別的外掛、不碰 ImGui。
-    /// ⚠️ 與 <see cref="PriceSurveyLog"/> 不同，這個檔是<b>整份重寫</b>而不是追加：
+    /// 不呼叫別的外掛、不碰 ImGui。</para>
+    /// <para>⚠️ 與 <see cref="PriceSurveyLog"/> 不同，這個檔是<b>整份重寫</b>而不是追加：
     /// 清單會縮短（處理完、跳過、重算），追加寫不出「某一列不見了」。重寫走
     /// 「暫存檔 → <see cref="File.Move(string,string,bool)"/>」，所以寫到一半崩潰
-    /// 不會留下半份清單。
+    /// 不會留下半份清單。</para>
     /// </summary>
     internal static class PendingActions
     {

@@ -50,14 +50,8 @@ namespace Marketbuddy
     /// 「把這名僱員上架中的道具全部下架」批次引擎。
     /// 🔑 **目的地由設定 <see cref="Configuration.DelistToRetainerInventory"/> 決定，
     /// 預設是玩家背包，而那個預設是有理由的、不是隨便挑的。**
-    /// ——**不是** <c>MoveItemSlot</c>。這個差別很重要：<c>MoveItemSlot</c> 對僱員這種
-    /// 伺服器權威容器只會更新本機、假裝成功；而這兩支函式（離線反編譯 TC 7.20 客戶端證實）
-    /// 會寫一筆待處理交易記錄再送封包給伺服器，也就是真的來回。因此這裡**不**用
-    /// 「送出即算成功」，每一件都等到那一格真的空掉才算數。
-    /// 🔑 **「目的地滿了」是預期中的正常結束，不是錯誤。** 收回玩家背包時尤其如此：
     /// ⚠️ 查不到價時該格**留著不動**——不確定的時候少做比多做安全。
     /// 🔴 嚴格手動：只有使用者按下按鈕（且通過二次確認）才會跑。
-    /// 沒有任何事件驅動的接手鏈，關掉視窗／按 ESC／IPC 鎖定／AutoRetainer 開始運作
     /// </summary>
     internal sealed unsafe class BatchDelist : IRetainerBatchEngine, IDisposable
     {

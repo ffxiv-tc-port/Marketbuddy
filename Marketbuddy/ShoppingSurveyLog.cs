@@ -65,9 +65,9 @@ namespace Marketbuddy
     /// 🔴 <b>刻意與 <see cref="PriceSurveyLog"/> 分開兩個檔</b>。<c>price_survey.csv</c> 的每一列
     /// 都帶著「我方掛價」與「最低價是不是我自己的」，而採購清單上的東西<b>我根本沒有掛</b>——
     /// 混進同一個檔只會讓比價分頁與待處理清單多出一堆 <c>ourPrice=-1</c> 的幽靈列。
-    /// 🔴 形狀逐字沿用 <see cref="PriceSurveyLog"/>：同一個設定目錄、UTF-8 BOM ＋ CRLF、
+    /// <para>🔴 形狀逐字沿用 <see cref="PriceSurveyLog"/>：同一個設定目錄、UTF-8 BOM ＋ CRLF、
     /// 同一份逸出／拆解器、追加寫入、<b>鎖只用來動待寫清單，真正的 I/O 在鎖外的執行緒池上做</b>。
-    /// 鎖內絕不做 I/O、不寫 log、不碰 ImGui、不呼叫別的外掛。
+    /// 鎖內絕不做 I/O、不寫 log、不碰 ImGui、不呼叫別的外掛。</para>
     /// </summary>
     internal static class ShoppingSurveyLog
     {

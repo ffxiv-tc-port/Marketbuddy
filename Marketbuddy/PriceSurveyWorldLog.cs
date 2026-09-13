@@ -78,8 +78,8 @@ namespace Marketbuddy
     /// （一個世界只該有一列，追加寫不出「這一列被更新了」），而且重寫走
     /// 「暫存檔 → <see cref="File.Move(string,string,bool)"/>」，寫到一半崩潰
     /// 不會留下半份清單。
-    /// 🔴 執行緒：<b>鎖只用來動字典</b>，真正的檔案 I/O 一律在鎖外、在執行緒池上做。
-    /// 鎖內絕不做 I/O、不寫 log、不呼叫別的外掛、不碰 ImGui。
+    /// <para>🔴 執行緒：<b>鎖只用來動字典</b>，真正的檔案 I/O 一律在鎖外、在執行緒池上做。
+    /// 鎖內絕不做 I/O、不寫 log、不呼叫別的外掛、不碰 ImGui。</para>
     /// </summary>
     internal static class PriceSurveyWorldLog
     {

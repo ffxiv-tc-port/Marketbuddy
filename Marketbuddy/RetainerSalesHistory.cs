@@ -12,10 +12,10 @@ namespace Marketbuddy
     /// 那一級的語意是「我們看到它從清單消失，但錢包增量對不上」——把它算進去等於
     /// 用一個自信的數字蓋掉「我們其實不知道」。它有自己的欄位
     /// （<see cref="UnknownEvents"/>），而且畫面上一定要跟賣出並排看得見。
-    /// 🔑 <b>「全部是 0」不等於「沒有資料」。</b>這個結構本身分不出那兩件事——
+    /// <para>🔑 <b>「全部是 0」不等於「沒有資料」。</b>這個結構本身分不出那兩件事——
     /// 分辨的責任在呼叫端：有沒有觀察基礎要問
     /// <see cref="RetainerListingAge.FirstSeen"/>／<see cref="RetainerListingAge.EarliestSeen"/>，
-    /// 沒有基礎就必須畫成灰色的 <c>?</c>，<b>不可以畫成 0</b>。
+    /// 沒有基礎就必須畫成灰色的 <c>?</c>，<b>不可以畫成 0</b>。</para>
     /// </summary>
     /// <param name="SoldEvents">高信心「賣出」事件數。</param>
     /// <param name="SoldQuantity">那些事件加起來賣掉幾件。</param>
@@ -198,12 +198,12 @@ namespace Marketbuddy
     /// 「這件東西以前賣掉過嗎」的背景快取。
     /// 🔴 <b>繪製路徑零 I/O。</b><see cref="Pump"/> 只從 framework 執行緒呼叫，
     /// 而且它自己也不讀檔——讀檔與彙總全部在 <see cref="Task.Run(Func{object})"/> 上。
-    /// 🔑 更新時機：<see cref="RetainerSalesLog.Revision"/> 一變就重算（節流
+    /// <para>🔑 更新時機：<see cref="RetainerSalesLog.Revision"/> 一變就重算（節流
     /// <see cref="RebuildThrottle"/>），但<b>不是每次都重讀檔</b>——新事件同時也在
-    /// <see cref="RetainerSalesLog.SessionRows"/> 裡，折進來就夠了。
-    /// ⚠️ 那份記憶體清單有 1000 列的上限，超過會從最舊的丟；所以每
+    /// <see cref="RetainerSalesLog.SessionRows"/> 裡，折進來就夠了。</para>
+    /// <para>⚠️ 那份記憶體清單有 1000 列的上限，超過會從最舊的丟；所以每
     /// <see cref="FileRefreshEvery"/> 還是要重讀一次檔把帳補回來，
-    /// 否則長工作階段會<b>靜默少算</b>最舊的那些事件。
+    /// 否則長工作階段會<b>靜默少算</b>最舊的那些事件。</para>
     /// </summary>
     internal static class RetainerSalesHistory
     {

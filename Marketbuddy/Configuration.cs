@@ -94,8 +94,6 @@ namespace Marketbuddy
         /// <summary>
         /// 「全部下架」時**只**下架單價高於這個值的掛單；<b>0 = 停用</b>，也就是維持
         /// 一直以來的行為（全部下架）。預設 0，既有使用者不會被動改到任何東西。
-        /// 🔑 **這是單價（每一件的掛售價），不是整堆的總價。**
-        /// UI 上必須把「單價」講明白，否則使用者會照總價去設門檻。
         /// 這個門檻作用在 <see cref="BatchDelist"/>——也就是「本僱員全下架」與
         /// 「全僱員下架」兩顆按鈕共用的那一個引擎。**刻意不作用在**改價流程裡的自動下架
         /// （<see cref="BatchDelistBelowVendor"/> 與 <see cref="BatchMinPrice"/>）：那兩項的
@@ -381,8 +379,6 @@ namespace Marketbuddy
         /// <c>LastSoldPriceSource.Request()</c> 的每一條路徑都在
         /// <see cref="RelistUseLastSoldPrice"/> 底下，所以那個開關關著時，前三欄
         /// <b>永遠</b>不會有資料。面板把那種情況畫成灰色的 <c>?</c> 並在滑鼠提示裡說要開哪一項；<b>不可以</b>畫成「正在查…」。
-        /// ⚠️ 最低價一律照該格自己的品質取，<b>不受</b> <see cref="RelistLastSoldIgnoreQuality"/> 影響：
-        /// 拿自己的優質品去跟普通品的最低價比是錯的比較。
         /// </remarks>
         public bool LiveSellListMarketColumns = false;
 
@@ -508,10 +504,6 @@ namespace Marketbuddy
         /// 🔑 <b>為什麼走這條一次性的路，而不是寫進欄位初始式</b>：Dalamud 的設定反序列化會把
         /// JSON 的內容<b>加進</b>初始式建好的集合（Newtonsoft 預設的
         /// <c>ObjectCreationHandling.Auto</c>），所以寫在初始式裡的東西使用者拿不掉。
-        /// 🔴 <b>離線資料表證明不了「哪個世界還在營運」</b>：<c>World</c> 表裡 4034 仍然存在
-        /// （<c>TcRamuh</c>／「拉姆」），而台服每一個世界的 <c>IsPublic</c> 都是 false，
-        /// 照它篩會得到空清單。這一筆是實機試過去不了才知道的事實，所以只能寫成
-        /// 「出廠預設」，不能寫成「從資料表推出來的判斷」。
         /// </remarks>
         private void SeedClosedWorldExclusions()
         {

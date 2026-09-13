@@ -109,9 +109,6 @@ namespace Marketbuddy
         //    都沒動——同名改型別是最兇的一種破壞,而且有些方向會靜默成功。
         // 🔴 這兩個端點跑在**呼叫端外掛的執行緒**上,所以它們只碰 MarketDataCache 的
         //    ConcurrentDictionary 鏡像(GetPublished),絕不碰那個裸 Dictionary 快取。
-        // 🔴 查不到時回 null,而回傳的是**參考型別**:CallGate 的 InvokeFunc 對 null 走
-        //    `(TRet)result`,參考型別安全;可空**值**型別才會擲一個看起來與 IPC 完全
-        //    無關的 NullReferenceException。
         // ---------------------------------------------------------------
 
         /// <summary>
@@ -361,9 +358,6 @@ namespace Marketbuddy
 
         // ---------------------------------------------------------------
         // Lifestream（世界轉移）
-        //    EzIPC 的預設前綴是對方的 InternalName，所以是 Lifestream.<方法名>。
-        //    ChangeWorld(string) -> bool、IsBusy() -> bool、
-        //    CanVisitSameDC(string) -> bool、CanVisitCrossDC(string) -> bool。
         // 🔴 <b>只能在 framework 執行緒上呼叫。</b>Lifestream 那側有一道
         //    IpcFrameworkGate：已經在主執行緒時就地執行（零額外成本），
         //    但從別的執行緒打過去會變成「排進主執行緒 + 同步等最多 5 秒」——

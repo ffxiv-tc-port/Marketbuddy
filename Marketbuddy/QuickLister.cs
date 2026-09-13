@@ -24,14 +24,8 @@ namespace Marketbuddy
     /// Native quick listing: while a configurable key is held and the retainer
     /// sell list is open, right-clicking a sellable item automatically picks
     /// the "Put up for sale" context menu entry (Addon sheet row 99 - no
-    /// hardcoded strings). The RetainerSell window that opens is then taken
-    /// over directly: the item is listed immediately at the price cap
-    /// (999,999,999) and the new market slot is handed to the BatchReprice
-    /// engine as a single-slot run - compare (30 min cache), undercut,
-    /// thresholds and delist all reuse the existing pipeline. Listing first
-    /// Hooked through the bundled ClientStructs member
-    /// AgentInventoryContext.OpenForItemSlot (resolved address, no manual
-    /// signature scan). Strictly manual: one item per key-held right-click,
+    /// hardcoded strings).
+    /// Strictly manual: one item per key-held right-click,
     /// nothing scans the inventory.
     /// </summary>
     internal sealed unsafe class QuickLister : IDisposable
@@ -353,11 +347,6 @@ namespace Marketbuddy
                 AcquireSuppression();
 
                 // 🔴🔴 送出這一發之後，**不准在同一個呼叫堆疊裡再碰這扇窗**。
-                //    台服的 AtkUnitBase::FireCallback 在 close 參數為 true 且處理常式回非零時，
-                //    會在**回到這裡之前**就先後呼叫 vf6 Hide 與 vf4 Close；而 AtkUnitBase::Close
-                //    本身沒有任何 already-closed 的 early-out（它無條件送 FireCloseCallback 給
-                //    agent、把窗從 AtkUnitManager+0x7920 那張表摘掉、再 Hide 一次，最後派送
-                //    一則關窗事件）。⚠️ 它摘掉的**不是** AllLoadedUnitsList，詳見下面那段。
                 //    ⇒ 原本緊接在後面的 Hide()+Close(true) 就是「對正在關閉／已經關掉的窗
                 //      再操作一次」，也就是原生 AccessViolationException。AVE 在 .NET Core 屬
                 //      corrupted-state exception，try/catch（包含外層那個 detour 的 catch）
@@ -386,10 +375,6 @@ namespace Marketbuddy
                 // 的 vtable（回傳暫存器只在關窗區塊裡被設 1）。剩下唯一沒被排除的情形是
                 // 「處理常式自己把窗關掉了」—— 那件事離線證不出來，所以碰它之前用 addon id
                 // 重查一次，當作額外一道閘門。
-                // 🔴 但要知道這道閘門擋得到什麼、擋不到什麼（台服 7.20 反組譯實證）：
-                //    ✅ 擋得到：這扇窗已經被 Finalize／釋放（那時才會從 AllLoadedUnitsList
-                //       移除），以及同一個 id 已經換成另一個實例。
-                //    ❌ 擋不到：「已經 Close 但還沒 Finalize」。AtkUnitBase::Close
                 //    ⇒ 這道閘門是加分，不是證明。真正把這個站移出危險窗口的，是上面那個
                 //      closedByCallback 分歧：原生端說它關了，我們就一個字都不再碰。
                 // 🔴 這裡對存下來的位址**只做等值比較**：存的是 id，解參考的是遊戲這一幀自己

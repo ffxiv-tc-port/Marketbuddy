@@ -33,18 +33,18 @@ namespace Marketbuddy.Common
 
     /// <summary>
     /// 「不要對正在關閉中的視窗再按一次」的守衛。
-    /// 🔴🔴 這在防什麼：SelectYesno 這類「按下即關」的原生視窗，在按下之後的幾幀裡
+    /// <para>🔴🔴 這在防什麼：SelectYesno 這類「按下即關」的原生視窗，在按下之後的幾幀裡
     /// <c>GetAddonByName</c> 仍然回得到實例，<c>IsVisible</c> 與
     /// <c>UldManager.LoadedState == Loaded</c> 也都還是真 —— 也就是說
     /// <see cref="AddonHelpers.GetReadyAddon"/> 的三關全部通過 —— 這時再送一次
     /// callback / ReceiveEvent 就是原生 AccessViolation。AVE 在 .NET Core 屬於
-    /// corrupted-state exception，<c>try/catch</c> 完全攔不到，唯一的防護是**不要送第二次**。
-    /// 🔴 節流不是防護：牆鐘節流記的是「上一次動作在哪一幀」，不是「這扇窗按過了」。
+    /// corrupted-state exception，<c>try/catch</c> 完全攔不到，唯一的防護是**不要送第二次**。</para>
+    /// <para>🔴 節流不是防護：牆鐘節流記的是「上一次動作在哪一幀」，不是「這扇窗按過了」。
     /// 🔴 位址只做等值比較，永遠不解參考。位址會被新視窗重用，所以一定要搭配
     /// 「看到生命週期結束」的解除點（PreFinalize / PostSetup / 每幀輪詢）與逾時兜底。
     /// 🔴 這個守衛**只做防護**：它只會讓按下的次數變少，永遠不會多按一次，也不會
     /// 改變任何觸發條件。被擋下時一律回 <c>false</c>，對呼叫端的意義是「這一輪沒按到」，
-    /// 走的是它本來就有的「addon 還沒就緒」那條路徑。
+    /// 走的是它本來就有的「addon 還沒就緒」那條路徑。</para>
     /// </summary>
     internal static unsafe class AddonPressGuard
     {
@@ -288,8 +288,6 @@ namespace Marketbuddy.Common
             //    監聽器彼此之間的呼叫順序**不可依賴**（服務端註冊走 RunOnTick，
             //    派送時直接 foreach 一個順序無關的集合）。沒有這道豁免，
             //    晚一步跑到的解除會把同一幀剛登記的紀錄清掉。
-            //    ⚠️ 「上一扇窗留下的舊紀錄」不靠這裡清 —— 那是 PreFinalize 與
-            //    每幀輪詢的工作，它們發生在更早的幀，所以不受監聽器順序影響。
             RemoveByAddress((nint)args.Addon.Address, exemptCurrentFrame: true);
         }
 

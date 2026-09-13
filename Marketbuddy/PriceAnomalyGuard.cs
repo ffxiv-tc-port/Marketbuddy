@@ -66,23 +66,23 @@ namespace Marketbuddy
     /// 🔴 <b>這個類別不改任何價格、不碰任何遊戲指標、不做 I/O、不寫 log。</b>
     /// 它只回答一個問題：「這個參考價看起來像不像打錯的？」
     /// 真正的處置（維持原價／不填入價格）由呼叫端做，那裡才印得出有意義的訊息。
-    /// <b>判準是「離群」不是「變低」</b>——這是整個功能的核心取捨：
+    /// <para><b>判準是「離群」不是「變低」</b>——這是整個功能的核心取捨：</para>
     /// <list type="number">
     ///   <item><b>同業基準（<see cref="AnomalyBaseline.Peer"/>，優先）</b>：
     ///         拿最低價與<b>下一位賣家</b>的最低價比。
     ///         ⚠️ 「下一位」是<b>另一個 RetainerId</b>，不是「第二便宜的那一列」——
     ///         同一個人把一堆拆成好幾筆、全部打錯同一個價是很常見的，
     ///         用「第二便宜」會拿打錯的價去跟打錯的價比，比值 1，整條保護靜默失效。</item>
-    ///   <item><b>自家現價（<see cref="AnomalyBaseline.Own"/>，退而求其次）</b>：
-    ///         整個市場上只有那一位賣家時沒有同業可比，只好拿自己的掛售價當基準。</item>
+    ///   <para><item><b>自家現價（<see cref="AnomalyBaseline.Own"/>，退而求其次）</b>：
+    ///         整個市場上只有那一位賣家時沒有同業可比，只好拿自己的掛售價當基準。</item></para>
     /// </list>
-    /// 🔑 <b>有同業資料時它就是唯一判準</b>，不會再回頭看自家現價：
+    /// <para>🔑 <b>有同業資料時它就是唯一判準</b>，不會再回頭看自家現價：
     /// 「別人全都降價了」與「有一個人打錯字」的差別<b>只有同業基準看得出來</b>，
-    /// 而拿自家現價去補判會把前者也判成異常，那就變成「永遠不降價」。
-    /// 兩個門檻都可設定（<see cref="Configuration.AnomalyGuardMinNormalPrice"/> 與
+    /// 而拿自家現價去補判會把前者也判成異常，那就變成「永遠不降價」。</para>
+    /// <para>兩個門檻都可設定（<see cref="Configuration.AnomalyGuardMinNormalPrice"/> 與
     /// <see cref="Configuration.AnomalyGuardRatio"/>）：正常價要先達到金額門檻，
     /// 參考價才會因為「便宜太多倍」被判成異常。低價品本來就常常整批在幾十 gil 之間跳，
-    /// 沒有金額門檻的話那些全部會被誤判。
+    /// 沒有金額門檻的話那些全部會被誤判。</para>
     /// </summary>
     internal static class PriceAnomalyGuard
     {

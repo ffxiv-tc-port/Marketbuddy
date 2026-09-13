@@ -16,20 +16,20 @@ namespace Marketbuddy;
 /// （<see cref="MultiRetainerTour"/>，<see cref="TourMode.Reprice"/>），跑完把控制權還給 AR。
 /// </summary>
 /// <remarks>
-/// 🔴🔴 <b>AR 的等待沒有時限。</b>AR 端 <c>TaskPostprocessCharacterIPC</c> 排的等待任務是
+/// <para>🔴🔴 <b>AR 的等待沒有時限。</b>AR 端 <c>TaskPostprocessCharacterIPC</c> 排的等待任務是
 /// <c>timeLimitMS: int.MaxValue</c>：我們只要有一條路徑忘記回覆
 /// <c>AutoRetainer.FinishCharacterPostprocessRequest</c>，AR 就<b>永遠停在那裡</b>
 /// （不會逾時、不會報錯）。所以「接手」與「歸還」由 <see cref="pendingFinish"/> 這一個旗標
 /// 集中管理，成功／跳過／中止／逾時／使用者停止／外掛卸載每一條路徑都經過
 /// <see cref="FinishIfPending"/>，而且它自己具冪等性。另外還有一道
-/// <see cref="LegBackstopMinutes"/> 的總時限兜底，任何想不到的卡死都會在那裡歸還控制權。
-/// 🔑 <b>互斥靠的是 AR 自己的 TaskManager 而不是抑制旗標。</b>接手期間 AR 的
+/// <see cref="LegBackstopMinutes"/> 的總時限兜底，任何想不到的卡死都會在那裡歸還控制權。</para>
+/// <para>🔑 <b>互斥靠的是 AR 自己的 TaskManager 而不是抑制旗標。</b>接手期間 AR 的
 /// <c>TaskManager.IsBusy</c> 恆真（它正在跑那個等待任務），而 AR 兩條會搶僱員清單的路徑
 /// （<c>SchedulerMain.Tick</c> 的接管、以及僱員感知自動開鈴）都寫著 <c>!TaskManager.IsBusy</c>，
 /// 所以它不會來搶。⇒ 這裡<b>刻意不呼叫</b> <c>AutoRetainer.SetSuppressed</c>：那是給
 /// 「使用者手動觸發、AR 不知情」的情境用的，在 AR 明明就在等我們的時候多按一個全域旗標，
-/// 只會多出一條「忘記放開就永久癱瘓 AR」的失敗路徑。
-/// 🔴 <b>零自動走位。</b>接手當下鈴不在互動距離內就直接跳過這個角色，不做任何導航、不移動角色。
+/// 只會多出一條「忘記放開就永久癱瘓 AR」的失敗路徑。</para>
+/// <para>🔴 <b>零自動走位。</b>接手當下鈴不在互動距離內就直接跳過這個角色，不做任何導航、不移動角色。</para>
 /// </remarks>
 internal sealed unsafe class MultiCharacterTour : IDisposable
 {

@@ -67,15 +67,11 @@ namespace Marketbuddy.Common
 
         /// <summary>
         /// Context menu entry selection: Callback(0, index, 0u, 0, 0), same shape as AutoRetainer's QuickSellItems.
-        /// <paramref name="addonName"/> 是這扇選單自己報的名字（見 <see cref="ReadAddonName"/>）：
-        /// 守衛用它比對與輪詢，硬寫一個名字會在名字不符時靜默失去保護。
         /// 🔴 <paramref name="closedByCallback"/> ＝**原生端有沒有在回到 C# 之前就把這扇窗關掉**。
         /// ⇒ 回傳值的語意是「我有沒有替你把窗關掉」，**不是**「callback 成不成功」。
         /// 把它當成功與否用是靜默誤判（<c>close: false</c> 的呼叫恆回 false）。
         /// 🔴 拿到 true 之後**不准在同一個堆疊裡再碰這扇窗**：<c>AtkUnitBase::Close</c> 沒有
         /// 任何 already-closed 的 early-out，第二發就是攔不到的 AccessViolationException。
-        /// 🔴 送出前多一道<b>就地就緒檢查</b>（見底下的長註解）：它與守衛的解除條件互為邏輯反面，
-        /// 兩者一組才構成防護。不就緒就回 false，語意同「守衛擋下」＝這一輪沒送。
         /// </summary>
         public static bool FireContextMenuSelect(
             AtkUnitBase* contextMenu, int index, string addonName, out bool closedByCallback)
@@ -83,16 +79,11 @@ namespace Marketbuddy.Common
             closedByCallback = false;
 
             // 🔴🔴 送出前的就地就緒檢查。
-            //    ⚠️ 這一道**不是**「擋得住正在關閉中的窗」的檢查 —— IsAddonReady 的三關
-            //    （非 null／IsVisible／LoadedState == Loaded）在窗被按下之後的拆除途中是**全過**的，
-            //    單獨看它一個東西都擋不到。**這個結論不可以當成通用結論搬去別的地方用。**
-            //    它在這裡有效的唯一理由是：**與守衛的解除條件互為邏輯反面**。
             //    AddonPressGuard.ReleaseFinishedOrExpired 對每一筆紀錄問 IsStillAlive，而 IsStillAlive
             //    找到同一個位址時回的是 addon->IsVisible ⇒ 記號的解除條件是「這一幀**不可見**」。
             //    這裡的放行條件是「**可見**」⇒ 記號被解除之後還要能再送出一發，中間**必須**有一次
             //    遊戲自己把這扇窗重新 Show 起來 —— 而正在拆除的窗不會被重新 Show。
-            //    🔴 反過來把 IsStillAlive 改成「要連續不可見 N 幀才解除」才是壞交易：那個幀數本來就
-            //    **不承重**（承重的是上面那個反面關係），卻會把守衛換成一個會吞掉使用者右鍵的版本。
+
             // 🔴 這裡解參考的是**呼叫端這一幀剛從遊戲拿回來**的指標（QuickLister 走
             //    RaptureAtkUnitManager->GetAddonById 當場取得），**不是**守衛字典裡存下來的位址
             //    —— 那些位址從頭到尾只做等值比較。

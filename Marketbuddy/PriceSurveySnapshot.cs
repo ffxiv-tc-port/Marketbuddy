@@ -13,9 +13,9 @@ namespace Marketbuddy
     /// 做那件事就是掉幀。所以檔案<b>只在執行緒池上讀一次</b>，之後的更新由
     /// <see cref="PriceSurveyLog.Append"/> 就地餵進來（巡檢每查完一件就記一列，
     /// 那一列本來就在手上，不必再回去讀檔）。
-    /// 執行緒：底層是 <see cref="ConcurrentDictionary{TKey,TValue}"/>，
+    /// <para>執行緒：底層是 <see cref="ConcurrentDictionary{TKey,TValue}"/>，
     /// <b>任何執行緒都可以讀寫</b>。合併規則是「<see cref="PriceSurveyRow.AtUtc"/> 比較新的贏」，
-    /// 所以讀檔那一段即使在巡檢進行中才完成，也不會把剛剛的新資料蓋回舊值。
+    /// 所以讀檔那一段即使在巡檢進行中才完成，也不會把剛剛的新資料蓋回舊值。</para>
     /// </summary>
     internal static class PriceSurveySnapshot
     {

@@ -15,16 +15,8 @@ namespace Marketbuddy
 {
     /// <summary>
     /// 「即時出售品清單」——我們自己畫的僱員掛單表，貼在遊戲「出售品」視窗旁邊。
-    /// 為什麼需要：批次改價是走 <c>InventoryManager.SetRetainerMarketPrice()</c> 直接寫容器的
-    /// （刻意不開任何原生視窗，那才是它比手動快的原因），所以遊戲的 <c>RetainerSellList</c>
-    /// **不會自己重繪**——畫面停在開窗當下的價格，剛上架的道具會一直顯示 999,999,999，
-    /// 看起來像卡住。伺服器上的價格從頭到尾都是對的，這純粹是顯示問題。
     /// 這裡的資料每一幀在 Framework.Update 上重新從 <c>InventoryManager</c> 讀進快照，
     /// 繪製時只吃快照，所以既永遠是最新的，也不會在繪製執行緒上呼叫任何遊戲函式。
-    /// 換來的好處只是「版面更整齊」。所以這裡採取零原生寫入的版本：只讀 addon 的
-    /// X / Y / RootNode 尺寸（全是已建模的純欄位，沒有任何特徵碼呼叫）來決定貼在哪裡，
-    /// 把表畫在原生視窗**旁邊**而不是上面。原生視窗一切照舊可以點、可以拖，
-    /// 這個面板跟著它跑；關掉設定就完全回到原本的行為。
     /// </summary>
     internal sealed unsafe class LiveSellList : IDisposable
     {
@@ -56,10 +48,7 @@ namespace Marketbuddy
             /// 這一幀「歷史最近賣出價」的查詢到底有沒有在跑（＝那個定價方式開著）。
             /// 🔴 這個旗標存在的唯一理由：<see cref="LastSoldState.Unknown"/> 有<b>兩種</b>
             /// 完全不同的意思。定價方式開著時它是「這一幀剛好還沒排到」，下一幀就會變成
-            /// <see cref="LastSoldState.Loading"/>；關著時它是「<b>永遠</b>不會有人去問」
-            /// ——通往 <c>LastSoldPriceSource.Request()</c> 的每一條路徑（這個面板的預取、
-            /// <c>BatchReprice</c> 的批次預取、以及它逐格的補查）都在
-            /// <c>RelistUseLastSoldPrice</c> 底下，所以那個開關關著時一個查詢都不會送出去。
+            /// <see cref="LastSoldState.Loading"/>；關著時它是「<b>永遠</b>不會有人去問」。
             /// </summary>
             public bool SoldLookupEnabled { get; init; }
 
@@ -889,16 +878,14 @@ namespace Marketbuddy
         /// <summary>
         /// 「這件東西以前賣掉過嗎」那一格：<c>賣出次數 / 沒賣掉就下架的次數</c>。
         /// 🔴 <b>四種「沒有數字」必須互相分得出來，而且一個都不可以畫成 0</b>：
-        /// <list type="bullet">
+        /// <para><list type="bullet">
         ///   <item><c>?</c>（記錄功能關著）＝沒有資料，而且不會有。</item>
         ///   <item><c>…</c>（還在讀紀錄）＝等一下就有。</item>
         ///   <item><c>?</c>（從沒看過這位僱員）＝<b>我們沒看過</b>，不是「賣不掉」。</item>
         ///   <item><c>—</c>（看過，但這件從來沒有異動）＝它就一直掛在那裡沒動過。</item>
-        /// </list>
-        /// 把前三種畫成 0 會讓使用者讀成「這件賣不掉」而做出相反的決定——
-        /// 「讀不到當成 0」在艦隊裡已經害過一次。
-        /// 🔴 第二個數字裡<b>絕不含賣出</b>：它是「下架＋消失但對不上金幣」。信心不足的那些
-        /// （<see cref="RetainerSaleConfidence.Unknown"/>）一律不算賣出，理由寫在滑鼠提示裡。
+        /// </list></para>
+        /// <para>🔴 第二個數字裡<b>絕不含賣出</b>：它是「下架＋消失但對不上金幣」。信心不足的那些
+        /// （<see cref="RetainerSaleConfidence.Unknown"/>）一律不算賣出，理由寫在滑鼠提示裡。</para>
         /// </summary>
         private void DrawHistoryCell(in Row row)
         {

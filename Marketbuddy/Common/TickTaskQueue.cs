@@ -20,11 +20,7 @@ namespace Marketbuddy.Common
     /// Minimal sequential task queue pumped from Framework.Update (owner calls
     /// <see cref="Update"/> once per tick). Runs one task at a time; a task is a
     /// delegate invoked every tick until it reports Done.
-    ///
-    /// Soft timeouts, retries and backoff are the responsibility of the tasks
-    /// themselves (they know how to re-issue their work); the per-task watchdog
-    /// here is a last-resort safety net so a stuck task can never hang the queue
-    /// silently. No hooks, no code patches, no busy-waiting.
+    /// No hooks, no code patches, no busy-waiting.
     /// </summary>
     internal sealed class TickTaskQueue
     {

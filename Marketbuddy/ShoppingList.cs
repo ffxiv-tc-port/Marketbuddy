@@ -22,10 +22,10 @@ namespace Marketbuddy
     /// AllaganTools 的 <c>GetCraftItems</c> 只回<b>成品</b>（<c>IsOutputItem</c>），
     /// 不是「要去買的材料」。猜別人的存檔格式的失敗形式是靜默拿到錯的清單，
     /// 然後在每一個世界多查幾百件——那比請使用者貼一份清單糟得多。
-    /// 執行緒：<see cref="BeginLoad"/> 把<b>讀檔</b>丟到執行緒池，
+    /// <para>執行緒：<see cref="BeginLoad"/> 把<b>讀檔</b>丟到執行緒池，
     /// <see cref="PumpLoad"/> <b>只能在 framework 執行緒上呼叫</b>——名稱轉 id 要讀
     /// Lumina 的 <c>Item</c> 表，那份索引也只在那裡建。整條路徑<b>只讀不寫</b>，
-    /// 唯一會寫檔的是使用者自己按下「建立範例清單檔」（<see cref="TryCreateTemplate"/>）。
+    /// 唯一會寫檔的是使用者自己按下「建立範例清單檔」（<see cref="TryCreateTemplate"/>）。</para>
     /// </summary>
     internal static class ShoppingList
     {

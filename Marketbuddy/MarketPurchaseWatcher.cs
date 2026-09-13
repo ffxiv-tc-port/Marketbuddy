@@ -10,9 +10,6 @@ namespace Marketbuddy
     /// <summary>
     /// 看著遊戲自己記下來的「上一筆市場板購買」，在使用者買下東西的那一刻告訴
     /// <see cref="GilDeltaHintIPC">GilDelta</see>「接下來那筆金幣減少是買了什麼」。
-    /// 🔴 <b>純唯讀輪詢，零封包、零 hook、零記憶體寫入。</b>看的是
-    /// <c>InfoProxyItemSearch.LastPurchasedMarketboardItem</c> —— 那是<b>遊戲自己填好</b>的
-    /// 欄位（<c>SetLastPurchasedItem</c> 在送出購買請求前把選中的掛單抄進去）。
     /// 🔑 <b>為什麼是這個欄位，而不是「點了某一列」。</b>市場板上點一列只代表「在看」，
     /// 這個欄位只在真的要買的時候才變，所以沒有這個問題。
     /// ⇒ 這個桶留白是刻意的。要送就得先有一個「對方推不出來、而我們確定知道」的時刻，

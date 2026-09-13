@@ -13,9 +13,9 @@ namespace Marketbuddy;
 /// 🔴 契約名逐字取自 TataruPraise 的 <c>IpcContract.cs</c> 與 <c>PraiseCategory.cs</c>。
 /// CallGate 是純字串比對，名字打錯不會有任何錯誤訊息，只會永遠得到
 /// 「這個頻道沒有人註冊」——<b>靜默斷線</b>。所以字串都寫成常數，不散在呼叫點上。
-/// 🔴 <b>只能從主執行緒(framework tick)呼叫。</b>IPC 的實作是在呼叫端的執行緒上跑的，從背景 Task 叫過去等於把對方的程式碼拉到背景執行緒。
+/// <para>🔴 <b>只能從主執行緒(framework tick)呼叫。</b>IPC 的實作是在呼叫端的執行緒上跑的，從背景 Task 叫過去等於把對方的程式碼拉到背景執行緒。
 /// ⚠️ 這是<b>單向通知</b>：回傳值只拿來寫記錄，不影響 Marketbuddy 的任何流程，
-/// 不重試，也不會因此觸發任何市場操作。
+/// 不重試，也不會因此觸發任何市場操作。</para>
 /// </remarks>
 internal static class TataruPraiseIPC
 {
@@ -31,9 +31,9 @@ internal static class TataruPraiseIPC
     /// 「整池<b>有某個情境</b>播得出來」，於是「別的情境有語音、<b>市場</b>一句都沒有」時
     /// 照樣通過，接著 <c>Praise</c> 回 <c>false</c>——呼叫端就分不出「不能出聲」與「這次剛好沒出聲」。
     /// 📌 它刻意<b>不看冷卻</b>：冷卻是「這次剛好不出聲」，不是「不能出聲」。
-    /// 🔴 舊版 TataruPraise 沒有註冊這個端點，<c>InvokeFunc</c> 會擲 <c>IpcNotReadyError</c>，
+    /// <para>🔴 舊版 TataruPraise 沒有註冊這個端點，<c>InvokeFunc</c> 會擲 <c>IpcNotReadyError</c>，
     /// 剛好落進既有的 catch＝安靜不出聲，這是正確的 fail-safe。
-    /// <b>失敗時絕不可以退回去叫 <see cref="TagIsAvailable"/></b>——那樣就把這個端點的意義整個抵銷掉了。
+    /// <b>失敗時絕不可以退回去叫 <see cref="TagIsAvailable"/></b>——那樣就把這個端點的意義整個抵銷掉了。</para>
     /// </remarks>
     internal const string TagIsAvailableFor = "TataruPraise.IsAvailableFor";
 

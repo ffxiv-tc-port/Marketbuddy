@@ -6,14 +6,9 @@ namespace Marketbuddy
 {
     /// <summary>
     /// Single point of contact with AutoRetainer.
-    /// - Caches "is AutoRetainer busy" at 1 Hz (callers ask every frame, an IPC
-    ///   invoke per frame would be wasteful).
     /// - Suppresses AutoRetainer for the duration of a user-triggered
     ///   Marketbuddy operation (reference counted, restores the previous state
     ///   and never un-suppresses a suppression somebody else owns).
-    /// - Raises the "AutoRetainer finished, you can run it now" notice, but
-    ///   only when the user was actually blocked before.
-    /// Suppression is strictly scoped to operations the user started by hand.
     /// <see cref="MultiCharacterTour"/> 會在 AR 換角前接手跑一輪全僱員重掛。
     /// 那條路徑仍然要使用者手動武裝、一輪跑完就自己解除,不是常駐的事件驅動自動化。
     /// </summary>

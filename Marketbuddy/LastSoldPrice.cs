@@ -60,13 +60,9 @@ namespace Marketbuddy
     /// 「歷史最近賣出價」的來源：Universalis 的 <c>aggregated</c> 端點，取<b>整個資料中心</b>的
     /// <c>recentPurchase</c>。
     /// 🔴 <b>範圍是「整個資料中心，但扣掉世界排除清單上的世界」</b>，不是整個資料中心。
-    /// 🔴 <b>完全不碰遊戲內的市場查詢。</b>這條路徑不送 <c>InfoProxyItemSearch.RequestData()</c>、
-    /// 不開任何原生視窗、不掛 hook、不碰任何封包——只有一個對公開 HTTP API 的 GET。
     /// 執行緒：<see cref="Request"/>／<see cref="EnsureWorldNames"/> 只從 framework 執行緒呼叫
     /// （它們會讀遊戲資料表）；HTTP 與解析全在執行緒池上，<b>續行不會回到 framework 執行緒，
     /// 所以那一段不碰任何遊戲狀態</b>——世界名稱是在 framework 執行緒先建好的唯讀字典。
-    /// 🔴 <b>例外只有一個</b>：掛售發生的那個世界（家世界）<b>永遠不會</b>被排除，
-    /// 即使使用者把它勾進清單裡（見 <see cref="Configuration.BuildPricingExclusions()"/>）。
     /// </summary>
     internal static class LastSoldPriceSource
     {
@@ -159,8 +155,6 @@ namespace Marketbuddy
         /// 執行緒池上 ⇒ <b>絕不</b>從背景執行緒直接讀那個 List。作法與待處理清單重算
         /// （<c>PendingActionsBuilder</c>）同一個形狀：在 framework 執行緒當場拍一份快照，
         /// 之後全程只讀快照。
-        /// 🔑 清單與版號綁在<b>同一個物件</b>裡：兩個分開的 volatile 欄位讀起來不是原子的，
-        /// 會出現「拿到新清單卻配到舊版號」那種對不上的組合。
         /// </summary>
         internal sealed class ExclusionSnapshot(
             int configRevision, uint sellingWorldId, IReadOnlySet<uint> worlds)
@@ -483,8 +477,6 @@ namespace Marketbuddy
         /// ⚠️ 這裡<b>一律照這一格自己的品質</b>取，不受「忽略優質狀態」影響：
         /// 那個選項的用途是找「最近賣出價」，而拿自己的優質品去跟普通品的最低價比是錯的比較。
         /// 📌 <b>這兩個值刻意不套世界排除清單</b>，而且也不受清單版號影響。
-        /// ⚠️ 而且資料中心那一半是 Universalis <b>伺服器端算好的單一最小值</b>，
-        /// 手上沒有原始清單，過濾不掉——只過濾得到的那一半會變成「時對時錯而且分不出來」。
         /// </summary>
         internal static bool TryGetMinPrices(uint itemId, bool hq,
             out MarketPricePoint? world, out MarketPricePoint? datacenter)
@@ -1065,7 +1057,6 @@ namespace Marketbuddy
         /// 把 v3 overview 的原始掛售／成交清單壓成與 aggregated 端點<b>同一個形狀</b>。
         /// ⚠️ v3 的掛售 <c>price</c> 是<b>含稅</b>的每單位價而且是浮點數，遊戲介面與 aggregated
         /// 端點用的則是<b>未稅整數價</b> ⇒ 一律從 <c>total</c>／<c>quantity</c> 還原。
-        /// 成交紀錄的 <c>price</c> 本來就是未稅單價，不要再換算。
         /// ⚠️ v3 每個世界最多回 20 筆成交，而且留下的是<b>最新</b>的 20 筆（同日實測：最舊的一筆
         /// 落在 2～4 天前）⇒ 拿它取「最近一次成交」是安全的；拿它算平均價或成交速度<b>不安全</b>，
         /// 所以這裡一個都不算。
@@ -1278,9 +1269,6 @@ namespace Marketbuddy
         /// ⚠️ <paramref name="fallbackWorldId"/> ＝「回應沒帶 <c>worldId</c> 時當成哪個世界」。
         /// <c>world</c> 範圍就是這次查詢的世界；<c>dc</c> 範圍<b>沒有</b>合理的替代值 ⇒ 傳 0，
         /// 而 0 一律當成「不知道」＝不排除。
-        /// 🔴 那是本次過濾唯一一個縫。Universalis 對 <c>dc</c> 範圍照 schema 一定帶
-        /// <c>worldId</c>（同一個欄位這裡本來就在讀，用來顯示成交世界），真的缺了的話
-        /// <see cref="NoteWorldlessDc"/> 會寫一行讓它<b>看得見</b>，而不是靜默照用。
         /// </summary>
         private static EntryDto? UsablePurchase(EntryDto? entry, ExclusionSnapshot ex,
             uint fallbackWorldId, ref bool dropped)

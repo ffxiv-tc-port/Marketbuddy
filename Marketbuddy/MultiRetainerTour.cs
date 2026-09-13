@@ -21,13 +21,6 @@ namespace Marketbuddy
     /// <summary>
     /// 全僱員巡迴：從僱員選單出發，逐一拜訪有掛單的僱員，開它的出售品視窗，
     /// 跑單僱員引擎（重掛或下架，見 <see cref="TourMode"/>），然後離開換下一個。
-    /// Navigation follows the TC-production-proven AutoRetainer recipes:
-    /// RetainerList Callback(2, index), SelectString menu entries matched via
-    /// Lumina Addon sheet text (row 2380 = "sell items", row 2383 = "quit"),
-    /// Talk dialogues advanced with the standard click. No strings are
-    /// hardcoded. Strictly manual trigger; cancellable at any time (button or
-    /// ESC); every navigation step has a watchdog so a stall aborts the tour
-    /// instead of hanging.
     /// 🔴 兩種模式**共用同一個佇列與同一份導航**，所以「重掛巡迴」與「下架巡迴」
     /// 在結構上不可能同時跑，<see cref="IsRunning"/> 同時就是兩者的互斥閘。
     /// </summary>
@@ -84,7 +77,6 @@ namespace Marketbuddy
         /// 下一名也滿**（每名僱員的物品欄各自獨立），照理可以跳過去繼續跑。但目前撞到
         /// 滿一律停整趟——這是收回玩家背包時的正確行為（共用同一個背包，去下一個也只會
         /// 立刻再滿一次），沿用到僱員目的地只是保守，不會做錯事，只是可能提早收工。
-        /// 改成「跳過這名、繼續下一名」要動到中止流程本身，不在這次的範圍內。
         /// </summary>
         private bool tourToRetainerInventory;
 
@@ -290,8 +282,6 @@ namespace Marketbuddy
 
         /// <summary>
         /// 這個角色目前所有可用的僱員（**不看有沒有掛單**）。
-        /// 巡迴的目標清單與設定視窗的「跳過哪些僱員」都從這一份長出來，所以兩邊
-        /// 看到的僱員集合不可能分岔。
         /// ⚠️ 只在 <c>IsReady</c> 時回傳資料：設定視窗隨時可以開（包括還沒登入時），
         /// 沒有這個閘門就會去問一份還沒載入的僱員表。既有呼叫端（<see cref="CanStart"/>）
         /// 本來就已經在外面檢查過 <c>IsReady</c>，所以這一行對它們是 no-op。

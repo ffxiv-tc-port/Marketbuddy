@@ -72,10 +72,10 @@ namespace Marketbuddy
     /// 🔴 <b>刻意寫在 Marketbuddy 自己的設定目錄底下</b>，不碰 InventoryTools 的
     /// <c>market_cache.csv</c>：那是別的外掛的資料檔，我們沒有它的格式契約，
     /// 寫進去只會在對方下一次整份覆寫時靜默消失（而且可能弄壞對方的狀態）。
-    /// 🔴 <b>寫檔一律在 framework 執行緒之外</b>：巡檢每一件查完就要記一列，
+    /// <para>🔴 <b>寫檔一律在 framework 執行緒之外</b>：巡檢每一件查完就要記一列，
     /// 在遊戲主執行緒上做檔案 I/O 會直接變成掉幀。這裡的形狀是
     /// 「鎖只用來把待寫清單拍快照／清空，真正的 I/O 在鎖外做」——
-    /// 鎖內絕不做 I/O、不寫 log、不呼叫別的外掛。
+    /// 鎖內絕不做 I/O、不寫 log、不呼叫別的外掛。</para>
     /// </summary>
     internal static class PriceSurveyLog
     {

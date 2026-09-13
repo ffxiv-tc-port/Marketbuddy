@@ -14,12 +14,12 @@ namespace Marketbuddy
     /// ①重算清單（純計算，不送任何市場查詢、不改任何價格）②把某一格交給<b>既有的</b>
     /// <see cref="BatchReprice.StartQuickReprice"/> ③把某一列標成已跳過。
     /// 「巡檢跑完自動重算」那個開關也只是①——它不會、也不能改任何價格。
-    /// 執行緒（形狀比照 <see cref="LiveSellList"/>）：所有遊戲狀態都在
+    /// <para>執行緒（形狀比照 <see cref="LiveSellList"/>）：所有遊戲狀態都在
     /// <see cref="OnFrameworkUpdate"/> 上拍成快照，<b>繪製執行緒只讀快照</b>，
     /// 按鈕只立旗標。讀檔（巡檢記錄、InventoryTools 的 inventories.csv）一律在執行緒池上，
-    /// 因為那兩個檔案都會長到幾十萬 bytes。
-    /// 市場快取是一個裸 <c>Dictionary</c>，只有 framework 執行緒與封包處理器碰它——
-    /// 從執行緒池讀它的失敗形式不是「拿到舊值」而是<b>字典本身壞掉</b>。
+    /// 因為那兩個檔案都會長到幾十萬 bytes。</para>
+    /// <para>市場快取是一個裸 <c>Dictionary</c>，只有 framework 執行緒與封包處理器碰它——
+    /// 從執行緒池讀它的失敗形式不是「拿到舊值」而是<b>字典本身壞掉</b>。</para>
     /// </summary>
     internal sealed unsafe class PendingActionsBuilder : IDisposable
     {
@@ -525,25 +525,25 @@ namespace Marketbuddy
         /// 建議價的來源優先序（<b>這裡是唯一真值來源</b>）：
         /// <list type="number">
         ///   <item><b>L</b>（板上別人的最低掛售價）：
-        ///     <list type="bullet">
+        ///     <para><list type="bullet">
         ///       <item><c>live</c>：本世界的即時市場快取（<see cref="MarketDataCache"/>）。
         ///             🔴 只有人現在就在家世界時才算數——那份快取是<b>綁世界</b>的，
         ///             在別的世界讀它拿到的是別的世界的行情。</item>
         ///       <item><c>survey</c>：巡檢記錄裡<b>家世界自己</b>那一列。</item>
-        ///     </list>
+        ///     </list></para>
         ///   </item>
-        ///   <item><b>S</b>（<c>sale</c>）：Universalis 的「資料中心最近一次實際成交」。
+        ///   <para><item><b>S</b>（<c>sale</c>）：Universalis 的「資料中心最近一次實際成交」。
         ///         ⚠️ <b>只讀已經抓回來的</b>——這裡不會發動任何 HTTP 查詢（清單重算可以由
         ///         「巡檢跑完自動重算」觸發，在那條路上發網路請求等於長出一條自動鏈）。
-        ///         ⇒ 沒去過出售品清單的道具在這張清單上看不到成交價這一側，那是刻意的。</item>
-        ///   <item><c>survey-other</c>：巡檢記錄裡<b>別的世界</b>最便宜的那一列。
+        ///         ⇒ 沒去過出售品清單的道具在這張清單上看不到成交價這一側，那是刻意的。</item></para>
+        ///   <para><item><c>survey-other</c>：巡檢記錄裡<b>別的世界</b>最便宜的那一列。
         ///         🔴 那是另一個市場，<b>永遠不會變成 L</b>——別人在別的世界比我便宜不代表我在
-        ///         自己的市場上吃虧。它只在 L 與 S 都沒有時當<b>純顯示</b>的最後估計值，
-        ///         </item>
+        ///         自己的市場上吃虧。
+        ///         </item></para>
         /// </list>
-        /// 全都沒有就回 -1（＝不知道）。<b>絕不回 0</b>：0 在價格欄是一個合法但荒謬的值。
+        /// <para>全都沒有就回 -1（＝不知道）。<b>絕不回 0</b>：0 在價格欄是一個合法但荒謬的值。
         /// 🔑 <b>L 與 S 的「取低者」由 <see cref="RelistPricing.Decide"/> 決定，而那正是重掛
-        /// 引擎用的同一支函式</b>——清單上寫的建議價與按下按鈕之後真的掛出去的價因此不可能分岔。
+        /// 引擎用的同一支函式</b>——清單上寫的建議價與按下按鈕之後真的掛出去的價因此不可能分岔。</para>
         /// </summary>
         private static Observations Observe(uint itemId, bool hq, Request request, Prepared prepared,
             HashSet<ulong> ownRetainers)
@@ -723,9 +723,9 @@ namespace Marketbuddy
         /// 🔑 「該下架」優先於「被壓價」，因為<b>重掛引擎自己就是這個順序</b>
         /// （<c>FinishPricing</c> 的兩道下架門檻排在寫入新價之前）。清單跟著引擎走，
         /// 才不會出現「清單叫你改價、按下去卻被下架」這種互相矛盾的結果。
-        /// ⚠️ 「該下架」刻意只認 <c>live</c>／<c>survey</c>／<c>sale</c> 這三種<b>引擎真的會
+        /// <para>⚠️ 「該下架」刻意只認 <c>live</c>／<c>survey</c>／<c>sale</c> 這三種<b>引擎真的會
         /// 拿去定價</b>的參考價：
-        /// 拿別的世界的行情去建議「把東西從市場上撤下來」是不成立的。
+        /// 拿別的世界的行情去建議「把東西從市場上撤下來」是不成立的。</para>
         /// </summary>
         private static PendingActionKind? Classify(long currentPrice, Suggestion suggestion, Request request,
             PriceSurveyRow homeRow, out PriceAnomaly anomaly)

@@ -87,16 +87,16 @@ namespace Marketbuddy
     /// <b>規則</b>：每一格算兩個候選，各自先過異常低價保護（<see cref="PriceAnomalyGuard"/>），
     /// 再<b>取低者</b>——
     /// <list type="bullet">
-    ///   <item><b>L</b>＝板上（<b>家世界</b>）<b>別人的</b>最低掛售價，再套使用者的降價設定。
-    ///         🔴 <b>絕不拿別的世界的掛單當 L</b>：別的世界比我便宜不代表我在自己的市場吃虧。</item>
+    ///   <para><item><b>L</b>＝板上（<b>家世界</b>）<b>別人的</b>最低掛售價，再套使用者的降價設定。
+    ///         🔴 <b>絕不拿別的世界的掛單當 L</b>：別的世界比我便宜不代表我在自己的市場吃虧。</item></para>
     ///   <item><b>S</b>＝資料中心最近一筆成交價，無條件捨去到百位，而且<b>只採新鮮度窗內</b>的紀錄。</item>
     /// </list>
-    /// 為什麼取低：使用者的目標是<b>賣掉</b>。成交價告訴我們「市場上真的有人以這個價買走」，
+    /// <para>為什麼取低：使用者的目標是<b>賣掉</b>。成交價告訴我們「市場上真的有人以這個價買走」，
     /// 板上最低價告訴我們「現在得低於誰才輪得到我」。只看成交價會在板上有人開更低時
-    /// 掛在賣不掉的價；只看板上會在別的世界都靠更低價才賣掉時掛得太貴。
-    /// 🔑 平手（<c>S == L</c>）時取 <b>L</b>：使用者的降價設定是 0 時「跟板上最低價相同」
+    /// 掛在賣不掉的價；只看板上會在別的世界都靠更低價才賣掉時掛得太貴。</para>
+    /// <para>🔑 平手（<c>S == L</c>）時取 <b>L</b>：使用者的降價設定是 0 時「跟板上最低價相同」
     /// 正是他明確要的行為（「如果目前上架得有人掛更低 但不是離群值 可以維持和它相同」），
-    /// 而 L 已經套過那個設定。
+    /// 而 L 已經套過那個設定。</para>
     /// </summary>
     internal static class RelistPricing
     {
@@ -278,17 +278,16 @@ namespace Marketbuddy
         /// 兩候選取低——<b>整個功能的核心，而且只有這一份實作</b>。
         /// </summary>
         /// <remarks>
-        /// <list type="table">
+        /// <para><list type="table">
         ///   <item><term>S 與 L 都能用、<c>S &gt;= L</c></term><description>L（跟板上最低價）</description></item>
         ///   <item><term>S 與 L 都能用、<c>S &lt; L</c></term><description>S（要更低才賣得掉）</description></item>
         ///   <item><term>只有 S</term><description>S</description></item>
         ///   <item><term>只有 L</term><description>L</description></item>
-        ///   <item><term>都不能用，但有一個是被異常低價保護擋下來的</term>
-        ///         <description><see cref="RelistOutcome.Hold"/>（一個 gil 都不改，但要說明原因）</description></item>
+        ///   <item><term>都不能用，但有一個是被異常低價保護擋下來的</term><description><see cref="RelistOutcome.Hold"/>（一個 gil 都不改，但要說明原因）</description></item>
         ///   <item><term>什麼都沒有</term><description><see cref="RelistOutcome.NoData"/></description></item>
-        /// </list>
-        /// 🔑 兩個都被擋下來時回報 <b>L</b> 那一個：那是舊版（不開成交價定價）唯一會看到的原因，
-        /// 判讀時比較不會被新來的那一側混淆。這是<b>刻意的、決定性的</b>選擇，不是巧合。
+        /// </list></para>
+        /// <para>🔑 兩個都被擋下來時回報 <b>L</b> 那一個：那是舊版（不開成交價定價）唯一會看到的原因，
+        /// 判讀時比較不會被新來的那一側混淆。這是<b>刻意的、決定性的</b>選擇，不是巧合。</para>
         /// </remarks>
         internal static RelistDecision Decide(PriceCandidate listing, PriceCandidate sale)
         {

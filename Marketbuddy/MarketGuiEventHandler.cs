@@ -376,13 +376,11 @@ namespace Marketbuddy
 
         /// <summary>
         /// Closes the "compare prices" window by replaying the window-close event.
-        ///   addon->WindowNode->Component->UldManager.NodeList[7]->GetComponent()->OwnerNode
         /// WindowNode / Component / NodeList[7] / GetComponent() 任何一層是 null 都會解參考,
         /// 而 GetComponent() 本身是 [MemberFunction] 原生呼叫、對 null 節點呼叫即 AVE;
         /// AVE 在 .NET Core 屬於 corrupted-state exception,try/catch 完全攔不到。
         /// NodeList 又是原生指標陣列,沒有 Length 可以靠 —— 索引 7 一定要先比對 NodeListCount,
         /// 只驗 != null 是半套(越界讀到的是垃圾不是 null)。
-        /// 失敗時的行為是「不送這個關閉事件」,視窗留著,不會崩。
         /// </summary>
         private unsafe void CloseItemSearchResultWindow()
         {

@@ -16,9 +16,6 @@ namespace Marketbuddy
     /// <summary>
     /// One-click "relist every listed slot of the current retainer at
     /// (lowest market price - undercut)" batch engine.
-    /// No hooks, no packet forgery, no memory patches; a stuck market query is
-    /// handled by timeout + a capped-backoff retry (up to MaxAttempts tries,
-    /// backoff escalating fast then capped low), then the slot is skipped.
     /// Strictly manual: runs only when the user clicks the button while a
     /// retainer's sell list (RetainerSellList) is open, or when QuickLister
     /// hands it a single just-listed slot to price. Cancellable at any time

@@ -22,8 +22,8 @@ namespace Marketbuddy
     /// 查價的答覆轉交給 <see cref="BatchReprice"/> —— 讓它不必再用逾時去**猜**伺服器怎麼了。
     /// • **不呼叫 <c>RequestData()</c>。** 那會繞過 <see cref="MarketRequestGate.NoteRequestSent"/>，
     ///   重送一律由既有的 framework tick 路徑發起、走既有的閘門。
-    /// • **不碰任何集合或外掛狀態。** 封包分派不保證在主執行緒，所以交接只用一個
-    ///   <see cref="Interlocked"/> 單槽（<see cref="signal"/>），沒有鎖、沒有配置、沒有字典。
+    /// <para>• **不碰任何集合或外掛狀態。** 封包分派不保證在主執行緒，所以交接只用一個
+    ///   <see cref="Interlocked"/> 單槽（<see cref="signal"/>），沒有鎖、沒有配置、沒有字典。</para>
     /// • **不吞掉 Original。** 代價會是 <c>ListingCount</c>/<c>EntryCount</c> 留著上一件的值，
     ///   而那時 <c>SearchItemId</c> 已經是新道具 —— 不會崩，會**給錯價**。
     /// </summary>
