@@ -16,10 +16,11 @@ namespace Marketbuddy
     /// <summary>
     /// One-click "relist every listed slot of the current retainer at
     /// (lowest market price - undercut)" batch engine.
-    /// Strictly manual: runs only when the user clicks the button while a
+    /// No hooks, no packet forgery, no memory patches.
+    /// <para>Strictly manual: runs only when the user clicks the button while a
     /// retainer's sell list (RetainerSellList) is open, or when QuickLister
     /// hands it a single just-listed slot to price. Cancellable at any time
-    /// via the cancel button or ESC; closing the sell list also aborts.
+    /// via the cancel button or ESC; closing the sell list also aborts.</para>
     /// </summary>
     internal sealed unsafe class BatchReprice : IRetainerBatchEngine, IDisposable
     {
