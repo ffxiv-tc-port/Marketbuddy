@@ -234,9 +234,9 @@ namespace Marketbuddy
                 ObservedAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 ConfirmedEmpty = true,
             };
-            // 每一筆查價都會走到這裡，屬於細節而非摘要 -> Debug。
+            // 每一筆查價都會走到這裡，屬於細節而非摘要 -> 只在診斷開關打開時才寫。
             // 一次查價的 Information 級摘要由 BatchReprice 的 QUERY 那一行負責。
-            Log.Debug($"{Diag} CACHE-STORE item={itemId} n=0 source=confirmed-empty total={Cache.Count}");
+            MarketDiag.TracePacket($"{Diag} CACHE-STORE item={itemId} n=0 source=confirmed-empty total={Cache.Count}");
         }
 
         private static void OnFrameworkUpdate(IFramework framework)
@@ -332,8 +332,8 @@ namespace Marketbuddy
             };
             PublishSnapshot(itemId, captured);
 
-            // 被動處理器：遊戲裡任何一次掛單查詢都會來一次，是 log 的大宗 -> Debug。
-            Log.Debug(
+            // 被動處理器：遊戲裡任何一次掛單查詢都會來一次，是記錄檔的大宗 -> 只在診斷開關打開時才寫。
+            MarketDiag.TracePacket(
                 $"{Diag} CACHE-STORE item={itemId} n={captured.Count} reqId={offerings.RequestId} total={Cache.Count}");
         }
     }

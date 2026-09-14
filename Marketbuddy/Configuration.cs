@@ -180,7 +180,7 @@ namespace Marketbuddy
         public bool TataruPraiseOnSurveyDone = true;
 
         /// <summary>
-        /// 把高頻的 <c>[MBDIAG]</c> 診斷行從 <c>Debug</c> 提升到 <c>Information</c>。
+        /// 打開高頻的 <c>[MBDIAG]</c> 診斷行（走 <c>Information</c>）；關著時<b>一行都不寫</b>。
         /// ⚠️ <c>REFUSED</c>／<c>TIMEOUT</c>／<c>MKTRESULT-ERR</c>／快取清除這些低頻、
         /// 代表真的出事的行<b>不受這個開關影響</b>，一律維持原等級。
         /// </summary>
@@ -532,6 +532,10 @@ namespace Marketbuddy
         {
             PluginInterface.SavePluginConfig(this);
         }
+
+        /// <summary>已經載入的設定；還沒載入時回 <c>null</c>。</summary>
+        /// <remarks>🔴 給不可以在自己執行緒上讀檔的呼叫端用（封包處理器、hook detour）：<see cref="GetOrLoad"/> 的冷路徑會讀檔並可能寫檔。</remarks>
+        internal static Configuration? Loaded => _cachedConfig;
 
         public static Configuration GetOrLoad()
         {

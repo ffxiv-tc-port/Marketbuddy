@@ -40,6 +40,7 @@ namespace Marketbuddy
         // 拉到 90 秒（約 50% 餘裕）。
         private const int SlotWatchdogSeconds = 90;  // hard per-slot watchdog (queue-level safety net; sized for MaxAttempts attempts plus gate spacing and backoffs, with margin)
         private const int EmptyResultGraceMs = 1000; // history seen + this long with no offerings => nothing on sale (measured HISTORY->OFFERINGS max is 432 ms, so this is 2.3x the observed worst case)
+        private const int ForeignOfferingsReportSeconds = 60; // 「不是我們在等的」掛單封包最多幾秒記一次累計筆數
 
         /// <summary>
         /// 「以歷史最近賣出價重掛」時，一格最多等 Universalis 這麼久。
@@ -154,6 +155,10 @@ namespace Marketbuddy
         private uint pendingItemId;
         private int lastAcceptedRequestId = int.MinValue;
         private bool suppressionHeld;
+
+        // 「不是我們在等的」掛單封包計數，見 NoteForeignOfferings。只在封包處理器裡碰。
+        private int foreignOfferings;
+        private DateTime foreignOfferingsReportedAt;
 
         // Per-slot record of what the batch actually changed, for the live sell
         // list overlay (display only - see LiveSellList). Keyed by market slot.
@@ -1316,34 +1321,36 @@ namespace Marketbuddy
             // 快取是 MarketDataCache 自己那個獨立的訂閱做的事——包括下面每一條 dropped
             // 分支所丟掉的封包，它們一樣都已經被存起來了，只是不會在這裡被採用。
             var listings = offerings.ItemListings;
-            // 這個處理器對「遊戲裡任何一次掛單查詢」都會被呼叫，不只我們自己送的那些，
-            // 所以這一整組是實機 log 的大宗 -> 全部 Debug。一次查價的 Information 級
-            // 摘要只有 QUERY 那一行。
-            Log.Debug(
+
+            if (!offeringsPending)
+            {
+                // 遊戲裡任何一次掛單查詢都會走到這裡（別的外掛、使用者自己逛市場），
+                // 與本次重掛無關：逐筆記會蓋掉真正的訊號，只記節流後的累計筆數。
+                NoteForeignOfferings();
+                return;
+            }
+
+            MarketDiag.TracePacket(
                 $"{Diag} OFFERINGS reqId={offerings.RequestId} count={listings.Count} " +
                 $"firstItem={(listings.Count > 0 ? listings[0].ItemId : 0)} " +
                 $"pendingItem={pendingItemId} pending={offeringsPending} " +
                 $"lastAcceptedReqId={lastAcceptedRequestId}");
-
-            if (!offeringsPending)
-            {
-                Log.Debug($"{Diag} OFFERINGS dropped: no request pending");
-                return;
-            }
 
             if (listings.Count > 0)
             {
                 // Later pages of a batch we already consumed share its RequestId.
                 if (offerings.RequestId == lastAcceptedRequestId)
                 {
-                    Log.Debug($"{Diag} OFFERINGS dropped: RequestId == lastAcceptedRequestId ({offerings.RequestId})");
+                    MarketDiag.TracePacket(
+                        $"{Diag} OFFERINGS dropped: RequestId == lastAcceptedRequestId ({offerings.RequestId})");
                     return;
                 }
 
                 // Stale response for a previously requested item: ignore.
                 if (listings[0].ItemId != pendingItemId)
                 {
-                    Log.Debug($"{Diag} OFFERINGS dropped: itemId mismatch (got {listings[0].ItemId}, want {pendingItemId})");
+                    MarketDiag.TracePacket(
+                        $"{Diag} OFFERINGS dropped: itemId mismatch (got {listings[0].ItemId}, want {pendingItemId})");
                     return;
                 }
             }
@@ -1363,18 +1370,32 @@ namespace Marketbuddy
             offeringsPending = false;
             offeringsReceived = true;
             lastDataReceivedAt = DateTime.UtcNow;
-            Log.Debug($"{Diag} OFFERINGS accepted: {captured.Count} listings for item {pendingItemId}");
+            MarketDiag.TracePacket($"{Diag} OFFERINGS accepted: {captured.Count} listings for item {pendingItemId}");
+        }
+
+        /// <summary>記一筆「不是我們在等的」掛單封包，節流後只寫累計筆數。</summary>
+        /// <remarks>🔴 只從市場封包處理器呼叫（與這個類別其餘的封包狀態同一條執行緒）。</remarks>
+        private void NoteForeignOfferings()
+        {
+            foreignOfferings++;
+            var now = DateTime.UtcNow;
+            if ((now - foreignOfferingsReportedAt).TotalSeconds < ForeignOfferingsReportSeconds)
+                return;
+            foreignOfferingsReportedAt = now;
+            MarketDiag.TracePacket(
+                $"{Diag} OFFERINGS ignored (no request pending): {foreignOfferings} since load");
         }
 
         private void OnHistoryReceived(IMarketBoardHistory history)
         {
-            // 同上：遊戲裡每一次掛單查詢都會來一筆 -> Debug。
-            Log.Debug(
+            // 同上：不是我們在等的那一筆就直接離開、不記錄（遊戲裡每次掛單查詢都會來一筆）。
+            if (!offeringsPending || historySeen)
+                return;
+
+            MarketDiag.TracePacket(
                 $"{Diag} HISTORY item={history.ItemId} pendingItem={pendingItemId} " +
                 $"pending={offeringsPending} alreadySeen={historySeen}");
 
-            if (!offeringsPending || historySeen)
-                return;
             if (history.ItemId != pendingItemId)
                 return;
 

@@ -30,7 +30,7 @@ namespace Marketbuddy
     internal sealed unsafe class MarketRequestResultProbe : IDisposable
     {
         // 與 BatchReprice / MarketRequestGate 一致的 grep 標籤。
-        // 這些 log 刻意用 Information 等級：使用者的記錄等級只會濾掉 VRB、DBG 收得到但單檔數十萬行會淹沒。
+        // MKTRESULT-ERR 與 probe armed/summary 刻意留 Information；逐筆的正常答覆走 MarketDiag 開關。
         // Grep tag: MBDIAG / MKTRESULT
         private const string Diag = "[MBDIAG]";
 
@@ -184,10 +184,10 @@ namespace Marketbuddy
                 }
                 else
                 {
-                    // 正常答覆每一次查價都有一筆，是 log 的大宗 -> Debug。
+                    // 正常答覆每一次查價都有一筆，是記錄檔的大宗 -> 只在診斷開關打開時才寫。
                     // 上面的 MKTRESULT-ERR 維持 Information：errorCode >= 0x70000000 時
                     // 遊戲不會印任何聊天訊息，那一行是使用者唯一的線索。
-                    Log.Debug(
+                    MarketDiag.TracePacket(
                         $"{Diag} MKTRESULT #{seq} listingCount={listingCount} " +
                         $"errorCode=0 itemId={itemId}");
                 }

@@ -1338,14 +1338,14 @@ namespace Marketbuddy
             }
 
             ImGui.Spacing();
-            if (ImGui.Checkbox("Write the detailed market diagnostics at Information level".Loc(),
+            if (ImGui.Checkbox("Write the detailed market diagnostics to the log".Loc(),
                     ref conf.VerboseMarketDiagnostics))
                 conf.Save();
 
             DrawNestIndicator(1);
             ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
             ImGui.TextWrapped(
-                "Off by default. The per-item query lines and the request-gate trace are always written to the log either way - this only decides whether they show up at Information level or stay at Debug. Turn it on when someone asks you for a market-board log; leaving it on just makes the log noisier. Refusals, timeouts and market errors are reported regardless of this setting."
+                "Off by default, and while it is off these lines are not written at all. Turn it on when someone asks you for a market-board log; leaving it on makes the log a lot noisier. Refusals, timeouts and market errors are reported regardless of this setting."
                     .Loc());
             ImGui.PopStyleColor();
 
