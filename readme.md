@@ -1,94 +1,63 @@
 # Marketbuddy
 
-Plugin for XivLauncher/Dalamud to help with your day-to-day market operations.
+[Marketbuddy](https://github.com/PunishXIV/Marketbuddy) 的台服移植版。市場佈告板上架、改價、下架與比價的操作輔助。
 
-## How to get
+🔴 **市場相關的動作一律由你手動觸發**：改價、下架、巡迴、巡檢都要自己按按鈕才會開始，
+不會因為遊戲事件或別的插件自己接手；會連續跑的功能（多角色重掛、巡檢自動續跑）預設關閉，
+而且每一輪都要你親手「武裝」，武裝狀態不存檔、跑完一輪自己解除。
 
-1. Dalamud settings -> Experimental
-2. Add `https://raw.githubusercontent.com/Chalkos/Marketbuddy/main/repo.json` and enable it
-3. Install from the plugin list
+## 功能
 
-## Commands
+### 改價與上架
+- **調整價格輔助**：點「調整價格」時一併開啟目前市場標價列表與成交紀錄；點列表中的一列，就以比它低 1 Gil（或依設定改成百分比）的價格填入並確認，同時把價格複製到剪貼簿。
+- **快速鍵**：按住 Ctrl 再點「調整價格」直接沿用剪貼簿的價格；按住 Alt 控制是否連動開啟成交紀錄；按住 Shift 可暫時略過部分自動化。
+- **出售品視窗的堆疊上限**：上架時自動把數量調成設定的最大堆疊數。
+- **快速上架**：按住指定的鍵右鍵點道具，直接進入上架流程（預設未設定按鍵）。
+- **壓價尾數捨到倍數**：降價後的價格再無條件捨去到指定 Gil 的倍數（預設關閉）。
+- **異常低價保護**：別人少打一個 0 時不跟著降價，那一件維持原價並列進待處理清單（預設開啟，可調金額與倍數門檻）。
 
-* `/mbuddy` plugin config
+### 重掛與下架（出售品視窗旁的面板）
+- **批次重掛**：依市場最低價一鍵重新定價眼前這位僱員的商品，或用「全僱員重掛」逐一拜訪所有僱員；可設定只比較 HQ、跳過稅後淨額低於 NPC 收購價的商品。
+- **最近成交價定價**（預設關閉）：改用「最近成交價與板上最低價取低者」，成交紀錄只採設定天數內的；遊戲內查價被拒時可改用巡檢資料補位。價格來自 Universalis。
+- **查不到行情的商品**：留在上限價並列出來，附手動下架按鈕，也會出現在巡檢視窗的「待處理」分頁。
+- **批次下架**：「本僱員全下架」與「全僱員下架」，可只下架單價高於門檻的商品、指定某些僱員永遠不下架，下架品收到玩家背包或僱員背包。
+- **賣給商店**（預設關閉）：下架後在面板上提供「交給僱員賣給商店」按鈕；兩段式確認，第一下只武裝、倒數內再按一次才賣。
+- **即時掛單面板**（預設關閉）：在遊戲的出售品視窗旁畫一份永遠最新的掛單表，可加上已掛售時間、「這件賣掉過幾次」，以及本世界／資料中心最低價與最近成交（需開啟最近成交價定價才有資料）。
+- **多角色重掛**（預設關閉，需要 AutoRetainer）：AutoRetainer 處理完一個角色、準備換下一個之前，交由本插件跑一輪全僱員重掛再交還；「武裝一輪」按鈕也放在 AutoRetainer 主視窗的控制列。不會移動角色，不在傳喚鈴旁的角色直接跳過。
 
-## Features
+### 跨世界價格巡檢（預設關閉，`/mbuddy survey`）
+- **掃描**：帶著自己掛售中的清單（預設涵蓋所有角色的僱員，需要 InventoryTools），在每個世界按一次「掃描」，逐件查當地行情並記進 `price_survey.csv`。只送遊戲自己的市場查詢，不改價、不掛售、不下架。
+- **比價**：看誰在哪個世界壓你的價。
+- **採購**（預設關閉）：巡檢時順便查採購清單上的道具，一件一列、每個世界一欄；純查價，不買。
+- **待處理**：逐列給建議價與重新定價按鈕，改價一律要你一列一列按。
+- **銷售**：僱員銷售紀錄——比對僱員掛售清單少了什麼，逐列標示信心，可改成一件一列的彙總。
+- **換世界**：「去別的世界」按一次換一個世界（透過 Lifestream 的 IPC）；可排除世界（拉姆出廠就排除）。另有預設關閉的「掃完自動換到資料最舊的世界接著掃」，要你親手武裝一輪、有世界數上限。
 
-Simplifies updating one price:
-* Click adjust price as per usual
-  * The window to change price, the list of current items on the market and history of sales for that item open at once
-  * Click one of the current items on the market
-  * You price will be set 1 gil below and you'll be back at your items list
-  * (the set price will be copied to clipboard)
+### 其他
+- **這一趟買了多少**：在市場佈告板搜尋結果旁顯示本趟已買的件數與金額，以及最便宜的前幾列能湊到幾件、多少錢（純顯示，不會替你買）。
+- **市場資料快取**：重掛時可重用設定秒數內查過的結果，少問伺服器幾次。
+- **查價像卡住時自動重送**（預設關閉）。
+- **塔塔露誇獎**：整輪重掛跑完、巡檢掃完一個世界時，請 TataruPraise 念一句（兩者可分開關）。
+- **GilDelta**：在市場佈告板買東西時，告訴 GilDelta 這筆金幣花在哪裡。
+- **市場診斷**：可選擇把詳細診斷寫進記錄，方便回報問題。
 
-Simplifies updating more items with the same price:
-* Click adjust price, while holding CTRL
-  * The value from the clipboard will be used for that item
+## 指令
 
-Each feature can be configured in the plugin config.
+- `/mbuddy`：開關設定視窗（分頁：比價／重掛／下架／面板與診斷）
+- `/mbuddy survey`：開關跨世界價格巡檢視窗
 
-Holding SHIFT prevents some automation, but you're better off just disabling whatever you don't want in the config.
+## 台服版的修改
 
-## Changelog
+- 介面繁體中文化。
+- 新增跨世界價格巡檢（掃描、比價、採購、待處理、銷售、換世界與排除世界）。
+- 新增全僱員重掛／下架巡迴、多角色重掛（搭配 AutoRetainer）、賣給商店、即時掛單面板、「這一趟買了多少」面板。
+- 新增最近成交價定價、異常低價保護、壓價尾數捨到倍數；沒有比價資料時維持上限價，不再退回最低價。
+- 台服查價節流：上一件掛單很多時下一次查詢自動拉長間隔，避開伺服器拒絕。
+- 開放唯讀的市場快取查詢 IPC（`Marketbuddy.MarketCache.*`）給別的插件；整合塔塔露誇獎與 GilDelta。
+- 多處降低記憶體用量。
 
-* 0.2.4.0
-  * update for api13 (thanks PhoenixtheII)
-  * persist option to open current prices list when holding SHIFT (thanks PhoenixtheII)
-* 0.2.3.4
-  * update for 7.2 (thanks Limiana)
-* 0.2.3.3
-  * version bump due to IPC changes in Dalamud (fixes unloading error)
-* 0.2.3.2
-  * update to api11 and 7.1 (thanks ChrisMellor and Limiana)
-* 0.2.3.1
-  * update to api10, .net8 and sigs for Dawntrail (thanks Limiana)
-* 0.2.3.0
-  * Add IPC to allow other plugins to request operation halting (by Limiana)
-  * update sigs for 6.5 (thanks Limiana)
-* 0.2.2.16
-  * update sigs for 6.4 (thanks Limiana)
-* 0.2.2.15
-  * allow percentage-based undercutting (thanks Limiana)
-* 0.2.2.14
-  * patch 6.3 fix, dalamud api8 and .net7
-  * potentially fix a crash when exiting the game (thanks Aireil)
-* 0.2.2.13
-  * patch 6.2 fix, dalamud api7 and .net6
-* 0.2.2.12
-  * fix: startup problem resolved
-* 0.2.2.11
-  * fix: handle clipboard exceptions
-* 0.2.2.10
-  * fix: limit max stack size to 9999 (up from 999)
-* 0.2.2.9
-  * fix: buying items will no longer show an error message
-* 0.2.2.8
-  * fix: also allow undercut to be 0
-* 0.2.2.7
-  * fix: prevent undercut from being set to less than 1
-  * new: adds undercut to the overlay
-  * fix: overlay no longer gets disabled when not limiting stack size
-  * fix: price set will always be between 1gil and 999999999gil
-* 0.2.2.6
-  * fixes a crash when quickposting items using CTRL
-* 0.2.2.5
-  * option: use SHIFT to open/not open the price history (previously only used to skip opening)
-* 0.2.2.4
-  * allow setting a custom undercut amount (thanks xPumaa)
-  * option: use ALT to open/not open the price history
-  * some other UI changes
-  * fix a bug that (with a certain configuration setup) would close the item window and leave the price list open
-* 0.2.2.3
-  * set api version 6 (no code changes)
-* 0.2.2.2
-  * set api version 5 (no code changes)
-* 0.2.2.1
-  * api4 branch removed
-    * use the json from the main branch (it's above) to get updates
-* 0.2.1.0
-  * `/mbuddy` shows/hides the config window
-  * `/mbuddyconf` removed
-  * New option to adjust stack size on the retainer sell list addon (because opening the config everytime is annoying)
-* 0.2.0.0
-  * API4 support
-  * Add option to limit the stack size when posting new items
+## 需要搭配的插件
+
+- 選用：AutoRetainer（多角色重掛）、InventoryTools（巡檢涵蓋所有角色）、Lifestream（巡檢換世界）、TataruPraise、GilDelta
+
+原作者：[PunishXIV](https://github.com/PunishXIV/Marketbuddy)

@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Dalamud.Game;
@@ -12,6 +11,7 @@ using Dalamud.Game.NativeWrapper;
 using Dalamud.Game.Text.SeStringHandling;
 using Dalamud.Hooking;
 using Dalamud.Logging;
+using Dalamud.Memory;
 using Dalamud.Plugin;
 using FFXIVClientStructs.FFXIV.Client.System.String;
 using FFXIVClientStructs.FFXIV.Component.GUI;
@@ -82,10 +82,14 @@ namespace Marketbuddy.Common
             return tcs.Task;
         }
         
+        // Decodes through SeString instead of a raw UTF-8 read, so text that
+        // carries payloads (e.g. an item link in the retainer sell window's item
+        // name) yields the displayed text rather than the raw payload bytes.
+        // Payload-free input decodes to the same string, so the numeric call sites are unaffected.
         public static unsafe string Utf8StringToString(Utf8String str) {
-            if (str.IsEmpty || str.BufUsed <= 1)
+            if (str.IsEmpty || str.BufUsed <= 1 || str.StringPtr.Value == null)
                 return string.Empty;
-            return Encoding.UTF8.GetString(str.StringPtr, (int)str.BufUsed - 1);
+            return MemoryHelper.ReadSeString(&str).TextValue;
         }
 
         public static unsafe AtkUnitBase* GetUnitBase(string name, int index = 1)
@@ -106,8 +110,9 @@ namespace Marketbuddy.Common
             for (var i = 0; i < 0x40; i++)
                 Marshal.WriteByte(arg4, i, 0);
 
-            Marshal.WriteIntPtr(arg4, 0x8, new IntPtr(target));
-            Marshal.WriteIntPtr(arg4, 0x10, arg1);
+            var evt = (AtkEvent*)arg4;
+            evt->Target = (AtkEventTarget*)target;
+            evt->Listener = listener;
 
             if (arg5 == IntPtr.Zero)
             {
