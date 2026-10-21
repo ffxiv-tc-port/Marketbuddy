@@ -105,6 +105,7 @@ namespace Marketbuddy
         {
             public required short Slot;
             public required string Name;
+            public required uint ItemId;
 
             /// <summary>
             /// 軟期限：**只在真的有機會推進時才倒數**（被我們自己的巡迴／引擎佔用時會往後推）。
@@ -178,6 +179,11 @@ namespace Marketbuddy
         private readonly HashSet<short> claimedSlots = [];
 
         private bool suppressionHeld;
+
+        // 最近一次 RetainerSell PostSetup 的樣子，只給選單逾時那行診斷用。
+        private DateTime lastSellSetupAt = DateTime.MinValue;
+        private string lastSellSetupShown = string.Empty;
+        private bool lastSellSetupMatched;
 
         private Configuration conf => Configuration.GetOrLoad();
 
@@ -332,6 +338,7 @@ namespace Marketbuddy
             if (addon == null)
                 return;
 
+            var sawDisabledEntry = false;
             for (var i = 0; i < agent->ContextItemCount; i++)
             {
                 var param = agent->EventParams[agent->ContexItemStartIndex + i];
@@ -351,6 +358,7 @@ namespace Marketbuddy
                 if (agent->IsContextItemDisabled(i))
                 {
                     Log.Debug($"QuickLister: found '{putUpForSaleText}' at {i} but it is disabled");
+                    sawDisabledEntry = true;
                     continue;
                 }
 
@@ -366,6 +374,7 @@ namespace Marketbuddy
                     // 刻意**不**排重試：使用者再按一次右鍵就是了。
                     Log.Information(
                         "QuickLister: 上一個右鍵選單還沒關乾淨，這一次的快速上架跳過（不對可能正在關閉的選單再按一次）");
+                    WriteDiag("選單守衛擋下", item->ItemId, ResolveItemName(item, out _), "原因=上一個右鍵選單還沒關乾淨");
                     return;
                 }
 
@@ -396,6 +405,7 @@ namespace Marketbuddy
                     pendingMenuSelects.Remove(pending);
                     Log.Information(
                         "QuickLister: 守衛擋下了這一次的選單選取，本次快速上架取消（待處理項已收回）");
+                    WriteDiag("選單守衛擋下", pending.ItemId, pending.Name, "原因=送出選單選取時被守衛擋下");
                     return;
                 }
 
@@ -435,6 +445,8 @@ namespace Marketbuddy
             }
 
             // No "Put up for sale" entry (item cannot be listed): do nothing.
+            WriteDiag(sawDisabledEntry ? "選單出售停用" : "選單沒有出售", item->ItemId, ResolveItemName(item, out _),
+                sawDisabledEntry ? "原因=右鍵選單的出售那一項是停用的" : "原因=右鍵選單裡沒有出售那一項");
         }
 
         /// <summary>Addon 表第 5480 列（「委託僱員出售物品」）讀得到，<see cref="VendorSeller"/> 才能用。</summary>
@@ -581,6 +593,10 @@ namespace Marketbuddy
                 }
             }
 
+            lastSellSetupAt = DateTime.UtcNow;
+            lastSellSetupShown = shownName;
+            lastSellSetupMatched = matchIndex >= 0;
+
             if (matchIndex < 0)
             {
                 Log.Debug($"QuickLister: RetainerSell shows '{shownName}', no pending quick-list matches, not taking over");
@@ -594,9 +610,10 @@ namespace Marketbuddy
             // listing can be identified when the server ack lands.
             var preSlots = GetOccupiedMarketSlots();
 
-            if (!gui.QuickListFillAndConfirm(args.Addon, Configuration.MAX_PRICE))
+            if (!gui.QuickListFillAndConfirm(args.Addon, Configuration.MAX_PRICE, out var fillFailReason))
             {
                 ChatGui.PrintError("[Marketbuddy] ??: quick listing failed - set the price manually".Loc(pending.Name));
+                WriteDiag("填價失敗", pending.ItemId, pending.Name, $"原因={fillFailReason}");
                 return;
             }
 
@@ -640,6 +657,13 @@ namespace Marketbuddy
                 var expired = pendingMenuSelects[i];
                 pendingMenuSelects.RemoveAt(i);
                 Log.Debug($"QuickLister: pending menu-select for '{expired.Name}' expired without a matching RetainerSell window");
+
+                var createdAt = expired.Deadline.AddMilliseconds(-PendingTimeoutMs);
+                var sellSeen = lastSellSetupAt >= createdAt
+                    ? $"等待期間上架視窗開過（{(DateTime.UtcNow - lastSellSetupAt).TotalSeconds:0.0} 秒前，顯示『{lastSellSetupShown}』，" +
+                      (lastSellSetupMatched ? "配給了某一筆待辦）" : "沒配上任何待辦）")
+                    : "等待期間沒有上架視窗開啟";
+                WriteDiag("選單逾時", expired.ItemId, expired.Name, $"原因=選了出售之後 {PendingTimeoutMs / 1000} 秒內沒等到對應的上架視窗；{sellSeen}");
             }
         }
 
@@ -662,6 +686,8 @@ namespace Marketbuddy
                 {
                     watches.RemoveAt(w);
                     ChatGui.PrintError("[Marketbuddy] ??: you left that retainer before the listing was confirmed - check its price!".Loc(watch.Name));
+                    WriteDiag("上架後換僱員", watch.ItemId, watch.Name,
+                        $"原因=上架確認前換到別的僱員；{SameItemSlotsText(watch.ItemId, watch.PreListingSlots)}（以下格數是新僱員的）");
                     continue;
                 }
 
@@ -689,6 +715,7 @@ namespace Marketbuddy
                     {
                         Slot = matchedSlot,
                         Name = watch.Name,
+                        ItemId = watch.ItemId,
                         Deadline = DateTime.UtcNow.AddMilliseconds(RepriceQueueTimeoutMs),
                         HardDeadline = DateTime.UtcNow.AddMilliseconds(RepriceQueueHardCapMs),
                         RetainerId = watch.RetainerId,
@@ -700,6 +727,9 @@ namespace Marketbuddy
                 {
                     watches.RemoveAt(w);
                     ChatGui.PrintError("[Marketbuddy] ??: could not confirm the listing; if it is up, its price is the cap - check it!".Loc(watch.Name));
+                    var retainerState = activeRetainer == 0 ? "目前不在僱員身上" : "還在同一名僱員";
+                    WriteDiag("上架確認逾時", watch.ItemId, watch.Name,
+                        $"原因=按下確認後 {ListingAckTimeoutMs / 1000} 秒內市場格沒出現這件道具；{retainerState}；{SameItemSlotsText(watch.ItemId, watch.PreListingSlots)}");
                 }
             }
         }
@@ -775,6 +805,8 @@ namespace Marketbuddy
                     claimedSlots.Remove(entry.Slot);
                     ChatGui.PrintError("[Marketbuddy] ??: still listed at the price cap (??) - you moved to another retainer, so reprice it manually!"
                         .Loc(entry.Name, Configuration.MAX_PRICE));
+                    WriteDiag("定價佇列換僱員", entry.ItemId, entry.Name,
+                        $"原因=輪到定價前換到別的僱員（原市場格 {entry.Slot}）；最後擋住的原因={OrUnknown(entry.LastBlock)}（以下格數是新僱員的）");
                     continue;
                 }
 
@@ -795,6 +827,9 @@ namespace Marketbuddy
                         .Loc(entry.Name, Configuration.MAX_PRICE, entry.LastBlock)
                     : "[Marketbuddy] ??: still listed at the price cap (??) - reprice it manually!"
                         .Loc(entry.Name, Configuration.MAX_PRICE));
+                var whichDeadline = now > entry.HardDeadline ? $"{RepriceQueueHardCapMs / 60000} 分鐘硬上限" : $"{RepriceQueueTimeoutMs / 1000} 秒期限";
+                WriteDiag("定價佇列放棄", entry.ItemId, entry.Name,
+                    $"原因=引擎沒在{whichDeadline}內接手（市場格 {entry.Slot}）；最後擋住的原因={OrUnknown(entry.LastBlock)}；引擎上次拒絕={OrUnknown(engine.LastStartRefusalReason)}");
             }
 
             if (repriceQueue.Count == 0)
@@ -837,6 +872,89 @@ namespace Marketbuddy
             if ((item->Flags & InventoryItem.ItemFlags.HighQuality) != 0)
                 name += $" {(char)SeIconChar.HighQuality}";
             return name;
+        }
+
+        private static string OrUnknown(string s) => s.Length > 0 ? s : "不知道";
+
+        /// <summary>
+        /// 快速上架失敗出口的診斷，前綴 <c>[QuickListDiag]</c>。只在失敗事件當下呼叫一次（不是每幀）；
+        /// 不掛詳細市場診斷開關。讀不到的欄位寫「不知道」，不省略。原生物件只在這一幀讀、不保存。
+        /// </summary>
+        private void WriteDiag(string stage, uint itemId, string name, string detail)
+        {
+            try
+            {
+                var engineText = engine.IsRunning ? $"跑中（佇列 {engine.QueuedJobCount}）" : "閒置";
+                Log.Information(
+                    $"[QuickListDiag] 階段={stage} 道具={OrUnknown(name)}(#{itemId}) {detail} " +
+                    $"市場格={MarketSlotsText()} 上架視窗={RetainerSellStateText()} " +
+                    $"出售清單={(gui.IsRetainerSellListOpen ? "開著" : "關著")} 引擎={engineText} " +
+                    $"快速上架待辦=選單{pendingMenuSelects.Count}/等確認{watches.Count}/等定價{repriceQueue.Count}");
+            }
+            catch (Exception e)
+            {
+                Log.Information($"[QuickListDiag] 階段={stage} 道具={OrUnknown(name)}(#{itemId}) 診斷本身失敗：{e.Message}");
+            }
+        }
+
+        /// <summary>「已佔 N/上限 M（僱員資料報 K）」；容器沒載入時整段寫不知道。</summary>
+        private static string MarketSlotsText()
+        {
+            var retainerManager = RetainerManager.Instance();
+            var active = retainerManager == null ? null : retainerManager->GetActiveRetainer();
+            var retainerCount = active == null ? "不知道" : active->MarketItemCount.ToString();
+
+            var inventoryManager = InventoryManager.Instance();
+            var container = inventoryManager == null
+                ? null
+                : inventoryManager->GetInventoryContainer(InventoryType.RetainerMarket);
+            if (container == null || !container->IsLoaded || container->Size <= 0)
+                return $"不知道（僱員資料報 {retainerCount}）";
+
+            var occupied = 0;
+            for (short i = 0; i < container->Size; i++)
+            {
+                var slot = inventoryManager->GetInventorySlot(InventoryType.RetainerMarket, i);
+                if (slot != null && slot->ItemId != 0)
+                    occupied++;
+            }
+
+            return $"已佔 {occupied}/上限 {container->Size}（僱員資料報 {retainerCount}）";
+        }
+
+        /// <summary>以名稱查當幀的 RetainerSell；不保存位址。</summary>
+        private static string RetainerSellStateText()
+        {
+            var addon = Commons.GetUnitBase("RetainerSell");
+            if (addon == null)
+                return "沒開";
+            return addon->IsVisible ? "看得到" : "已載入但隱藏";
+        }
+
+        /// <summary>市場裡同一個道具 id 現在佔了幾格、其中幾格是上架前就有的、幾格已被別的快速上架認領。</summary>
+        private string SameItemSlotsText(uint itemId, HashSet<short> preListingSlots)
+        {
+            var inventoryManager = InventoryManager.Instance();
+            var container = inventoryManager == null
+                ? null
+                : inventoryManager->GetInventoryContainer(InventoryType.RetainerMarket);
+            if (container == null || !container->IsLoaded || container->Size <= 0)
+                return "同道具在市場的格數=不知道";
+
+            int total = 0, pre = 0, claimed = 0;
+            for (short i = 0; i < container->Size; i++)
+            {
+                var slot = inventoryManager->GetInventorySlot(InventoryType.RetainerMarket, i);
+                if (slot == null || slot->ItemId != itemId)
+                    continue;
+                total++;
+                if (preListingSlots.Contains(i))
+                    pre++;
+                else if (claimedSlots.Contains(i))
+                    claimed++;
+            }
+
+            return $"同道具在市場 {total} 格（上架前已有 {pre}、已被別的快速上架認領 {claimed}）";
         }
 
         private static HashSet<short> GetOccupiedMarketSlots()

@@ -496,26 +496,38 @@ namespace Marketbuddy
         /// stack-size limit setting. Returns false when the addon does not
         /// look like the expected RetainerSell layout.
         /// </summary>
-        internal unsafe bool QuickListFillAndConfirm(IntPtr addonPtr, int price)
+        /// <param name="failReason">回 false 時是哪一關沒過（給診斷 log）；回 true 時是空字串。</param>
+        internal unsafe bool QuickListFillAndConfirm(IntPtr addonPtr, int price, out string failReason)
         {
+            failReason = string.Empty;
             var retainerSell = (AtkUnitBase*)addonPtr;
             if (retainerSell == null)
+            {
+                failReason = "上架視窗位址是空的";
                 return false;
+            }
 
             if (retainerSell->UldManager.NodeListCount != 23)
             {
                 Log.Warning("QuickList: unexpected fields in addon RetainerSell");
+                failReason = $"上架視窗節點數 {retainerSell->UldManager.NodeListCount}，不是預期的 23";
                 return false;
             }
 
             var priceComponentNumericInput = GetNumericInput(retainerSell, 15);
             var quantityComponentNumericInput = GetNumericInput(retainerSell, 11);
             if (priceComponentNumericInput == null)
+            {
+                failReason = "找不到價格輸入框";
                 return false;
+            }
 
             // 守衛擋下就整個不做（不要填了價格才發現不能按，留下一個半完成的視窗）。
             if (!AddonPressGuard.TryPress("RetainerSell", addonPtr, PressKind.Terminal))
+            {
+                failReason = "上架視窗守衛擋下（這扇窗剛按過、可能正在關閉）";
                 return false;
+            }
 
             priceComponentNumericInput->SetValue(price);
 

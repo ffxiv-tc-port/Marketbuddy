@@ -257,6 +257,9 @@ namespace Marketbuddy
 
         public bool IsRunning => queue.IsRunning;
 
+        /// <summary>佇列裡還有幾格（含正在跑的那一格）。只給診斷 log 用。</summary>
+        internal int QueuedJobCount => queue.PendingCount;
+
         /// <summary>
         /// 這一輪是不是「只下架」批次（<see cref="StartDelistNeedsPricing"/> 開的）。
         /// 📌 純顯示用：進度列與收尾措辭。不影響任何下架或定價行為。
