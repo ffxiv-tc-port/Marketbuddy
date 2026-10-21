@@ -2,6 +2,7 @@ using Dalamud.Bindings.ImGui;
 using System;
 using System.Collections.Generic;
 using System.Numerics;
+using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
@@ -130,6 +131,13 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
     private DateTime lastBellInteract = DateTime.MinValue;
     private DateTime lastCloseAttempt = DateTime.MinValue;
 
+    private readonly BellAbsenceGate bellGate = new();
+
+    /// <summary>本外掛看到的最近一次換區；沒看過是 MinValue。</summary>
+    private DateTime lastTerritoryChangeAt = DateTime.MinValue;
+
+    private readonly Action<ushort> onTerritoryChanged;
+
     /// <summary>
     /// 總時限已經觸發過了。🔴 沒有這個旗標的話,總時限的條件(以 <see cref="legStartedAt"/> 為準)
     /// 會每一幀都成立,把收尾流程一直打斷。
@@ -157,6 +165,8 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
 
         onCharacterAdditionalTask = OnCharacterAdditionalTask;
         onCharacterReadyForPostprocess = OnCharacterReadyForPostprocess;
+        onTerritoryChanged = _ => lastTerritoryChangeAt = DateTime.UtcNow;
+        ClientState.TerritoryChanged += onTerritoryChanged;
 
         // 純通知用的抑制閘，形狀與 BatchReprice.ExternalDriverActive 相同：
         // 多角輪在跑的時候，每個角色各自的「全僱員重掛巡迴完成」都不響——
@@ -180,6 +190,7 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
 
         // 先退訂再收尾：收尾會取消巡迴，取消會回呼進來，這裡不想再被回呼一次。
         Framework.Update -= OnFrameworkUpdate;
+        ClientState.TerritoryChanged -= onTerritoryChanged;
         IPCManager.UnsubscribeCharacterAdditionalTask(onCharacterAdditionalTask);
         IPCManager.UnsubscribeCharacterReadyForPostprocess(onCharacterReadyForPostprocess);
         IPCManager.UnsubscribeMainControlsDraw(DrawArMainControlsButton);
@@ -399,6 +410,7 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
         }
 
         Log.Information($"[MultiCharacterTour] 接手角色 {CurrentCharacterName}（CID {currentLegCid:X}），開始開鈴。");
+        bellGate.Reset();
         EnterPhase(Phase.OpeningBell);
     }
 
@@ -499,40 +511,59 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
 
         // ⚠️ 節流的是**嘗試**不是成功：找不到鈴的時候如果不記時間戳，這個函式會把
         //    整張物件表每一幀掃一次、掃滿 25 秒。25 秒 ÷ 3 秒 ≈ 8 次就夠了。
-        if ((DateTime.UtcNow - lastBellInteract).TotalMilliseconds < BellInteractThrottleMs)
+        //    表裡完全沒有鈴時改成每秒確認一次（不送互動），見 BellAbsenceGate。
+        var interval = bellGate.NextScanInterval(TimeSpan.FromMilliseconds(BellInteractThrottleMs));
+        if (DateTime.UtcNow - lastBellInteract < interval)
             return;
         lastBellInteract = DateTime.UtcNow;
 
-        TryInteractWithReachableBell();
+        var scan = TryInteractWithReachableBell();
+        if (scan == BellScan.NoneInTable &&
+            (Condition[ConditionFlag.BetweenAreas] || Condition[ConditionFlag.BetweenAreas51]))
+            scan = BellScan.Unknown;
+
+        var sinceZoneChange = lastTerritoryChangeAt == DateTime.MinValue
+            ? TimeSpan.MaxValue
+            : DateTime.UtcNow - lastTerritoryChangeAt;
+        if (bellGate.Observe(scan, sinceZoneChange))
+        {
+            legOutcome = LegOutcome.Skipped;
+            legReason = "no summoning bell in this area".Loc();
+            Log.Information($"[MultiCharacterTour] {CurrentCharacterName}：連續 {BellAbsenceGate.RequiredAbsentScans} 次（約每秒一次）物件表裡都沒有傳喚鈴（區域 {ClientState.TerritoryType}），不等滿 {OpenBellTimeoutSeconds} 秒，直接跳過。");
+            EnterPhase(Phase.Closing);
+        }
     }
 
     /// <summary>
-    /// 找一個搆得到的傳喚鈴並且跟它互動。找不到回 false。
+    /// 找一個搆得到的傳喚鈴並且跟它互動。
     /// </summary>
+    /// <returns>這次掃描的結果；只有 <see cref="BellScan.Interacted"/> 送出了互動。</returns>
     /// <remarks>
     /// 🔴 <b>不跨幀保存任何原生指標。</b>物件在這一幀找到、在這一幀用掉；
     /// <c>IGameObject</c> 的包裝是每格重用、存取時就地改寫位址的，存起來下一幀會靜默換人。
     /// </remarks>
-    private bool TryInteractWithReachableBell()
+    private BellScan TryInteractWithReachableBell()
     {
         var bellName = SummoningBellName();
         if (bellName.Length == 0)
-            return false;
+            return BellScan.Unknown;
 
         var local = Objects.LocalPlayer;
         if (local == null)
-            return false;
+            return BellScan.Unknown;
 
         var targetSystem = TargetSystem.Instance();
         if (targetSystem == null)
-            return false;
+            return BellScan.Unknown;
 
+        var sawBell = false;
         foreach (var obj in Objects)
         {
             if (obj.ObjectKind != ObjectKind.Housing && obj.ObjectKind != ObjectKind.EventObj)
                 continue;
             if (!string.Equals(obj.Name.TextValue, bellName, StringComparison.OrdinalIgnoreCase))
                 continue;
+            sawBell = true;
             if (!obj.IsTargetable)
                 continue;
 
@@ -549,10 +580,10 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
             targetSystem->InteractWithObject(
                 (FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject*)address, false);
             Log.Information($"[MultiCharacterTour] {CurrentCharacterName}：已對傳喚鈴送出互動。");
-            return true;
+            return BellScan.Interacted;
         }
 
-        return false;
+        return sawBell ? BellScan.OutOfReach : BellScan.NoneInTable;
     }
 
     /// <summary>

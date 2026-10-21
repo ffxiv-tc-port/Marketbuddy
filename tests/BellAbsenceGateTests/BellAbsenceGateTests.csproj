@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <!-- 離線情境測試：只編 BellAbsenceGate.cs 這一個純邏輯檔，不引用 Dalamud。
+         不在 Marketbuddy.sln 裡，CI 只建 Marketbuddy/Marketbuddy.csproj，不會碰到它。
+         GateSource 可指到別的檔（給突變體驗證用），預設是正式那份。 -->
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net9.0</TargetFramework>
+        <Nullable>enable</Nullable>
+        <LangVersion>latest</LangVersion>
+        <ImplicitUsings>disable</ImplicitUsings>
+        <GateSource Condition="'$(GateSource)' == ''">../../Marketbuddy/BellAbsenceGate.cs</GateSource>
+    </PropertyGroup>
+    <ItemGroup>
+        <Compile Include="$(GateSource)" Link="BellAbsenceGate.cs" />
+    </ItemGroup>
+</Project>
