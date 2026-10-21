@@ -402,7 +402,7 @@ namespace Marketbuddy
                 var relistHeld = false;
                 if (conf.RelistUseLastSoldPrice)
                 {
-                    var listedPrice = (long)inventoryManager->GetRetainerMarketPrice((short)i);
+                    var listedPrice = RetainerMarketPrice.TryGet(inventoryManager, i, out var listedRaw) ? (long)listedRaw : -1L;
                     long competitor = -1;
                     long peerBaseline = -1;
                     var listingSource = string.Empty;
@@ -475,7 +475,7 @@ namespace Marketbuddy
                     (short)i,
                     name,
                     (uint)Math.Max(0, slot->Quantity),
-                    (uint)inventoryManager->GetRetainerMarketPrice((short)i))
+                    RetainerMarketPrice.TryGet(inventoryManager, i, out var rowPrice) ? (uint)rowPrice : 0u)
                 {
                     SoldState = soldState,
                     // 🔴 與 soldState 一起抄進這一幀的快照，不要留到畫的時候才去讀

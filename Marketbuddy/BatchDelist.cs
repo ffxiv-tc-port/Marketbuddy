@@ -601,7 +601,7 @@ namespace Marketbuddy
         {
             if (aboveUnitPrice <= 0)
                 return true;
-            return inventoryManager->GetRetainerMarketPrice((short)slotIndex) > (ulong)aboveUnitPrice;
+            return RetainerMarketPrice.TryGet(inventoryManager, slotIndex, out var price) && price > (ulong)aboveUnitPrice;
         }
 
         /// <summary>

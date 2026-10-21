@@ -633,7 +633,7 @@ namespace Marketbuddy
                 var hq = (slot->Flags & InventoryItem.ItemFlags.HighQuality) != 0;
                 snapshot.Listings.Add(new RetainerListing(
                     slot->ItemId, hq, Math.Max(1, slot->Quantity),
-                    (long)inventoryManager->GetRetainerMarketPrice((short)i)));
+                    RetainerMarketPrice.TryGet(inventoryManager, i, out var price) ? (long)price : -1L));
             }
 
             LastSkipReason = string.Empty;

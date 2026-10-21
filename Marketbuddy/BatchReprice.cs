@@ -555,7 +555,8 @@ namespace Marketbuddy
             var inventoryManager = InventoryManager.Instance();
             var slot = GetMarketSlot(job.Slot);
             if (inventoryManager == null || slot == null || slot->ItemId != job.ItemId ||
-                inventoryManager->GetRetainerMarketPrice(job.Slot) < Configuration.MAX_PRICE)
+                !RetainerMarketPrice.TryGet(inventoryManager, job.Slot, out var listedPrice) ||
+                listedPrice < Configuration.MAX_PRICE)
             {
                 Skip(job, "[Marketbuddy] ??: no longer parked at the price cap, left alone".Loc(job.Name));
                 return TickTaskResult.Done;
@@ -1402,7 +1403,8 @@ namespace Marketbuddy
         {
             var inventoryManager = InventoryManager.Instance();
             var slot = GetMarketSlot(job.Slot);
-            if (inventoryManager == null || slot == null || slot->ItemId != job.ItemId)
+            if (inventoryManager == null || slot == null || slot->ItemId != job.ItemId ||
+                !RetainerMarketPrice.CheckSlot(job.Slot, nameof(FinishPricing), "定價"))
             {
                 Skip(job, "[Marketbuddy] ??: slot changed, skipped".Loc(job.Name));
                 return;
@@ -1432,7 +1434,7 @@ namespace Marketbuddy
                 return;
             }
 
-            var current = inventoryManager->GetRetainerMarketPrice(job.Slot);
+            RetainerMarketPrice.TryGet(inventoryManager, job.Slot, out var current);
             if (current == newPrice)
             {
                 // 已經在該有的價格上 ＝ 這一格沒事了，同樣要從待處理清單上消失。
@@ -1441,7 +1443,12 @@ namespace Marketbuddy
                 return;
             }
 
-            inventoryManager->SetRetainerMarketPrice(job.Slot, newPrice);
+            if (!RetainerMarketPrice.TrySet(inventoryManager, job.Slot, newPrice))
+            {
+                Skip(job, "[Marketbuddy] ??: slot changed, skipped".Loc(job.Name));
+                return;
+            }
+
             NoteChange(job.Slot, (uint)current, newPrice);
             // 這一格處理完了，從「待處理」清單上消失。
             PendingActions.ClearSlot(CurrentBatchRetainerId, job.Slot);
@@ -1588,6 +1595,12 @@ namespace Marketbuddy
         private void DelistSlot(SlotJob job, InventoryManager* inventoryManager, InventoryItem* slot, string chatMessage,
             VendorSellCause? vendorCause = null, uint targetPrice = 0)
         {
+            if (!RetainerMarketPrice.CheckSlot(job.Slot, nameof(DelistSlot), "下架"))
+            {
+                Skip(job, "[Marketbuddy] ??: slot changed, skipped".Loc(job.Name));
+                return;
+            }
+
             var quantity = (uint)Math.Max(1, slot->Quantity);
             var vendorTracked = false;
 
@@ -1864,10 +1877,7 @@ namespace Marketbuddy
         /// </summary>
         private void RecordNeedsPricing(SlotJob job)
         {
-            var inventoryManager = InventoryManager.Instance();
-            var current = inventoryManager == null
-                ? -1L
-                : (long)inventoryManager->GetRetainerMarketPrice(job.Slot);
+            var current = CurrentListedPrice(job.Slot);
 
             PendingActions.Upsert(new PendingActionRow(
                 DateTime.UtcNow, PendingActionKind.PriceCap, job.ItemId, job.IsHq,
@@ -1881,8 +1891,7 @@ namespace Marketbuddy
         /// <remarks>🔴 只從 framework 執行緒呼叫：它會解參考 <c>InventoryManager</c>。</remarks>
         private static long CurrentListedPrice(short slot)
         {
-            var inventoryManager = InventoryManager.Instance();
-            return inventoryManager == null ? -1L : (long)inventoryManager->GetRetainerMarketPrice(slot);
+            return RetainerMarketPrice.TryGet(InventoryManager.Instance(), slot, out var price) ? (long)price : -1L;
         }
 
         /// <summary>

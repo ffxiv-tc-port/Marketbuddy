@@ -114,7 +114,8 @@ namespace Marketbuddy
                 if (slot == null || slot->ItemId == 0)
                     continue;
                 var hq = (slot->Flags & InventoryItem.ItemFlags.HighQuality) != 0;
-                builder.Add(slot->ItemId, hq, (long)inventoryManager->GetRetainerMarketPrice((short)i), retainerId);
+                builder.Add(slot->ItemId, hq,
+                    RetainerMarketPrice.TryGet(inventoryManager, i, out var price) ? (long)price : -1L, retainerId);
             }
 
             if (builder.Count == 0)
@@ -342,7 +343,7 @@ namespace Marketbuddy
                     continue;
                 var hq = (slot->Flags & InventoryItem.ItemFlags.HighQuality) != 0;
                 result.Add(new PriceSurveyPlacement(slot->ItemId, hq, retainerId, (short)i,
-                    (long)inventoryManager->GetRetainerMarketPrice((short)i)));
+                    RetainerMarketPrice.TryGet(inventoryManager, i, out var price) ? (long)price : -1L));
             }
 
             return result;
