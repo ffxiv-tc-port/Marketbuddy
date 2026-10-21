@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <!-- 離線情境測試：只編 ClearOutPlan.cs 與 VendorSellPlan.cs 兩個純函式檔，不引用 Dalamud。
+         不在 Marketbuddy.sln 裡，CI 只建 Marketbuddy/Marketbuddy.csproj，不會碰到它。
+         執行方式寫在 Program.cs 開頭。 -->
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net9.0</TargetFramework>
+        <Nullable>enable</Nullable>
+        <LangVersion>latest</LangVersion>
+        <ImplicitUsings>disable</ImplicitUsings>
+    </PropertyGroup>
+    <ItemGroup>
+        <Compile Include="../../Marketbuddy/ClearOutPlan.cs" Link="ClearOutPlan.cs" />
+        <Compile Include="../../Marketbuddy/VendorSellPlan.cs" Link="VendorSellPlan.cs" />
+    </ItemGroup>
+</Project>

@@ -39,6 +39,9 @@ namespace Marketbuddy
         /// <summary>下架回背包之後交給僱員賣給商店；只在使用者按下按鈕時動。</summary>
         internal VendorSeller? VendorSeller { get; private set; }
 
+        /// <summary>背包分揀；只在使用者按下按鈕時讀背包。</summary>
+        internal BagSorter? BagSorter { get; private set; }
+
         internal ManualRequery ManualRequery { get; private set; }
 
         /// <summary>跨世界掛售價格巡檢（唯讀、只在使用者按下按鈕時才動）。</summary>
@@ -199,6 +202,10 @@ namespace Marketbuddy
                 VendorSeller = new VendorSeller(MarketGuiEventHandler, BatchReprice, BatchDelist, MultiTour, QuickLister);
                 MarketGuiEventHandler.VendorSeller = VendorSeller;
 
+                // 低價下架紀錄在執行緒池上讀檔；背包分揀只訂閱 Framework.Update、按了按鈕才做事。
+                LowPriceDelistLedger.BeginLoad();
+                BagSorter = new BagSorter(VendorSeller);
+
                 PluginUi = new PluginUI(this);
 
                 Common.Dalamud.CommandManager.AddHandler(commandName, new CommandInfo(OnCommand)
@@ -249,6 +256,7 @@ namespace Marketbuddy
             Safe(() => PendingWorklist?.Dispose());
             Safe(() => LiveSellList?.Dispose());
             // 排在 QuickLister 之前：它呼叫的是 QuickLister 的右鍵選單路徑。
+            Safe(() => BagSorter?.Dispose());
             Safe(() => VendorSeller?.Dispose());
             Safe(() => QuickLister?.Dispose());
             Safe(() => ManualRequery?.Dispose());

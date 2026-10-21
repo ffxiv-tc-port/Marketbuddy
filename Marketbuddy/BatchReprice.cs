@@ -1419,7 +1419,7 @@ namespace Marketbuddy
                 {
                     DelistSlot(job, inventoryManager, slot,
                         "[Marketbuddy] ??: market net ?? < NPC ?? gil, delisted".Loc(job.Name, netUnit, job.VendorUnitPrice) + cacheTag,
-                        VendorSellCause.BelowVendor);
+                        VendorSellCause.BelowVendor, newPrice);
                     return;
                 }
             }
@@ -1428,7 +1428,7 @@ namespace Marketbuddy
             {
                 DelistSlot(job, inventoryManager, slot,
                     "[Marketbuddy] ??: target price ?? below your minimum ??, delisted".Loc(job.Name, newPrice, conf.BatchMinPrice) + cacheTag,
-                    VendorSellCause.BelowMinPrice);
+                    VendorSellCause.BelowMinPrice, newPrice);
                 return;
             }
 
@@ -1584,8 +1584,9 @@ namespace Marketbuddy
         /// <param name="vendorCause">
         /// 重掛時的兩道自動下架才給；有值而且收回玩家背包時，這一件會記進「賣給商店」那一輪（見 <see cref="VendorSeller"/>）。
         /// </param>
+        /// <param name="targetPrice">那兩道自動下架時算出、低於門檻的價；記進 <see cref="LowPriceDelistLedger"/>。</param>
         private void DelistSlot(SlotJob job, InventoryManager* inventoryManager, InventoryItem* slot, string chatMessage,
-            VendorSellCause? vendorCause = null)
+            VendorSellCause? vendorCause = null, uint targetPrice = 0)
         {
             var quantity = (uint)Math.Max(1, slot->Quantity);
             var vendorTracked = false;
@@ -1641,6 +1642,8 @@ namespace Marketbuddy
             RetainerDelistLedger.Note(CurrentBatchRetainerId, job.ItemId, job.IsHq, (int)quantity);
             if (vendorTracked && vendorCause is { } cause)
                 gui.VendorSeller?.NoteDelisted(job.ItemId, job.IsHq, (int)quantity, cause, job.VendorUnitPrice, job.Name);
+            if (vendorCause != null)
+                LowPriceDelistLedger.Note(job.ItemId, job.IsHq, job.SaleUnitPrice, job.SaleAtUtc, targetPrice);
 
             ForgetChange(job.Slot);
             PendingActions.ClearSlot(CurrentBatchRetainerId, job.Slot);

@@ -30,6 +30,12 @@ namespace Marketbuddy
         private IReadOnlyList<VendorSellVerdict>? rowTextsPlan;
         private CultureInfo? rowTextsCulture;
 
+        private readonly record struct SortRow(VendorSellKey Key, string Id, string Line, string Tooltip);
+
+        private readonly List<SortRow> sortRows = new();
+        private int sortRowsVersion = -1;
+        private CultureInfo? sortRowsCulture;
+
         public VendorSellPanel(VendorSeller seller)
         {
             this.seller = seller;
@@ -96,6 +102,10 @@ namespace Marketbuddy
                 if (waiting > 0)
                     Grey(DrawText.Loc("?? more still on the way back to your bags", waiting));
             }
+
+            if (seller.SortPicks.Count > 0)
+                Grey(DrawText.Loc("?? stack(s) from the bag sort - untick them under \"What gets sold\"",
+                    seller.SortPicks.Count));
 
             if (manual > 0)
             {
@@ -196,6 +206,8 @@ namespace Marketbuddy
                 }
             }
 
+            DrawSortPicks();
+
             if (manual.Count > 0)
             {
                 ImGui.Spacing();
@@ -223,6 +235,75 @@ namespace Marketbuddy
                         .Loc());
 
             ImGui.TreePop();
+        }
+
+        /// <summary>背包分揀交過來的格子，一種道具一列（同一種的格子一起勾、一起取消）。</summary>
+        private void DrawSortPicks()
+        {
+            var picks = seller.SortPicks;
+            if (picks.Count == 0)
+                return;
+
+            if (sortRowsVersion != seller.SortVersion || !ReferenceEquals(sortRowsCulture, CultureInfo.CurrentCulture))
+            {
+                sortRowsVersion = seller.SortVersion;
+                sortRowsCulture = CultureInfo.CurrentCulture;
+                RebuildSortRows(picks);
+            }
+
+            ImGui.Spacing();
+            ImGui.TextUnformatted(DrawText.Loc("From the bag sort (??)", sortRows.Count));
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(
+                    "Stacks you ticked in the bag sort (/mbuddy, Clear-out tab). These are stacks you already had, so each one is only sold if that slot still holds exactly the same item, quality and amount as when you handed it over; anything else is skipped."
+                        .Loc());
+            foreach (var row in sortRows)
+            {
+                var include = !seller.IsSortExcluded(row.Key);
+                if (ImGui.Checkbox(row.Id, ref include))
+                    seller.SetSortExcluded(row.Key, !include);
+                ImGui.SameLine();
+                ImGui.TextUnformatted(row.Line);
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(row.Tooltip);
+            }
+
+            if (ImGui.SmallButton(DrawText.Concat("Forget the bag sort picks".Loc(), "##mbvendorsellsortclear")))
+                seller.ClearSortPicks();
+        }
+
+        private void RebuildSortRows(IReadOnlyList<VendorSeller.SortPick> picks)
+        {
+            sortRows.Clear();
+            var index = new Dictionary<VendorSellKey, int>();
+            var qty = new List<int>();
+            var gil = new List<long>();
+            var where = new List<List<string>>();
+            var names = new List<string>();
+            foreach (var p in picks)
+            {
+                if (!index.TryGetValue(p.Slot.Key, out var i))
+                {
+                    i = qty.Count;
+                    index[p.Slot.Key] = i;
+                    qty.Add(0);
+                    gil.Add(0);
+                    where.Add(new List<string>());
+                    names.Add(p.Name);
+                }
+
+                qty[i] += p.Slot.Quantity;
+                gil[i] += (long)p.Slot.Quantity * p.VendorUnitPrice;
+                where[i].Add(VendorSeller.DescribeSlot(p.Slot) + " x" + p.Slot.Quantity);
+            }
+
+            foreach (var (key, i) in index)
+            {
+                sortRows.Add(new SortRow(key,
+                    $"##mbvendorsellsort{key.ItemId}{(key.Hq ? "h" : "n")}",
+                    "?? x??  about ?? gil".Loc(names[i], qty[i], gil[i].ToString("N0")),
+                    "Sells: ??".Loc(string.Join(", ", where[i]))));
+            }
         }
 
         private void DrawSellableRow(VendorSellVerdict v)

@@ -77,9 +77,16 @@ namespace Marketbuddy
             public required VendorSellSlot Planned { get; init; }
             public required string Name { get; init; }
             public required uint VendorUnitPrice { get; init; }
+
+            /// <summary>來自背包分揀（使用者勾的背包原有堆疊），不是這一輪下架回來的。</summary>
+            public bool FromSort { get; init; }
+
             public JobPhase Phase = JobPhase.Open;
             public DateTime PhaseStartedUtc;
         }
+
+        /// <summary>背包分揀交過來的一格：交接當下讀到的樣子，賣之前那一格要逐項一模一樣才賣。</summary>
+        internal readonly record struct SortPick(VendorSellSlot Slot, string Name, uint VendorUnitPrice);
 
         private readonly MarketGuiEventHandler gui;
         private readonly BatchReprice reprice;
@@ -116,6 +123,12 @@ namespace Marketbuddy
         private int contextMenuHiddenFrames;
         private bool suppressionHeld;
 
+        private readonly List<SortPick> sortPicks = new();
+        private readonly HashSet<VendorSellKey> sortExcluded = new();
+        private ulong sortContentId;
+        private ulong runContentId;
+        private bool runHasRoundJobs;
+
         private Configuration conf => Configuration.GetOrLoad();
 
         public bool IsRunning { get; private set; }
@@ -134,9 +147,15 @@ namespace Marketbuddy
         public DateTime? RoundStartedUtc => round?.StartedUtc;
         public bool IsAvailable => quickLister?.CanVendorSell == true;
 
-        /// <summary>面板要不要畫這一段：功能開著，而且正在賣或這一輪還有東西可列。</summary>
-        public bool ShouldShow => conf.VendorSellAfterDelist &&
-                                  (IsRunning || (round != null && plan.Exists(v => v.State != VendorSellState.Done)));
+        /// <summary>面板要不要畫這一段：正在賣、背包分揀交了東西過來，或功能開著而這一輪還有東西可列。</summary>
+        public bool ShouldShow => IsRunning || sortPicks.Count > 0 ||
+                                  (conf.VendorSellAfterDelist && round != null &&
+                                   plan.Exists(v => v.State != VendorSellState.Done));
+
+        public IReadOnlyList<SortPick> SortPicks => sortPicks;
+
+        /// <summary><see cref="SortPicks"/> 每變一次 +1（面板判斷要不要重組列文字用）。</summary>
+        public int SortVersion { get; private set; }
 
         public VendorSeller(MarketGuiEventHandler gui, BatchReprice reprice, BatchDelist delist,
             MultiRetainerTour tour, QuickLister? quickLister)
@@ -154,8 +173,76 @@ namespace Marketbuddy
             Framework.Update -= OnFrameworkUpdate;
             IsRunning = false;
             jobs.Clear();
+            sortPicks.Clear();
             ReleaseSuppressionIfHeld();
         }
+
+        // ------------------------------------------------------------------ 背包分揀交接
+
+        /// <summary>
+        /// 整份換成背包分揀勾選的格子（只換清單，不開始賣）。正在賣時不收。回傳收下幾格。
+        /// 🔴 賣的是背包原有的堆疊：每一格送出前都要與這裡記下的樣子逐項相同（道具、品質、數量、指紋），否則跳過。
+        /// </summary>
+        public int SetSortPicks(IReadOnlyList<SortPick> picks)
+        {
+            if (IsRunning)
+                return 0;
+            sortPicks.Clear();
+            sortExcluded.Clear();
+            SortVersion++;
+            sortContentId = PlayerState.ContentId;
+            foreach (var pick in picks)
+            {
+                if (pick.VendorUnitPrice == 0 || pick.Slot.NeedsConfirmation || pick.Slot.Armory ||
+                    pick.Slot.Key.ItemId == 0 || pick.Slot.Key.ItemId == uint.MaxValue)
+                    continue;
+                sortPicks.Add(pick);
+            }
+
+            Log.Information($"[Marketbuddy] VendorSell: 背包分揀交來 {sortPicks.Count} 格（勾選 {picks.Count} 格）");
+            return sortPicks.Count;
+        }
+
+        public void ClearSortPicks()
+        {
+            if (IsRunning)
+                return;
+            sortPicks.Clear();
+            sortExcluded.Clear();
+            SortVersion++;
+        }
+
+        public bool IsSortExcluded(VendorSellKey key) => sortExcluded.Contains(key);
+
+        public void SetSortExcluded(VendorSellKey key, bool excluded)
+        {
+            if (IsRunning)
+                return;
+            if (excluded)
+                sortExcluded.Add(key);
+            else
+                sortExcluded.Remove(key);
+        }
+
+        private bool IsRoundSellableSlot(VendorSellSlot slot)
+        {
+            foreach (var v in plan)
+            {
+                if (v.State != VendorSellState.Sellable || v.Key != slot.Key || IsExcluded(v.Key))
+                    continue;
+                foreach (var s in v.NewSlots)
+                {
+                    if (s.Container == slot.Container && s.Slot == slot.Slot)
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>這一格這一次會賣：沒取消勾選、而且不是這一輪下架那邊已經會賣的同一格。</summary>
+        private bool IsActiveSortPick(SortPick pick)
+            => !sortExcluded.Contains(pick.Slot.Key) && !IsRoundSellableSlot(pick.Slot);
 
         // ------------------------------------------------------------------ 下架端的記帳
 
@@ -262,6 +349,14 @@ namespace Marketbuddy
                 gil += v.EstimatedGil;
             }
 
+            foreach (var pick in sortPicks)
+            {
+                if (!IsActiveSortPick(pick))
+                    continue;
+                stacks++;
+                gil += (long)pick.Slot.Quantity * pick.VendorUnitPrice;
+            }
+
             return (stacks, gil);
         }
 
@@ -288,7 +383,7 @@ namespace Marketbuddy
                 return false;
             }
 
-            if (round == null)
+            if (round == null && sortPicks.Count == 0)
             {
                 reason = "nothing has been delisted into your bags this round".Loc();
                 return false;
@@ -376,6 +471,20 @@ namespace Marketbuddy
                 }
             }
 
+            runHasRoundJobs = jobs.Count > 0;
+            var fromSort = 0;
+            foreach (var pick in sortPicks)
+            {
+                if (!IsActiveSortPick(pick))
+                    continue;
+                jobs.Add(new SellJob
+                {
+                    Planned = pick.Slot, Name = pick.Name, VendorUnitPrice = pick.VendorUnitPrice, FromSort = true,
+                });
+                gil += (long)pick.Slot.Quantity * pick.VendorUnitPrice;
+                fromSort++;
+            }
+
             if (jobs.Count == 0)
             {
                 ChatGui.PrintError("[Marketbuddy] Cannot start: ??".Loc("nothing is ticked to sell".Loc()));
@@ -389,11 +498,13 @@ namespace Marketbuddy
             WaitingFor = string.Empty;
             contextMenuHiddenFrames = 0;
             jobs[0].PhaseStartedUtc = DateTime.UtcNow;
+            runContentId = PlayerState.ContentId;
             IsRunning = true;
             AutoRetainerBridge.AcquireSuppression("vendor sell");
             suppressionHeld = true;
 
-            Log.Information($"[Marketbuddy] VendorSell: 開始交給僱員賣給商店，{jobs.Count} 格，預估 {gil:N0} gil");
+            Log.Information(
+                $"[Marketbuddy] VendorSell: 開始交給僱員賣給商店，{jobs.Count} 格（其中背包分揀 {fromSort} 格），預估 {gil:N0} gil");
             ChatGui.Print("[Marketbuddy] Having the retainer sell ?? stack(s) to the shop (about ?? gil)..."
                 .Loc(jobs.Count, gil.ToString("N0")));
         }
@@ -404,12 +515,21 @@ namespace Marketbuddy
 
         private void OnFrameworkUpdate(IFramework framework)
         {
-            if (round != null && PlayerState.ContentId != round.ContentId)
+            var contentId = PlayerState.ContentId;
+            var roundStale = round != null && contentId != round.ContentId;
+            var sortStale = sortPicks.Count > 0 && contentId != sortContentId;
+            if (roundStale || sortStale || (IsRunning && contentId != runContentId))
             {
                 if (IsRunning)
                     Stop("you switched characters".Loc());
-                round = null;
-                plan = new List<VendorSellVerdict>();
+                if (roundStale)
+                {
+                    round = null;
+                    plan = new List<VendorSellVerdict>();
+                }
+
+                if (sortStale)
+                    ClearSortPicks();
                 return;
             }
 
@@ -626,9 +746,15 @@ namespace Marketbuddy
 
             if (current == null)
             {
-                round!.Sold[p.Key] = (round.Sold.TryGetValue(p.Key, out var s) ? s : 0) + p.Quantity;
-                round.Version++;
-                round.LastActivityUtc = now;
+                if (job.FromSort)
+                    RemoveSortPick(p);
+                else if (round != null)
+                {
+                    round.Sold[p.Key] = (round.Sold.TryGetValue(p.Key, out var s) ? s : 0) + p.Quantity;
+                    round.Version++;
+                    round.LastActivityUtc = now;
+                }
+
                 SoldStacks++;
                 SoldGil += (long)p.Quantity * job.VendorUnitPrice;
                 Log.Information($"[Marketbuddy] VendorSell: 已賣出 {DescribeSlot(p)} {job.Name} x{p.Quantity}");
@@ -651,6 +777,15 @@ namespace Marketbuddy
         {
             why = string.Empty;
             var p = job.Planned;
+            if (job.FromSort)
+            {
+                // 背包原有的堆疊沒有「這一輪下架量」可以對：那一格現在要和交接當下記的一模一樣。
+                if (TryReadSlot((InventoryType)p.Container, p.Slot, out var current) && current is { } c && c == p)
+                    return true;
+                why = "the slot no longer matches what was planned".Loc();
+                return false;
+            }
+
             foreach (var v in plan)
             {
                 if (v.Key != p.Key)
@@ -674,8 +809,21 @@ namespace Marketbuddy
             return false;
         }
 
+        private void RemoveSortPick(VendorSellSlot slot)
+        {
+            for (var i = sortPicks.Count - 1; i >= 0; i--)
+            {
+                if (sortPicks[i].Slot == slot)
+                    sortPicks.RemoveAt(i);
+            }
+
+            SortVersion++;
+        }
+
         private void Skip(SellJob job, string why)
         {
+            if (job.FromSort)
+                RemoveSortPick(job.Planned);
             SkippedStacks++;
             Log.Information($"[Marketbuddy] VendorSell: 跳過 {DescribeSlot(job.Planned)} {job.Name}：{why}");
             ChatGui.PrintError("[Marketbuddy] ??: skipped - ??".Loc(job.Name, why));
@@ -731,7 +879,7 @@ namespace Marketbuddy
 
         private string? RunBlockedReason()
         {
-            if (!conf.VendorSellAfterDelist)
+            if (runHasRoundJobs && !conf.VendorSellAfterDelist)
                 return "the feature was turned off".Loc();
             if (!gui.IsRetainerSellListOpen)
                 return "the retainer sell list was closed".Loc();
@@ -765,6 +913,14 @@ namespace Marketbuddy
         }
 
         // ------------------------------------------------------------------ 讀背包
+
+        /// <summary>讀四個背包（不含兵裝庫）給背包分揀用，格子的樣子與賣之前的核對用同一套。🔴 framework 執行緒限定。</summary>
+        internal static void CaptureBags(List<uint> loaded, List<VendorSellSlot> slots)
+        {
+            var inventoryManager = InventoryManager.Instance();
+            if (inventoryManager != null)
+                Capture(inventoryManager, BagContainers, false, loaded, slots);
+        }
 
         private static void Capture(InventoryManager* inventoryManager, InventoryType[] types, bool armory,
             List<uint> loaded, List<VendorSellSlot> slots)

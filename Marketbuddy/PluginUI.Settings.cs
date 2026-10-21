@@ -56,6 +56,12 @@ namespace Marketbuddy
                     ImGui.EndTabItem();
                 }
 
+                if (ImGui.BeginTabItem("Clear-out".Loc() + "##mbtabclearout"))
+                {
+                    DrawClearOutTab();
+                    ImGui.EndTabItem();
+                }
+
                 if (ImGui.BeginTabItem("Panels & diagnostics".Loc() + "##mbtabpanels"))
                 {
                     DrawPanelSettingsTab();
