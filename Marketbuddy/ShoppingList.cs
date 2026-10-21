@@ -316,7 +316,7 @@ namespace Marketbuddy
                 if (uint.TryParse(entry, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) &&
                     parsed > 0)
                     itemId = parsed;
-                else if (sheet != null && Index(sheet).TryGetValue(entry, out var byName))
+                else if (sheet != null && Index(sheet).TryGetValue(ItemNameMatch.Normalize(entry), out var byName))
                     itemId = byName;
 
                 if (itemId == 0)
@@ -382,6 +382,7 @@ namespace Marketbuddy
         /// 名稱→道具 id。第一次用到才建，而且只在 framework 執行緒上建。
         /// ⚠️ 台服有數十組同名不同 id 的道具——
         /// <b>先出現的（id 小的）勝出</b>，要指定另一個就在清單檔裡直接寫 id。
+        /// 鍵是 <see cref="ItemNameMatch.Normalize"/> 過的名字（遊戲畫面上的 Singular 寫法也收）。
         /// </summary>
         private static Dictionary<string, uint> Index(Lumina.Excel.ExcelSheet<Item> sheet)
         {
@@ -392,15 +393,19 @@ namespace Marketbuddy
             var map = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
             try
             {
-                foreach (var row in sheet)
+                // Name 整輪先收、Singular 再補：Singular 只當別名，不改任何 Name 已經解得出來的結果。
+                foreach (var useSingular in new[] { false, true })
                 {
-                    // 只收得進市場的道具：不能買賣的東西進了索引只會遮住同名的可買品項。
-                    if (row.ItemSearchCategory.RowId == 0)
-                        continue;
-                    var name = row.Name.ExtractText().Trim();
-                    if (name.Length == 0)
-                        continue;
-                    map.TryAdd(name, row.RowId);
+                    foreach (var row in sheet)
+                    {
+                        // 只收得進市場的道具：不能買賣的東西進了索引只會遮住同名的可買品項。
+                        if (row.ItemSearchCategory.RowId == 0)
+                            continue;
+                        var name = ItemNameMatch.Normalize((useSingular ? row.Singular : row.Name).ExtractText());
+                        if (name.Length == 0)
+                            continue;
+                        map.TryAdd(name, row.RowId);
+                    }
                 }
             }
             catch (Exception e)
