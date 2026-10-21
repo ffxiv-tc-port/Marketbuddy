@@ -508,6 +508,7 @@ namespace Marketbuddy
             EndReason = string.Empty;
             WaitingFor = string.Empty;
             refusalStreak = 0;
+            userStopReason = null;
             contextMenuHiddenFrames = 0;
             contextMenuVisibleFrames = 0;
             Source = source;
@@ -528,14 +529,19 @@ namespace Marketbuddy
 
         public void CancelByButton() => Stop("cancelled by user".Loc(), BatchListEnd.Stopped);
 
-        /// <summary>使用者（或別的插件）介入。只在跑的時候有作用。</summary>
+        /// <summary>
+        /// 使用者（或別的插件）介入。只記下來，下一個 Framework.Update 才真的停：
+        /// 呼叫端是右鍵選單 hook 與上架視窗的事件處理，停的時候要撤待處理項、取消引擎查價，不在那個堆疊上做。
+        /// </summary>
         public void StopByUser(string reason, string detail)
         {
-            if (!IsRunning)
+            if (!IsRunning || userStopReason != null)
                 return;
+            userStopReason = reason;
             Log.Information($"[BatchList] 使用者介入：{reason}（{detail}）");
-            Stop(reason, BatchListEnd.Stopped);
         }
+
+        private string? userStopReason;
 
         // ------------------------------------------------------------------ 每幀
 
@@ -544,7 +550,7 @@ namespace Marketbuddy
             if (IsRunning)
             {
                 TrackContextMenu();
-                var blocked = RunBlockedReason();
+                var blocked = userStopReason ?? RunBlockedReason();
                 if (blocked != null)
                 {
                     Stop(blocked, BatchListEnd.Stopped);
