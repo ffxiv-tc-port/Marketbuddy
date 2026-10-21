@@ -1218,24 +1218,31 @@ namespace Marketbuddy
             }
         }
 
-        /// <summary>背包原格還是同一件、同數量＝這次確認什麼都沒搬走。只在呼叫當幀讀。</summary>
+        /// <summary>背包原格還是同一件、同數量＝這次確認什麼都沒搬走。只在呼叫當幀讀；讀不到算「不是」。</summary>
         private static bool SourceStillHoldsStack(ListingSource source, uint itemId)
         {
-            var inventoryManager = InventoryManager.Instance();
-            var item = inventoryManager == null
-                ? null
-                : inventoryManager->GetInventorySlot((InventoryType)source.Container, source.Slot);
+            var item = ReadSlotChecked((InventoryType)source.Container, source.Slot);
             return item != null && item->ItemId == itemId && item->Quantity == source.Quantity;
         }
 
         /// <summary>背包原格現在的道具 id；空格或讀不到回 0。只在呼叫當幀讀。</summary>
         private static uint ReadSourceItemId(ListingSource source)
         {
-            var inventoryManager = InventoryManager.Instance();
-            var item = inventoryManager == null
-                ? null
-                : inventoryManager->GetInventorySlot((InventoryType)source.Container, source.Slot);
+            var item = ReadSlotChecked((InventoryType)source.Container, source.Slot);
             return item == null ? 0 : item->ItemId;
+        }
+
+        /// <summary>
+        /// 當幀讀某一格；容器沒載入、Items 是 null 或格號越界回 null。
+        /// 🔴 不可只靠 GetInventorySlot 的回傳值非 null：Items 為 null 時它回的是假指標（例如離開僱員之後的僱員物品欄）。
+        /// </summary>
+        internal static InventoryItem* ReadSlotChecked(InventoryType type, int index)
+        {
+            var inventoryManager = InventoryManager.Instance();
+            var container = inventoryManager == null ? null : inventoryManager->GetInventoryContainer(type);
+            if (container == null || !container->IsLoaded || container->Items == null || index < 0 || index >= container->Size)
+                return null;
+            return container->GetInventorySlot(index);
         }
 
         /// <summary>

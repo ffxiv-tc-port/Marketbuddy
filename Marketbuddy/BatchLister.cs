@@ -866,9 +866,9 @@ namespace Marketbuddy
         private void TickVerifyPrice(Job job, DateTime now)
         {
             var inventoryManager = InventoryManager.Instance();
-            var slot = inventoryManager == null || !RetainerMarketPrice.IsValidSlot(job.MarketSlot)
-                ? null
-                : inventoryManager->GetInventorySlot(InventoryType.RetainerMarket, job.MarketSlot);
+            var slot = RetainerMarketPrice.IsValidSlot(job.MarketSlot)
+                ? QuickLister.ReadSlotChecked(InventoryType.RetainerMarket, job.MarketSlot)
+                : null;
             var holdsItem = slot != null && slot->ItemId == job.Pick.Slot.Key.ItemId;
             if (holdsItem && RetainerMarketPrice.TryGet(inventoryManager, job.MarketSlot, out var price) &&
                 price == job.Price)
