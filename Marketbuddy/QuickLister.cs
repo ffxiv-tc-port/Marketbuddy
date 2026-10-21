@@ -94,11 +94,16 @@ namespace Marketbuddy
         {
             public required uint ItemId;
             public required string Name;
-            public required HashSet<short> PreListingSlots;
+
+            /// <summary>確認前每一格的道具 id。只排除「確認前就是這件道具」的格：別的道具被引擎下架空出來的格，新上架的會補進去。</summary>
+            public required Dictionary<short, uint> PreListingItems;
             public required DateTime Deadline;
 
             /// <summary>掛在哪一名僱員身上。市場容器是「目前這名僱員的」，換人之後同一個索引指的是別的東西。</summary>
             public required ulong RetainerId;
+
+            public required ListingSource Source;
+            public required DateTime CreatedAt;
         }
 
         private sealed class PendingReprice
@@ -134,6 +139,7 @@ namespace Marketbuddy
             /// <summary>道具表的 Name／Singular 正規化後的候選；空陣列＝查不到表，任何上架視窗都配。</summary>
             public required string[] NameCandidates;
             public required DateTime Deadline;
+            public required ListingSource Source;
         }
 
         private readonly Hook<OpenForItemSlotDelegate> hook;
@@ -178,6 +184,17 @@ namespace Marketbuddy
         private readonly List<ListingWatch> watches = [];
         private readonly List<PendingReprice> repriceQueue = [];
         private readonly HashSet<short> claimedSlots = [];
+
+        /// <summary>認領過的市場格：只要那一格還是這件道具就一直佔著，引擎接手之後也不放，免得同一筆被認領兩次。</summary>
+        private readonly Dictionary<short, MatchedListing> matchedSlots = [];
+        private uint[] marketItemsScratch = new uint[32];
+
+        /// <summary>
+        /// 最近認領成功的來源格。逾時的那一筆若同一格背包在它前後已有一筆上架成功，就是重按，不是上架失敗。
+        /// </summary>
+        private readonly List<SourceMatch> recentSourceMatches = [];
+
+        private const int DuplicatePressWindowMs = 10000;
 
         private bool suppressionHeld;
 
@@ -396,6 +413,7 @@ namespace Marketbuddy
                     Name = name,
                     NameCandidates = nameCandidates,
                     Deadline = DateTime.UtcNow.AddMilliseconds(PendingTimeoutMs),
+                    Source = new ListingSource((int)inventoryType, slot, item->Quantity),
                 };
                 pendingMenuSelects.Add(pending);
                 // Hold AutoRetainer off from the menu jump until the whole
@@ -621,7 +639,7 @@ namespace Marketbuddy
 
             // Snapshot the occupied market slots BEFORE confirming so the new
             // listing can be identified when the server ack lands.
-            var preSlots = GetOccupiedMarketSlots();
+            var preItems = GetOccupiedMarketItems();
 
             if (!gui.QuickListFillAndConfirm(args.Addon, Configuration.MAX_PRICE, out var fillFailReason))
             {
@@ -635,13 +653,16 @@ namespace Marketbuddy
             // if a previous quick-list's headless reprice is running right now.
             awaitingRetainerSellClose = true;
 
+            var now = DateTime.UtcNow;
             watches.Add(new ListingWatch
             {
                 ItemId = pending.ItemId,
                 Name = pending.Name,
-                PreListingSlots = preSlots,
-                Deadline = DateTime.UtcNow.AddMilliseconds(ListingAckTimeoutMs),
+                PreListingItems = preItems,
+                Deadline = now.AddMilliseconds(ListingAckTimeoutMs),
                 RetainerId = CurrentRetainerId(),
+                Source = pending.Source,
+                CreatedAt = now,
             });
         }
 
@@ -654,6 +675,8 @@ namespace Marketbuddy
         {
             if (pendingMenuSelects.Count > 0)
                 ExpirePendingMenuSelects();
+            if (matchedSlots.Count > 0 || recentSourceMatches.Count > 0)
+                PruneMatchedSlots();
             if (watches.Count > 0)
                 PumpListingWatches();
             if (repriceQueue.Count > 0)
@@ -682,11 +705,7 @@ namespace Marketbuddy
 
         private void PumpListingWatches()
         {
-            var inventoryManager = InventoryManager.Instance();
-            var container = inventoryManager == null
-                ? null
-                : inventoryManager->GetInventoryContainer(InventoryType.RetainerMarket);
-
+            var slotCount = ReadMarketItems(requireLoaded: false);
             var activeRetainer = CurrentRetainerId();
 
             for (var w = watches.Count - 1; w >= 0; w--)
@@ -700,29 +719,21 @@ namespace Marketbuddy
                     watches.RemoveAt(w);
                     ChatGui.PrintError("[Marketbuddy] ??: you left that retainer before the listing was confirmed - check its price!".Loc(watch.Name));
                     WriteDiag("上架後換僱員", watch.ItemId, watch.Name,
-                        $"原因=上架確認前換到別的僱員；{SameItemSlotsText(watch.ItemId, watch.PreListingSlots)}（以下格數是新僱員的）");
+                        $"原因=上架確認前換到別的僱員；{SameItemSlotsText(watch.ItemId, watch.PreListingItems)}（以下格數是新僱員的）");
                     continue;
                 }
 
-                var matchedSlot = (short)-1;
-                if (container != null)
-                {
-                    for (short i = 0; i < container->Size; i++)
-                    {
-                        if (watch.PreListingSlots.Contains(i) || claimedSlots.Contains(i))
-                            continue;
-                        var slot = inventoryManager->GetInventorySlot(InventoryType.RetainerMarket, i);
-                        if (slot == null || slot->ItemId != watch.ItemId)
-                            continue;
-                        matchedSlot = i;
-                        break;
-                    }
-                }
+                var matchedSlot = slotCount < 0
+                    ? (short)-1
+                    : QuickListMatch.FindNewListingSlot(marketItemsScratch.AsSpan(0, slotCount), watch.ItemId,
+                        watch.PreListingItems, claimedSlots, matchedSlots);
 
                 if (matchedSlot >= 0)
                 {
                     watches.RemoveAt(w);
                     claimedSlots.Add(matchedSlot);
+                    matchedSlots[matchedSlot] = new MatchedListing(watch.ItemId, watch.RetainerId);
+                    recentSourceMatches.Add(new SourceMatch(watch.RetainerId, watch.ItemId, watch.Source, matchedSlot, DateTime.UtcNow));
                     ChatGui.Print("[Marketbuddy] ??: listed at the price cap, now finding the right price...".Loc(watch.Name));
                     repriceQueue.Add(new PendingReprice
                     {
@@ -739,12 +750,89 @@ namespace Marketbuddy
                 if (DateTime.UtcNow > watch.Deadline)
                 {
                     watches.RemoveAt(w);
-                    ChatGui.PrintError("[Marketbuddy] ??: could not confirm the listing; if it is up, its price is the cap - check it!".Loc(watch.Name));
                     var retainerState = activeRetainer == 0 ? "目前不在僱員身上" : "還在同一名僱員";
+                    var slotsText = SameItemSlotsText(watch.ItemId, watch.PreListingItems);
+
+                    var sourceText = $"{(InventoryType)watch.Source.Container}#{watch.Source.Slot}";
+
+                    // 同一格背包連按兩次：只會有一筆上架，另一筆已經認領並交給引擎了。
+                    if (QuickListMatch.FindSiblingMatch(recentSourceMatches, watch.RetainerId, watch.ItemId,
+                            watch.Source, watch.CreatedAt, DuplicatePressWindowMs) is { } sibling)
+                    {
+                        var offset = (sibling.At - watch.CreatedAt).TotalSeconds;
+                        WriteDiag("上架確認重複", watch.ItemId, watch.Name,
+                            $"原因=同一格背包（{sourceText}）在這次按鍵{(offset >= 0 ? "後" : "前")} {Math.Abs(offset):0.0} 秒已有一筆上架並認領市場格 {sibling.Slot}，這次按鍵沒有另外上架；{retainerState}；{slotsText}");
+                        continue;
+                    }
+
+                    if (SourceStillHoldsStack(watch.Source, watch.ItemId))
+                    {
+                        ChatGui.PrintError("[Marketbuddy] ??: was not put up for sale (it is still in your bag) - right-click it again".Loc(watch.Name));
+                        WriteDiag("上架確認逾時", watch.ItemId, watch.Name,
+                            $"原因=按下確認後 {ListingAckTimeoutMs / 1000} 秒內市場格沒出現這件道具，背包原格（{sourceText}）還是同一件同數量 {watch.Source.Quantity}；{retainerState}；{slotsText}");
+                        continue;
+                    }
+
+                    ChatGui.PrintError("[Marketbuddy] ??: could not confirm the listing; if it is up, its price is the cap - check it!".Loc(watch.Name));
                     WriteDiag("上架確認逾時", watch.ItemId, watch.Name,
-                        $"原因=按下確認後 {ListingAckTimeoutMs / 1000} 秒內市場格沒出現這件道具；{retainerState}；{SameItemSlotsText(watch.ItemId, watch.PreListingSlots)}");
+                        $"原因=按下確認後 {ListingAckTimeoutMs / 1000} 秒內市場格沒出現這件道具，背包原格（{sourceText}）已經不是原本那一疊；{retainerState}；{slotsText}");
                 }
             }
+        }
+
+        /// <summary>背包原格還是同一件、同數量＝這次確認什麼都沒搬走。只在呼叫當幀讀。</summary>
+        private static bool SourceStillHoldsStack(ListingSource source, uint itemId)
+        {
+            var inventoryManager = InventoryManager.Instance();
+            var item = inventoryManager == null
+                ? null
+                : inventoryManager->GetInventorySlot((InventoryType)source.Container, source.Slot);
+            return item != null && item->ItemId == itemId && item->Quantity == source.Quantity;
+        }
+
+        /// <summary>
+        /// 把目前這名僱員的市場容器讀進 <see cref="marketItemsScratch"/>（空格＝0），回格數；讀不到回 -1。只在呼叫當幀讀。
+        /// </summary>
+        private int ReadMarketItems(bool requireLoaded)
+        {
+            var inventoryManager = InventoryManager.Instance();
+            var container = inventoryManager == null
+                ? null
+                : inventoryManager->GetInventoryContainer(InventoryType.RetainerMarket);
+            if (container == null || container->Size <= 0 || (requireLoaded && !container->IsLoaded))
+                return -1;
+
+            var size = (int)container->Size;
+            if (marketItemsScratch.Length < size)
+                marketItemsScratch = new uint[size];
+            for (short i = 0; i < size; i++)
+            {
+                var slot = inventoryManager->GetInventorySlot(InventoryType.RetainerMarket, i);
+                marketItemsScratch[i] = slot == null ? 0 : slot->ItemId;
+            }
+
+            return size;
+        }
+
+        /// <summary>認領過的格一旦換了道具（下架、賣掉）或換了僱員就放掉；容器沒載入時只看僱員。</summary>
+        private void PruneMatchedSlots()
+        {
+            var cutoff = DateTime.UtcNow.AddMilliseconds(-(ListingAckTimeoutMs + 2 * DuplicatePressWindowMs));
+            for (var i = recentSourceMatches.Count - 1; i >= 0; i--)
+            {
+                if (recentSourceMatches[i].At < cutoff)
+                    recentSourceMatches.RemoveAt(i);
+            }
+            if (matchedSlots.Count == 0)
+                return;
+
+            var slotCount = ReadMarketItems(requireLoaded: true);
+            var drop = QuickListMatch.StaleReservations(matchedSlots, CurrentRetainerId(),
+                slotCount < 0 ? null : marketItemsScratch, slotCount);
+            if (drop == null)
+                return;
+            foreach (var slotIndex in drop)
+                matchedSlots.Remove(slotIndex);
         }
 
         /// <summary>
@@ -861,6 +949,16 @@ namespace Marketbuddy
             }
 
             var next = repriceQueue[0];
+            // 引擎照格號接手、讀到什麼就定什麼價；那一格已經換成別的道具時交出去會改到不相干的東西。
+            if (MarketSlotHoldsOtherItem(next.Slot, next.ItemId, out var otherItemId))
+            {
+                repriceQueue.RemoveAt(0);
+                claimedSlots.Remove(next.Slot);
+                WriteDiag("定價佇列道具已離開", next.ItemId, next.Name,
+                    $"原因=輪到定價時市場格 {next.Slot} 已經是別的道具（#{otherItemId}），沒有交給引擎");
+                return;
+            }
+
             if (engine.StartQuickReprice(next.Slot))
             {
                 lastBlockReason = string.Empty;
@@ -872,6 +970,23 @@ namespace Marketbuddy
             // On false: the engine cannot start right now; retry until the deadline.
             // StartQuickReprice 內部自己有更細的原因（CanStart 的 reason），這裡把它撈出來。
             NoteBlockReason($"engine refused: {engine.LastStartRefusalReason} (queued={repriceQueue.Count}, head='{next.Name}')");
+        }
+
+        /// <summary>容器已載入且那一格是另一件（非空）道具才回 true；空格或讀不到交給原本的重試路徑。</summary>
+        private static bool MarketSlotHoldsOtherItem(short slotIndex, uint itemId, out uint otherItemId)
+        {
+            otherItemId = 0;
+            var inventoryManager = InventoryManager.Instance();
+            var container = inventoryManager == null
+                ? null
+                : inventoryManager->GetInventoryContainer(InventoryType.RetainerMarket);
+            if (container == null || !container->IsLoaded)
+                return false;
+            var slot = inventoryManager->GetInventorySlot(InventoryType.RetainerMarket, slotIndex);
+            if (slot == null || slot->ItemId == 0 || slot->ItemId == itemId)
+                return false;
+            otherItemId = slot->ItemId;
+            return true;
         }
 
         private static string ResolveItemName(InventoryItem* item, out string[] nameCandidates)
@@ -977,7 +1092,7 @@ namespace Marketbuddy
         }
 
         /// <summary>市場裡同一個道具 id 現在佔了幾格、其中幾格是上架前就有的、幾格已被別的快速上架認領。</summary>
-        private string SameItemSlotsText(uint itemId, HashSet<short> preListingSlots)
+        private string SameItemSlotsText(uint itemId, Dictionary<short, uint> preListingItems)
         {
             var inventoryManager = InventoryManager.Instance();
             var container = inventoryManager == null
@@ -993,18 +1108,18 @@ namespace Marketbuddy
                 if (slot == null || slot->ItemId != itemId)
                     continue;
                 total++;
-                if (preListingSlots.Contains(i))
+                if (preListingItems.TryGetValue(i, out var preItem) && preItem == itemId)
                     pre++;
-                else if (claimedSlots.Contains(i))
+                else if (claimedSlots.Contains(i) || matchedSlots.ContainsKey(i))
                     claimed++;
             }
 
             return $"同道具在市場 {total} 格（上架前已有 {pre}、已被別的快速上架認領 {claimed}）";
         }
 
-        private static HashSet<short> GetOccupiedMarketSlots()
+        private static Dictionary<short, uint> GetOccupiedMarketItems()
         {
-            var occupied = new HashSet<short>();
+            var occupied = new Dictionary<short, uint>();
             var inventoryManager = InventoryManager.Instance();
             var container = inventoryManager == null
                 ? null
@@ -1016,7 +1131,7 @@ namespace Marketbuddy
             {
                 var slot = inventoryManager->GetInventorySlot(InventoryType.RetainerMarket, i);
                 if (slot != null && slot->ItemId != 0)
-                    occupied.Add(i);
+                    occupied[i] = slot->ItemId;
             }
 
             return occupied;
