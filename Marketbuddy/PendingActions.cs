@@ -357,8 +357,10 @@ namespace Marketbuddy
                     if (Rows.ContainsKey(capKey))
                         continue;
                     // 引擎擋下來的那一列同理：重算的推估不蓋它，也不在同一格旁邊再加一列。
+                    // 使用者跳過它之後就不再擋同一格別的桶；同鍵的推估照樣不蓋，免得跳過的那件又冒出來。
                     var heldKey = row.Key with { Kind = PendingActionKind.PriceAnomaly };
-                    if (Rows.TryGetValue(heldKey, out var held) && held.EngineHeld)
+                    if (Rows.TryGetValue(heldKey, out var held) && held.EngineHeld &&
+                        (!held.Skipped || row.Key == heldKey))
                         continue;
                     Rows[row.Key] = carried.TryGetValue(row.Key, out var skipped) && skipped
                         ? row with { Skipped = true }
