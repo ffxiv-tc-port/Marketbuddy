@@ -32,6 +32,9 @@ namespace Marketbuddy
         EntryMissing,
         EntryDisabled,
         NotSent,
+
+        /// <summary>原生端這次沒有重建選單（agent 記的目標格不是這一格），選單內容是上一次的：什麼都沒選。</summary>
+        MenuStale,
     }
 
     /// <summary>
@@ -367,6 +370,13 @@ namespace Marketbuddy
             if (item == null || item->ItemId == 0)
                 return;
 
+            if (!MenuBuiltFor(agent, inventoryType, slot))
+            {
+                WriteDiag("選單不是這一格", item->ItemId, ResolveItemName(item, out _),
+                    $"原因=原生端這次沒有重建右鍵選單（選單目標={agent->TargetInventoryId}#{agent->TargetInventorySlotId}），沒有選出售");
+                return;
+            }
+
             // 再選出售會把正在等確認的那扇上架視窗換掉：這一件不做、立刻講，正在等的那件不丟。
             if (deferredConfirm is { } waiting)
             {
@@ -514,6 +524,13 @@ namespace Marketbuddy
                 sawDisabledEntry ? "原因=右鍵選單的出售那一項是停用的" : "原因=右鍵選單裡沒有出售那一項");
         }
 
+        /// <summary>
+        /// 選單真的是為這一格建的。原生端開頭的「封鎖格」檢查成立時直接返回、不更新目標與選單，
+        /// detour 仍會被呼叫 ⇒ 只看 detour 參數會在上一個選單上選項目。
+        /// </summary>
+        private static bool MenuBuiltFor(AgentInventoryContext* agent, InventoryType inventoryType, int slot)
+            => agent->TargetInventoryId == inventoryType && agent->TargetInventorySlotId == slot;
+
         /// <summary>Addon 表第 5480 列（「委託僱員出售物品」）讀得到，<see cref="VendorSeller"/> 才能用。</summary>
         internal bool CanVendorSell => retainerSellText.Length > 0;
 
@@ -555,6 +572,14 @@ namespace Marketbuddy
             if (inventoryType != arm.Type || slot != arm.Slot)
             {
                 arm.Result = VendorSellMenuResult.SlotMismatch;
+                return;
+            }
+
+            if (!MenuBuiltFor(agent, inventoryType, slot))
+            {
+                arm.Result = VendorSellMenuResult.MenuStale;
+                Log.Information(
+                    $"QuickLister: 要開 {inventoryType}#{slot} 的右鍵選單，但原生端沒有重建（選單目標={agent->TargetInventoryId}#{agent->TargetInventorySlotId}），沒有選任何一項");
                 return;
             }
 
