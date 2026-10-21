@@ -36,8 +36,9 @@ namespace Marketbuddy
         /// <summary>
         /// 要放掉的認領格：換了僱員、不在僱員身上，或那一格已經不是認領時的道具。
         /// <paramref name="slotItems"/> 為 null＝容器沒載入，只依僱員判斷。
+        /// 每幀呼叫：參數用具體型別，foreach 走結構列舉器、不裝箱。
         /// </summary>
-        internal static List<short>? StaleReservations(IReadOnlyDictionary<short, MatchedListing> reserved,
+        internal static List<short>? StaleReservations(Dictionary<short, MatchedListing> reserved,
             ulong activeRetainer, uint[]? slotItems, int slotCount)
         {
             List<short>? drop = null;
@@ -54,7 +55,7 @@ namespace Marketbuddy
         }
 
         /// <summary>
-        /// 同一名僱員、同一件、同一格背包，在這筆建立前 <paramref name="windowMs"/> 毫秒起（含之後）已經認領成功的那一筆。
+        /// 同一名僱員、同一件、同一格背包同數量，在這筆建立前 <paramref name="windowMs"/> 毫秒起（含之後）已經認領成功的那一筆。
         /// </summary>
         internal static SourceMatch? FindSiblingMatch(IReadOnlyList<SourceMatch> recent, ulong retainerId, uint itemId,
             ListingSource source, DateTime createdAt, int windowMs)
@@ -63,7 +64,8 @@ namespace Marketbuddy
             foreach (var m in recent)
             {
                 if (m.RetainerId == retainerId && m.ItemId == itemId && m.At >= from &&
-                    m.Source.Container == source.Container && m.Source.Slot == source.Slot)
+                    m.Source.Container == source.Container && m.Source.Slot == source.Slot &&
+                    m.Source.Quantity == source.Quantity)
                     return m;
             }
 

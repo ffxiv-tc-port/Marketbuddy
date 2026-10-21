@@ -168,10 +168,11 @@ namespace Marketbuddy
             DebugMessage("AddonRetainerSell.OnSetup");
             IntPtr addon = args.Addon;
 
-            // A pending quick-list opened this window: its own listener fills
-            // the cap price and confirms; skip the normal accelerator flow
-            // (auto compare / CTRL paste) entirely.
-            if (QuickLister?.IsQuickListPending == true)
+            // A quick-list opened this window: its own listener fills the cap price and
+            // confirms (or defers the confirm); skip the normal accelerator flow (auto
+            // compare / CTRL paste) entirely. Both checks are needed because the two
+            // PostSetup listeners run in no guaranteed order.
+            if (QuickLister is { } quickLister && (quickLister.IsQuickListPending || quickLister.OwnsSellWindow(addon)))
                 return;
 
             if (!IPCManager.IsLocked)

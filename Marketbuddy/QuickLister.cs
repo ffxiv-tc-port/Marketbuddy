@@ -190,12 +190,11 @@ namespace Marketbuddy
         // name and expires on its own if that never happens.
         private readonly List<PendingMenuSelect> pendingMenuSelects = [];
 
-        // True while a RetainerSell window is expected to be open because of our own
-        // automation (just filled + confirmed, waiting for the native close) - as
-        // opposed to a genuine manual price adjustment. BatchReprice reads
-        // IsCapListingInFlight to tell the two apart so listing item #2 never gets
-        // mistaken for the user manually overriding item #1's in-flight reprice.
-        private bool awaitingRetainerSellClose;
+        // RetainerSell windows that are open because of our own automation (filled +
+        // confirmed and waiting for the native close, or handed to the player after a
+        // deferred confirm was abandoned) - as opposed to a genuine manual price adjustment.
+        // BatchReprice reads IsCapListingInFlight to tell the two apart.
+        private readonly SellWindowOwnership ownedSellWindows = new();
 
         // Listings confirmed at the cap that we are waiting to see land in a
         // market slot, plus slots waiting for their single-slot engine run.
@@ -232,15 +231,18 @@ namespace Marketbuddy
         /// <summary>
         /// True while a RetainerSell window open right now is our own doing
         /// (menu-jump pending, or filled+confirmed and not yet closed) rather
-        /// than the player manually adjusting a price. See <see cref="awaitingRetainerSellClose"/>.
+        /// than the player manually adjusting a price. See <see cref="ownedSellWindows"/>.
         /// </summary>
-        public bool IsCapListingInFlight => IsQuickListPending || awaitingRetainerSellClose || deferredConfirm != null;
+        public bool IsCapListingInFlight => IsQuickListPending || ownedSellWindows.AnyOpen || deferredConfirm != null;
+
+        /// <summary>這扇上架視窗是快速上架開的（按了確認、延後中、或放棄後交給使用者）。只做位址等值比較。</summary>
+        public bool OwnsSellWindow(nint addon) => ownedSellWindows.Owns(addon, deferredConfirm?.Addon ?? 0);
 
         /// <summary>Total items anywhere in the quick-list pipeline right now - surfaced in the overlay UI.</summary>
         public int PendingCount => pendingMenuSelects.Count + (deferredConfirm != null ? 1 : 0) + watches.Count + repriceQueue.Count;
 
         /// <summary>True while any stage of a quick listing is still in flight.</summary>
-        private bool HasWorkInFlight => IsQuickListPending || awaitingRetainerSellClose || deferredConfirm != null ||
+        private bool HasWorkInFlight => IsQuickListPending || ownedSellWindows.AnyOpen || deferredConfirm != null ||
                                         watches.Count > 0 || repriceQueue.Count > 0;
 
         private void AcquireSuppression()
@@ -415,12 +417,12 @@ namespace Marketbuddy
                 }
 
                 // 市場滿了遊戲不開上架視窗，送出去只會白等到逾時。讀不到容器時照舊送（fail-open）。
-                if (TryReadFullMarket(out var occupiedSlots, out var marketCapacity))
+                if (TryReadFullMarket(out var occupiedSlots, out var inFlightListings, out var marketCapacity))
                 {
                     var fullName = ResolveItemName(item, out _);
                     ChatGui.PrintError("[Marketbuddy] ??: this retainer's market is full (?? slots) - not listed".Loc(fullName, marketCapacity));
                     WriteDiag("市場已滿未送出", item->ItemId, fullName,
-                        $"原因=送出前讀到這名僱員的市場已佔 {occupiedSlots}/上限 {marketCapacity}，沒有選出售");
+                        $"原因=送出前讀到這名僱員的市場已佔 {occupiedSlots}＋已送出還沒出現 {inFlightListings}/上限 {marketCapacity}，沒有選出售");
                     return;
                 }
 
@@ -634,8 +636,9 @@ namespace Marketbuddy
 
         private void OnRetainerSellSetup(AddonEvent type, AddonArgs args)
         {
+            ownedSellWindows.OnSetup();
             if (deferredConfirm is { } replaced)
-                AbandonDeferredConfirm(replaced, "上架視窗在等待期間換成別的道具");
+                AbandonDeferredConfirm(replaced, "上架視窗在等待期間換成別的道具", handOver: false);
 
             if (pendingMenuSelects.Count == 0)
                 return;
@@ -711,7 +714,7 @@ namespace Marketbuddy
             // The window is still open pending the server's confirmation ack;
             // BatchReprice must not mistake it for a manual price adjustment
             // if a previous quick-list's headless reprice is running right now.
-            awaitingRetainerSellClose = true;
+            ownedSellWindows.Confirmed(addon);
 
             var now = DateTime.UtcNow;
             watches.Add(new ListingWatch
@@ -780,20 +783,20 @@ namespace Marketbuddy
             var addon = Commons.GetUnitBase("RetainerSell");
             if (addon == null || (nint)addon != deferred.Addon)
             {
-                AbandonDeferredConfirm(deferred, "上架視窗在等待期間不見了");
+                AbandonDeferredConfirm(deferred, "上架視窗在等待期間不見了", handOver: false);
                 return;
             }
 
             if (CurrentRetainerId() != deferred.RetainerId)
             {
-                AbandonDeferredConfirm(deferred, "等待期間換了僱員");
+                AbandonDeferredConfirm(deferred, "等待期間換了僱員", handOver: true);
                 return;
             }
 
             // Framework.Update 早於遊戲處理輸入：上一幀被遊戲當成確定的按鍵，這一幀讀到的仍是按著。
             if (HeldConfirmInput(out var gamepadMask, out var keyCode))
             {
-                AbandonDeferredConfirm(deferred, $"等待期間有鍵盤／手把輸入（{(gamepadMask != 0 ? $"手把 {(GamepadButtons)gamepadMask}" : $"鍵 {(VirtualKey)keyCode}")}）");
+                AbandonDeferredConfirm(deferred, $"等待期間有鍵盤／手把輸入（{(gamepadMask != 0 ? $"手把 {(GamepadButtons)gamepadMask}" : $"鍵 {(VirtualKey)keyCode}")}）", handOver: true);
                 return;
             }
 
@@ -803,12 +806,21 @@ namespace Marketbuddy
             if (!addon->IsVisible)
             {
                 if ((now - deferred.Since).TotalMilliseconds >= QuickListConfirmGate.WaitCapMs)
-                    AbandonDeferredConfirm(deferred, "上架視窗等到上限都沒顯示");
+                    AbandonDeferredConfirm(deferred, "上架視窗等到上限都沒顯示", handOver: true);
                 return;
             }
 
             if (verdict == ConfirmGateVerdict.Wait)
                 return;
+
+            var source = deferred.Pending.Source;
+            var sourceItemId = ReadSourceItemId(source);
+            if (!QuickListConfirmGate.SourceStillHoldsItem(sourceItemId, deferred.Pending.ItemId))
+            {
+                AbandonDeferredConfirm(deferred,
+                    $"背包原格（{(InventoryType)source.Container}#{source.Slot}）已經不是這件道具（現在=#{sourceItemId}）", handOver: true);
+                return;
+            }
 
             deferredConfirm = null;
             var confirmed = ConfirmListing((nint)addon, deferred.Pending);
@@ -819,12 +831,21 @@ namespace Marketbuddy
         }
 
         /// <summary>
-        /// 延後確認的視窗被關掉或換掉：沒按確認。照樣掛一筆不擋下一筆的等待——使用者若自己按了確認，
-        /// 市場格出現就照常接手定價；沒出現就由逾時那條告訴使用者還在背包。
+        /// 放棄延後確認：沒按確認。照樣掛一筆不擋下一筆的等待，只回報結果——使用者自己按了確認的那一件
+        /// 價格是使用者填的，不交給引擎；沒出現就由逾時那條告訴使用者還在背包。
         /// </summary>
-        private void AbandonDeferredConfirm(DeferredConfirm deferred, string reason)
+        /// <param name="handOver">視窗若還在就交給使用者：算快速上架開的窗、到它自己關掉才清，並在聊天講一句。</param>
+        private void AbandonDeferredConfirm(DeferredConfirm deferred, string reason, bool handOver)
         {
             deferredConfirm = null;
+            var handedOver = handOver && (nint)Commons.GetUnitBase("RetainerSell") == deferred.Addon;
+            if (handedOver)
+            {
+                ownedSellWindows.HandedOver(deferred.Addon);
+                ChatGui.Print("[Marketbuddy] ??: automatic confirm cancelled - this sale window is left to you, the price is whatever you enter"
+                    .Loc(deferred.Pending.Name));
+            }
+
             var now = DateTime.UtcNow;
             watches.Add(new ListingWatch
             {
@@ -839,14 +860,14 @@ namespace Marketbuddy
             });
             Log.Information(
                 $"[QuickListGate] 道具={deferred.Pending.Name}(#{deferred.Pending.ItemId}) 等了 {(now - deferred.Since).TotalMilliseconds:0} ms " +
-                $"結果=放棄：{reason}，沒按確認 等的是={deferred.WaitingFor}");
+                $"結果=放棄：{reason}，沒按確認，視窗{(handedOver ? "交給使用者" : "已不在")} 等的是={deferred.WaitingFor}");
         }
 
         private void OnRetainerSellFinalize(AddonEvent type, AddonArgs args)
         {
-            awaitingRetainerSellClose = false;
+            ownedSellWindows.OnFinalize(args.Addon);
             if (deferredConfirm is { } deferred && deferred.Addon == args.Addon)
-                AbandonDeferredConfirm(deferred, "上架視窗在等待期間被關掉");
+                AbandonDeferredConfirm(deferred, "上架視窗在等待期間被關掉", handOver: false);
         }
 
         /// <summary>
@@ -859,11 +880,14 @@ namespace Marketbuddy
                 args is not AddonReceiveEventArgs eventArgs || !QuickListConfirmGate.ShouldAbandonOnEvent(eventArgs.AtkEventType))
                 return;
             AbandonDeferredConfirm(deferred,
-                $"使用者在等待期間操作了上架視窗（事件={(AtkEventType)eventArgs.AtkEventType}({eventArgs.AtkEventType}) 參數={eventArgs.EventParam}）");
+                $"使用者在等待期間操作了上架視窗（事件={(AtkEventType)eventArgs.AtkEventType}({eventArgs.AtkEventType}) 參數={eventArgs.EventParam}）",
+                handOver: true);
         }
 
         private void OnFrameworkUpdate(IFramework framework)
         {
+            if (ownedSellWindows.HandedOverOpen)
+                ownedSellWindows.OnFrame((nint)Commons.GetUnitBase("RetainerSell"));
             if (pendingMenuSelects.Count > 0)
                 ExpirePendingMenuSelects();
             if (matchedSlots.Count > 0 || recentSourceMatches.Count > 0)
@@ -910,7 +934,9 @@ namespace Marketbuddy
                 if (activeRetainer != 0 && watch.RetainerId != activeRetainer)
                 {
                     watches.RemoveAt(w);
-                    ChatGui.PrintError("[Marketbuddy] ??: you left that retainer before the listing was confirmed - check its price!".Loc(watch.Name));
+                    ChatGui.PrintError(watch.Sent
+                        ? "[Marketbuddy] ??: you left that retainer before the listing was confirmed - check its price!".Loc(watch.Name)
+                        : "[Marketbuddy] ??: automatic confirm was cancelled and you left that retainer - check whether it was put up for sale".Loc(watch.Name));
                     WriteDiag("上架後換僱員", watch.ItemId, watch.Name,
                         $"原因=上架確認前換到別的僱員；{SameItemSlotsText(watch.ItemId, watch.PreListingItems)}（以下格數是新僱員的）");
                     continue;
@@ -924,9 +950,17 @@ namespace Marketbuddy
                 if (matchedSlot >= 0)
                 {
                     watches.RemoveAt(w);
-                    claimedSlots.Add(matchedSlot);
                     matchedSlots[matchedSlot] = new MatchedListing(watch.ItemId, watch.RetainerId);
                     recentSourceMatches.Add(new SourceMatch(watch.RetainerId, watch.ItemId, watch.Source, matchedSlot, DateTime.UtcNow));
+                    // 刻意不交給引擎：沒按確認的那一件是使用者自己上架、價格自己填的。認領照留，免得別筆再認到它。
+                    if (!watch.Sent)
+                    {
+                        WriteDiag("使用者自行上架", watch.ItemId, watch.Name,
+                            $"原因=延後確認放棄後市場格 {matchedSlot} 出現這件道具，是使用者自己按的確認，不交給引擎定價");
+                        continue;
+                    }
+
+                    claimedSlots.Add(matchedSlot);
                     ChatGui.Print("[Marketbuddy] ??: listed at the price cap, now finding the right price...".Loc(watch.Name));
                     repriceQueue.Add(new PendingReprice
                     {
@@ -968,7 +1002,9 @@ namespace Marketbuddy
                         continue;
                     }
 
-                    ChatGui.PrintError("[Marketbuddy] ??: could not confirm the listing; if it is up, its price is the cap - check it!".Loc(watch.Name));
+                    ChatGui.PrintError(watch.Sent
+                        ? "[Marketbuddy] ??: could not confirm the listing; if it is up, its price is the cap - check it!".Loc(watch.Name)
+                        : "[Marketbuddy] ??: automatic confirm was cancelled and it could not be told whether it was put up for sale - check the sale list".Loc(watch.Name));
                     WriteDiag(timeoutStage, watch.ItemId, watch.Name,
                         $"原因={timeoutWhat} {ListingAckTimeoutMs / 1000} 秒內市場格沒出現這件道具，背包原格（{sourceText}）已經不是原本那一疊；{retainerState}；{slotsText}");
                 }
@@ -983,6 +1019,16 @@ namespace Marketbuddy
                 ? null
                 : inventoryManager->GetInventorySlot((InventoryType)source.Container, source.Slot);
             return item != null && item->ItemId == itemId && item->Quantity == source.Quantity;
+        }
+
+        /// <summary>背包原格現在的道具 id；空格或讀不到回 0。只在呼叫當幀讀。</summary>
+        private static uint ReadSourceItemId(ListingSource source)
+        {
+            var inventoryManager = InventoryManager.Instance();
+            var item = inventoryManager == null
+                ? null
+                : inventoryManager->GetInventorySlot((InventoryType)source.Container, source.Slot);
+            return item == null ? 0 : item->ItemId;
         }
 
         /// <summary>
@@ -1250,31 +1296,37 @@ namespace Marketbuddy
         }
 
         /// <summary>
-        /// 目前這名僱員的市場容器已載入且已佔 ≥ 上限才回 true。不在僱員身上、容器沒載入、
-        /// 上限讀不到一律回 false（照舊送出）。只在呼叫當幀讀，不保存指標。
+        /// 目前這名僱員的市場容器已載入，且已佔＋已送出還沒出現在市場格的筆數 ≥ 上限才回 true。不在僱員身上、容器沒載入、
+        /// 上限讀不到一律回 false（照舊送出）。已經出現在市場格、只是還沒認領的那筆不重複算。只在呼叫當幀讀，不保存指標。
         /// </summary>
-        private static bool TryReadFullMarket(out int occupied, out int capacity)
+        private bool TryReadFullMarket(out int occupied, out int inFlight, out int capacity)
         {
             occupied = 0;
+            inFlight = 0;
             capacity = 0;
-            if (CurrentRetainerId() == 0)
+            var retainerId = CurrentRetainerId();
+            if (retainerId == 0)
                 return false;
-            var inventoryManager = InventoryManager.Instance();
-            var container = inventoryManager == null
-                ? null
-                : inventoryManager->GetInventoryContainer(InventoryType.RetainerMarket);
-            if (container == null || !container->IsLoaded || container->Size <= 0)
+            var size = ReadMarketItems(requireLoaded: true);
+            if (size <= 0)
                 return false;
 
-            capacity = (int)container->Size;
-            for (short i = 0; i < container->Size; i++)
+            capacity = size;
+            var slotItems = marketItemsScratch.AsSpan(0, size);
+            foreach (var itemId in slotItems)
             {
-                var slot = inventoryManager->GetInventorySlot(InventoryType.RetainerMarket, i);
-                if (slot != null && slot->ItemId != 0)
+                if (itemId != 0)
                     occupied++;
             }
 
-            return occupied >= capacity;
+            foreach (var watch in watches)
+            {
+                if (watch.Sent && watch.RetainerId == retainerId &&
+                    QuickListMatch.FindNewListingSlot(slotItems, watch.ItemId, watch.PreListingItems, claimedSlots, matchedSlots) < 0)
+                    inFlight++;
+            }
+
+            return occupied + inFlight >= capacity;
         }
 
         /// <summary>以名稱查當幀的 RetainerSell；不保存位址。</summary>

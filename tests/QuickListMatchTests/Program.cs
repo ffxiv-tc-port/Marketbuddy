@@ -31,6 +31,10 @@ internal static class Program
         GateIgnoresOtherRetainerUnsentAndLater();
         GateAbandonsOnUserEvent();
         GateAbandonsOnHeldInput();
+        ButtonReleaseIsNotAUserClick();
+        DeferredConfirmChecksSourceSlot();
+        SiblingRequiresSameQuantity();
+        HandedOverWindowStaysInFlight();
 
         Console.WriteLine($"QUICKLISTMATCH_DONE pass={passes} fail={failures}");
         return failures == 0 ? 0 : 1;
@@ -210,6 +214,89 @@ internal static class Program
             Check($"鍵 {key} 按著放棄", QuickListConfirmGate.ShouldAbandonOnInput(0, [key]), "");
         Check("W 按著不放棄", !QuickListConfirmGate.ShouldAbandonOnInput(0, [87]), "");
         Check("W 與 Return 一起按著放棄", QuickListConfirmGate.ShouldAbandonOnInput(0, [87, 13]), "");
+    }
+
+    // ButtonRelease 在單純滑鼠移出按鈕時也會送；真的點擊一定先有 ButtonPress 23。
+    private static void ButtonReleaseIsNotAUserClick()
+    {
+        Check("ButtonRelease 24 不放棄", !QuickListConfirmGate.ShouldAbandonOnEvent(24), "");
+        Check("ButtonPress 23 放棄", QuickListConfirmGate.ShouldAbandonOnEvent(23), "");
+        Check("改前 ButtonRelease 24 會放棄（負對照）", LegacyShouldAbandonOnEvent(24), "");
+    }
+
+    // 同一格連按兩次：第二扇窗等第一筆落地才按，此時原格已空。
+    private static void DeferredConfirmChecksSourceSlot()
+    {
+        Check("原格還是這件：按", QuickListConfirmGate.SourceStillHoldsItem(4848, 4848), "");
+        Check("原格已空：不按", !QuickListConfirmGate.SourceStillHoldsItem(0, 4848), "");
+        Check("原格換成別的道具：不按", !QuickListConfirmGate.SourceStillHoldsItem(5187, 4848), "");
+        Check("改前原格已空照按（負對照）", LegacyDeferredConfirms(0, 4848), "");
+    }
+
+    private static void SiblingRequiresSameQuantity()
+    {
+        var recent = new List<SourceMatch> { new(RetainerA, 4848, new ListingSource(Inv1, 12, 99), 11, T0.AddSeconds(1)) };
+        var source = new ListingSource(Inv1, 12, 2);
+        var hit = QuickListMatch.FindSiblingMatch(recent, RetainerA, 4848, source, T0, 10000);
+        var legacy = LegacyFindSibling(recent, RetainerA, 4848, source, T0, 10000);
+        Check("同一格不同數量不算重按", hit == null, hit?.ToString() ?? "null");
+        Check("改前不同數量也算重按（負對照）", legacy != null, legacy?.ToString() ?? "null");
+    }
+
+    // 延後確認放棄、視窗交給使用者：到它自己關掉之前都算快速上架開的窗，引擎不可當成手動改價而取消。
+    private static void HandedOverWindowStaysInFlight()
+    {
+        const nint win = 0x1000, other = 0x2000;
+        var own = new SellWindowOwnership();
+        own.HandedOver(win);
+        Check("放棄後視窗還開著：仍算在飛", own.AnyOpen && own.Owns(win, 0), "");
+        Check("改前放棄後就不算在飛（負對照）", !LegacyIsCapListingInFlight(pending: false, awaitingClose: false, deferred: false), "");
+        own.OnFinalize(other);
+        Check("別扇上架視窗關掉不清", own.AnyOpen, "");
+        own.OnFrame(win);
+        Check("同一扇還在：每幀檢查不清", own.AnyOpen, "");
+        own.OnFinalize(win);
+        Check("它自己關掉才清", !own.AnyOpen && !own.Owns(win, 0), "");
+
+        own.HandedOver(win);
+        own.OnFrame(other);
+        Check("漏收關窗：每幀看到換了一扇就清", !own.AnyOpen, "");
+        own.HandedOver(win);
+        own.OnFrame(0);
+        Check("漏收關窗：每幀看到沒有上架視窗就清", !own.AnyOpen, "");
+        own.HandedOver(win);
+        own.OnSetup();
+        Check("新的上架視窗開了就清（同位址重開是別件）", !own.AnyOpen, "");
+
+        own.Confirmed(win);
+        Check("按了確認那扇算自己的", own.AnyOpen && own.Owns(win, 0) && !own.Owns(other, 0), "");
+        own.OnFinalize(other);
+        Check("按了確認那扇：任何一扇關掉都清（沿用改前）", !own.AnyOpen, "");
+        Check("延後中那扇算自己的", own.Owns(other, other) && !own.Owns(0, 0), "");
+    }
+
+    // 改前 QuickListConfirmGate.ShouldAbandonOnEvent：只排除 5、6、7、18、19。
+    private static bool LegacyShouldAbandonOnEvent(byte t) => t is not (5 or 6 or 7 or 18 or 19);
+
+    // 改前 PumpDeferredConfirm：閘門一開就按，不看原格。
+    private static bool LegacyDeferredConfirms(uint currentItemId, uint expectedItemId) => true;
+
+    // 改前 QuickLister.IsCapListingInFlight：放棄後 deferredConfirm 清成 null、視窗不算任何一項。
+    private static bool LegacyIsCapListingInFlight(bool pending, bool awaitingClose, bool deferred) => pending || awaitingClose || deferred;
+
+    // 改前 QuickListMatch.FindSiblingMatch：不比數量。
+    private static SourceMatch? LegacyFindSibling(List<SourceMatch> recent, ulong retainerId, uint itemId, ListingSource source,
+        DateTime createdAt, int windowMs)
+    {
+        var from = createdAt.AddMilliseconds(-windowMs);
+        foreach (var m in recent)
+        {
+            if (m.RetainerId == retainerId && m.ItemId == itemId && m.At >= from &&
+                m.Source.Container == source.Container && m.Source.Slot == source.Slot)
+                return m;
+        }
+
+        return null;
     }
 
     // 改前 QuickLister.PumpListingWatches 的比對：確認前有東西的格一律排除、只看佇列認領。
