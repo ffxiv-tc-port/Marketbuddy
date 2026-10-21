@@ -34,6 +34,9 @@ namespace Marketbuddy
         /// <summary>重掛面板裡的「賣給商店」一段；元件沒建起來時是 null。</summary>
         private readonly VendorSellPanel? vendorSellPanel;
 
+        /// <summary>重掛面板裡的「批次上架」一段；元件沒建起來時是 null。</summary>
+        private readonly BatchListPanel? batchListPanel;
+
         // passing in the image here just for simplicity
         public PluginUI(Marketbuddy plugin)
         {
@@ -41,6 +44,8 @@ namespace Marketbuddy
             surveyWindow = new PriceSurveyWindow(plugin.PriceSurvey, plugin.MarketGuiEventHandler);
             if (plugin.VendorSeller != null)
                 vendorSellPanel = new VendorSellPanel(plugin.VendorSeller);
+            if (plugin.BatchLister != null)
+                batchListPanel = new BatchListPanel(plugin.BatchLister);
             SettingsVisible = false;
         }
 

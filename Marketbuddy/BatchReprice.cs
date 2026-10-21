@@ -23,6 +23,11 @@ namespace Marketbuddy
     /// <param name="Name">已經帶好優質圖示的顯示名稱。</param>
     internal readonly record struct NeedsPricingEntry(short Slot, uint ItemId, bool IsHq, string Name);
 
+    /// <summary>一次「只查價」工作的結論（<see cref="BatchReprice.StartPriceProbe"/>）。</summary>
+    /// <param name="Price">只在 <see cref="PriceProbeOutcome.List"/>／<c>BelowVendor</c>／<c>BelowMin</c> 時有值。</param>
+    /// <param name="Note">給使用者看的一句原因（已在地化）。</param>
+    internal readonly record struct PriceProbeResult(long Token, PriceProbeOutcome Outcome, uint Price, string Note);
+
     /// <summary>
     /// One-click "relist every listed slot of the current retainer at
     /// (lowest market price - undercut)" batch engine.
@@ -80,6 +85,14 @@ namespace Marketbuddy
             public int Attempt;
             public bool FromCache;
             public bool QuickListed;
+
+            /// <summary>
+            /// 只查價、不碰任何市場格（批次上架用）。🔴 這種工作的 <see cref="Slot"/> 是 -1，
+            /// 絕不走 <see cref="ApplySlot"/>／<see cref="FinishPricing"/>／<see cref="DelistSlot"/>。
+            /// </summary>
+            public bool ProbeOnly;
+
+            public long ProbeToken;
             public SlotPhase Phase = SlotPhase.Throttle;
             public DateTime NotBefore = DateTime.MinValue;
             public DateTime WaitStart;
@@ -250,12 +263,27 @@ namespace Marketbuddy
         /// </summary>
         private bool delistOnlyBatch;
 
+        /// <summary>這一輪是 <see cref="StartPriceProbe"/> 開的：不發收尾通知、不動顯示用的格號與待處理清單。</summary>
+        private bool probeBatch;
+
+        private long probeToken;
+        private PriceProbeResult? lastProbe;
+
+        /// <summary>只在 <see cref="StartPriceProbe"/> 呼叫 CanStart 的那一下為 true：批次上架擁有的查價不被它自己擋。</summary>
+        private bool startingProbe;
+
+        /// <summary>「只查價」時成交價的新鮮度窗。設定是 0（不限）時改用這個值：新上架不拿年代不明的成交價定價。</summary>
+        private const int ProbeSaleMaxAgeDaysWhenUnlimited = 7;
+
         /// <summary>連續兩次取回之間的最小間隔，形狀比照 <c>BatchDelist</c>。</summary>
         private const int DelistThrottleMs = 250;
 
         private DateTime lastDelistFiredAt = DateTime.MinValue;
 
         public bool IsRunning => queue.IsRunning;
+
+        /// <summary>正在跑的是「只查價」工作（批次上架擁有的）。</summary>
+        public bool IsProbeRunning => queue.IsRunning && probeBatch;
 
         /// <summary>佇列裡還有幾格（含正在跑的那一格）。只給診斷 log 用。</summary>
         internal int QueuedJobCount => queue.PendingCount;
@@ -339,6 +367,11 @@ namespace Marketbuddy
             reason = string.Empty;
             if (IsRunning)
                 return false;
+            if (gui.BatchLister?.IsRunning == true && !startingProbe)
+            {
+                reason = "batch listing is running".Loc();
+                return false;
+            }
             if (IPCManager.IsLocked)
             {
                 reason = "locked via IPC by another plugin".Loc();
@@ -375,7 +408,7 @@ namespace Marketbuddy
             // not block starting this item's own reprice (that is the whole
             // point of queueing quick-lists instead of serializing them
             // behind engine.IsRunning). See QuickLister.IsCapListingInFlight.
-            if (Commons.GetUnitBase("RetainerSell") != null && gui.QuickLister?.IsCapListingInFlight != true)
+            if (Commons.GetUnitBase("RetainerSell") != null && gui.QuickLister?.IsOwnListingInFlight != true)
             {
                 reason = "close the price adjustment window first".Loc();
                 return false;
@@ -490,6 +523,56 @@ namespace Marketbuddy
             BeginBatch([job]);
             // BeginBatch 先把它清成 false，所以這一行要在後面。只影響收尾通知，不影響定價流程。
             quickRepriceBatch = true;
+            return true;
+        }
+
+        /// <summary>
+        /// 只查價：照重掛同一條查價管線（快取、<see cref="MarketRequestGate"/>、拒絕重試、逾時）算出這件道具
+        /// 該掛多少，結論用 <see cref="TryTakeProbeResult"/> 取。不碰任何市場格、不改價、不下架。
+        /// </summary>
+        /// <returns>false＝引擎現在不能開始（原因在 <see cref="LastStartRefusalReason"/>）。</returns>
+        public bool StartPriceProbe(long token, uint itemId, bool hq, string name)
+        {
+            startingProbe = true;
+            var canStart = CanStart(out var reason, requireListedItems: false);
+            startingProbe = false;
+            if (!canStart)
+            {
+                LastStartRefusalReason = reason;
+                return false;
+            }
+
+            LastStartRefusalReason = string.Empty;
+            var itemSheet = DataManager.GetExcelSheet<Item>();
+            var priceLow = itemSheet != null && itemSheet.TryGetRow(itemId, out var row) ? row.PriceLow : 0u;
+            var job = new SlotJob
+            {
+                Slot = -1, ItemId = itemId, IsHq = hq, Name = name,
+                VendorUnitPrice = priceLow == 0 ? 0u : hq ? priceLow + 1 : priceLow,
+                ProbeOnly = true, ProbeToken = token,
+            };
+            lastProbe = null;
+            BeginBatch([job]);
+            probeBatch = true;
+            probeToken = token;
+            return true;
+        }
+
+        /// <summary>批次上架停了：正在跑的查價一起停（不是查價就不動）。</summary>
+        public void CancelProbe()
+        {
+            if (IsProbeRunning)
+                Cancel("batch listing stopped".Loc());
+        }
+
+        /// <summary>取走 <paramref name="token"/> 那一次查價的結論；還沒出來回 false。</summary>
+        public bool TryTakeProbeResult(long token, out PriceProbeResult result)
+        {
+            result = default;
+            if (lastProbe is not { } probe || probe.Token != token)
+                return false;
+            result = probe;
+            lastProbe = null;
             return true;
         }
 
@@ -617,6 +700,7 @@ namespace Marketbuddy
 
             // 預設是「一般重掛」；快速上架那條路徑在 BeginBatch 回來之後自己標回 true。
             quickRepriceBatch = false;
+            probeBatch = false;
             delistOnlyBatch = delistOnly;
             TotalSlots = jobs.Count;
             ProcessedSlots = 0;
@@ -634,7 +718,10 @@ namespace Marketbuddy
             if (!delistOnly)
             {
                 foreach (var job in jobs)
-                    ForgetNeedsPricing(job.Slot);
+                {
+                    if (!job.ProbeOnly)
+                        ForgetNeedsPricing(job.Slot);
+                }
             }
             batchStartedAt = DateTime.UtcNow;
             lastSoldFallbackWarned = false;
@@ -724,7 +811,7 @@ namespace Marketbuddy
             // QuickLister listing a *different* item at the price cap while
             // this job's headless reprice runs in the background is not a
             // manual intervention and must not abort this run.
-            if (Commons.GetUnitBase("RetainerSell") != null && gui.QuickLister?.IsCapListingInFlight != true)
+            if (Commons.GetUnitBase("RetainerSell") != null && gui.QuickLister?.IsOwnListingInFlight != true)
             {
                 Cancel("manual price adjustment detected".Loc());
                 return;
@@ -745,7 +832,8 @@ namespace Marketbuddy
         {
             CurrentItemName = job.Name;
             // 顯示用：一進來就指向這一格，直到下一格接手（見 CurrentSlot 的說明）。
-            CurrentSlot = job.Slot;
+            if (!job.ProbeOnly)
+                CurrentSlot = job.Slot;
             var now = DateTime.UtcNow;
 
             switch (job.Phase)
@@ -809,11 +897,14 @@ namespace Marketbuddy
 
                 case SlotPhase.Request:
                 {
-                    var slot = GetMarketSlot(job.Slot);
-                    if (slot == null || slot->ItemId != job.ItemId)
+                    if (!job.ProbeOnly)
                     {
-                        Skip(job, "[Marketbuddy] ??: slot changed, skipped".Loc(job.Name));
-                        return TickTaskResult.Done;
+                        var slot = GetMarketSlot(job.Slot);
+                        if (slot == null || slot->ItemId != job.ItemId)
+                        {
+                            Skip(job, "[Marketbuddy] ??: slot changed, skipped".Loc(job.Name));
+                            return TickTaskResult.Done;
+                        }
                     }
 
                     var proxy = GetItemSearchProxy();
@@ -995,7 +1086,10 @@ namespace Marketbuddy
                 }
 
                 case SlotPhase.Apply:
-                    ApplySlot(job);
+                    if (job.ProbeOnly)
+                        ApplyProbe(job);
+                    else
+                        ApplySlot(job);
                     return TickTaskResult.Done;
 
                 default:
@@ -1274,6 +1368,71 @@ namespace Marketbuddy
         }
 
         /// <summary>
+        /// 「只查價」的結論：候選與取低規則和 <see cref="ApplySlot"/> 同一套，自家現價一律當不知道（還沒上架）。
+        /// 門檻判斷只出結論，不下架、不改價。
+        /// </summary>
+        private void ApplyProbe(SlotJob job)
+        {
+            var now = DateTime.UtcNow;
+            var undercut = conf.UndercutRuleSnapshot();
+            var anomalyRule = new RelistPricing.AnomalyRule(
+                conf.AnomalyGuardEnabled, conf.AnomalyGuardMinNormalPrice, conf.AnomalyGuardRatio);
+
+            long competitor = -1;
+            long peerBaseline = -1;
+            var ownIsLowest = false;
+            var ownLowest = -1L;
+            var listingSource = string.Empty;
+            var listingAt = DateTime.MinValue;
+            if (job.SurveyLowest > 0)
+            {
+                competitor = job.SurveyLowest;
+                listingSource = PriceSourceTag.Survey;
+                listingAt = job.SurveyAtUtc;
+            }
+            else if (captured.Count > 0)
+            {
+                competitor = RelistPricing.LowestCompetitor(
+                    captured, job.IsHq, conf.BatchCompareHqOnly, ownRetainerIds,
+                    out peerBaseline, out ownIsLowest, out ownLowest);
+                listingSource = job.FromCache ? PriceSourceTag.Cache : PriceSourceTag.Live;
+                listingAt = now;
+            }
+
+            var listing = ownIsLowest
+                ? PriceCandidate.None
+                : RelistPricing.FromListing(competitor, peerBaseline, -1, listingSource, listingAt, undercut, anomalyRule);
+            var maxAgeDays = conf.RelistLastSoldMaxAgeDays > 0
+                ? conf.RelistLastSoldMaxAgeDays
+                : ProbeSaleMaxAgeDaysWhenUnlimited;
+            var sale = RelistPricing.FromSale(
+                job.SaleUnitPrice, job.SaleAtUtc, job.SalePeerBaseline, -1, now, maxAgeDays, anomalyRule);
+            var decision = RelistPricing.Decide(listing, sale);
+            LogPricingDecision(job, listing, sale, decision, -1, ownIsLowest, competitor);
+
+            var taxPercent = CurrentTaxPercent();
+            var outcome = BatchListRules.Classify(
+                decision.Outcome == RelistOutcome.Price ? decision.Price : -1,
+                decision.Outcome == RelistOutcome.Hold, ownIsLowest, ownLowest, job.VendorUnitPrice, taxPercent,
+                conf.BatchDelistBelowVendor, conf.BatchMinPrice, Configuration.MAX_PRICE, out var price);
+
+            var note = outcome switch
+            {
+                PriceProbeOutcome.List => decision.Outcome == RelistOutcome.Price && price == decision.Price
+                    ? SourceNoteFor(decision.Winner).Trim()
+                    : "(matched your own lowest listing ?? gil)".Loc(price.ToString("N0")),
+                PriceProbeOutcome.BelowVendor => "market net ?? < NPC ?? gil".Loc(
+                    price * (100L - taxPercent) / 100L, job.VendorUnitPrice),
+                PriceProbeOutcome.BelowMin => "price ?? below your minimum ??".Loc(price, conf.BatchMinPrice),
+                PriceProbeOutcome.Hold => "?? gil looks like a mistyped price".Loc(
+                    decision.Winner.Anomaly.Reference.ToString("N0")),
+                _ => "no one is selling this item".Loc(),
+            };
+            ProcessedSlots++;
+            lastProbe = new PriceProbeResult(job.ProbeToken, outcome, price, note);
+        }
+
+        /// <summary>
         /// 板上最便宜的那一筆是我們自己掛的 ⇒ 一般格什麼都不做，
         /// 快速上架那一格與自家最低價齊平（它停在上限價上，那代表沒有人買得到）。
         /// </summary>
@@ -1353,7 +1512,7 @@ namespace Marketbuddy
                 $"ownIsLowest={ownIsLowest} boardCompetitor={competitor} listings={captured.Count} " +
                 $"pick={pick} final={(decision.Outcome == RelistOutcome.Price ? decision.Price.ToString() : "-")} " +
                 $"saleMaxAgeDays={conf.RelistLastSoldMaxAgeDays} " +
-                $"surveyHours={conf.RelistSurveyFallbackHours} quickListed={job.QuickListed}");
+                $"surveyHours={conf.RelistSurveyFallbackHours} quickListed={job.QuickListed} probe={job.ProbeOnly}");
         }
 
         /// <summary>
@@ -1722,6 +1881,14 @@ namespace Marketbuddy
         {
             MarketRequestGate.LogSummary("batch aborted");
             ResetRequestState();
+            if (probeBatch)
+            {
+                // 結論交給批次上架自己講，這裡不印重掛的措辭。
+                lastProbe = new PriceProbeResult(probeToken, PriceProbeOutcome.Aborted, 0, reason);
+                BatchAborted?.Invoke(reason);
+                return;
+            }
+
             // 「只下架」批次一個價格都沒動過，印重掛的措辭會讓人以為價格被改了。
             if (delistOnlyBatch)
                 ChatGui.PrintError("[Marketbuddy] Delisting cancelled: ?? (?? delisted, ?? skipped, ?? failed)"
@@ -1744,6 +1911,14 @@ namespace Marketbuddy
             // 「往下探 → 成功還是被拒 → 收斂到多少」不必逐行翻 REQUEST 的入口。
             MarketRequestGate.LogSummary("batch finished");
             ResetRequestState();
+            if (probeBatch)
+            {
+                // 照理 ApplyProbe／Fail 一定已經留下結論；沒有就當失敗，不讓批次上架空等到逾時。
+                lastProbe ??= new PriceProbeResult(probeToken, PriceProbeOutcome.Failed, 0,
+                    "no market data received (timed out)".Loc());
+                return;
+            }
+
             if (delistOnlyBatch)
                 ChatGui.Print("[Marketbuddy] Delisting finished: ?? delisted, ?? skipped, ?? failed"
                     .Loc(DelistedCount, SkippedCount, FailedCount));
@@ -2027,6 +2202,13 @@ namespace Marketbuddy
 
         private void Fail(SlotJob job, string reason)
         {
+            if (job.ProbeOnly)
+            {
+                ProcessedSlots++;
+                lastProbe = new PriceProbeResult(job.ProbeToken, PriceProbeOutcome.Failed, 0, reason);
+                return;
+            }
+
             ProcessedSlots++;
             FailedCount++;
             Log.Warning($"BatchReprice: slot {job.Slot} ({job.Name}) failed: {reason}");

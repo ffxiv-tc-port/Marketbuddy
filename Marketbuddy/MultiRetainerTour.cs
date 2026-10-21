@@ -102,6 +102,9 @@ namespace Marketbuddy
         /// </remarks>
         internal Func<bool>? ExternalDriverActive;
 
+        /// <summary>批次上架；建構後注入。全僱員補上架在每名僱員身上驅動它。</summary>
+        internal BatchLister? BatchLister { get; set; }
+
         /// <summary>巡迴正常跑完（<see cref="OnQueueCompleted"/> 的尾巴）。</summary>
         public event Action? TourCompleted;
 
@@ -157,7 +160,7 @@ namespace Marketbuddy
             reason = string.Empty;
             // 兩個引擎都要空著：出售品視窗那顆單僱員按鈕、快速上架的單件定價、
             // 以及另一種模式的巡迴，任何一個在跑都不能再開一輪。
-            if (IsRunning || repriceEngine.IsRunning || delistEngine.IsRunning)
+            if (IsRunning || repriceEngine.IsRunning || delistEngine.IsRunning || BatchLister?.IsRunning == true)
                 return false;
             if (IPCManager.IsLocked)
             {

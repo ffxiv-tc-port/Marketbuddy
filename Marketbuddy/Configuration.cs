@@ -71,6 +71,15 @@ namespace Marketbuddy
         /// </remarks>
         public bool VendorSellAfterDelist = false;
 
+        /// <summary>出售品視窗旁的「批次上架」面板。<b>預設關閉。</b>🔴 市場紅線：開著也只是多一個面板，要按開始才動。</summary>
+        public bool BatchListEnabled = false;
+
+        /// <summary>僱員選單旁的「全僱員補上架」按鈕。<b>預設關閉。</b>不掛進多角色巡迴。</summary>
+        public bool ReplenishTourEnabled = false;
+
+        /// <summary>每名僱員「可補上架」的道具（使用者在僱員物品欄模式的批次面板勾的）。存 RetainerId，不存名字。</summary>
+        public List<ReplenishPick> ReplenishPicks = [];
+
         /// <summary>
         /// 異常低價保護：別人手滑少打一個 0 的時候，不要跟著把自己的東西降到那個價。
         /// <b>預設開啟。</b>
@@ -591,6 +600,8 @@ namespace Marketbuddy
                 // 舊設定檔沒有這個鍵時欄位初始值會留著；只有檔案裡明寫 null 才會變成 null。
                 // 這一行是為了後者——少了它，之後每一個 Contains/Count 都會 NRE。
                 conf.DelistTourSkipRetainers ??= [];
+                conf.ReplenishPicks ??= [];
+                conf.ReplenishPicks.RemoveAll(p => p == null);
                 conf.MarketTaxPercent = Math.Clamp(conf.MarketTaxPercent, 0, 25);
                 conf.MarketDataCacheSeconds = Math.Clamp(conf.MarketDataCacheSeconds, 0, 3600);
                 conf.PriceSurveyCacheSeconds = Math.Clamp(conf.PriceSurveyCacheSeconds, 0, 3600);
@@ -612,5 +623,14 @@ namespace Marketbuddy
             _cachedConfig = conf;
             return _cachedConfig;
         }
+    }
+
+    /// <summary>某名僱員「可補上架」的一種道具。🔴 類別名與欄位名會進存檔，改了既有的勾選就讀不回來。</summary>
+    [Serializable]
+    public class ReplenishPick
+    {
+        public ulong RetainerId;
+        public uint ItemId;
+        public bool Hq;
     }
 }

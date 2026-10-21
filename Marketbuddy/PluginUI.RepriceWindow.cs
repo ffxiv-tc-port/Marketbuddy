@@ -26,7 +26,9 @@ namespace Marketbuddy
             var showBatch = conf.BatchRepriceEnabled;
             var quickListPending = marketbuddy.QuickLister?.PendingCount ?? 0;
             var showVendorSell = vendorSellPanel != null && marketbuddy.VendorSeller?.ShouldShow == true;
-            if ((!showStack && !showBatch && quickListPending == 0 && !showVendorSell) ||
+            var showBatchList = batchListPanel != null &&
+                                (conf.BatchListEnabled || marketbuddy.BatchLister?.IsRunning == true);
+            if ((!showStack && !showBatch && quickListPending == 0 && !showVendorSell && !showBatchList) ||
                 !marketbuddy.MarketGuiEventHandler.AddonRetainerSellList_Frame(out var topLeft, out var size))
                 return null;
 
@@ -67,6 +69,9 @@ namespace Marketbuddy
                 DrawNeedsPricingResult();
                 DrawSingleRetainerDelistRow();
             }
+
+            if (showBatchList)
+                batchListPanel!.Draw();
 
             if (showVendorSell)
                 vendorSellPanel!.Draw();

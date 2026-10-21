@@ -21,7 +21,10 @@ using ValueType = FFXIVClientStructs.FFXIV.Component.GUI.ValueType;
 
 namespace Marketbuddy
 {
-    /// <summary><see cref="QuickLister.OpenAndSelectVendorSell"/> 的結果。只有 <see cref="Fired"/> 代表真的選了一項。</summary>
+    /// <summary>
+    /// <see cref="QuickLister.OpenAndSelectVendorSell"/> 與 <see cref="QuickLister.OpenAndSelectPutUpForSale"/> 的結果。
+    /// 只有 <see cref="Fired"/> 代表真的選了一項。
+    /// </summary>
     internal enum VendorSellMenuResult
     {
         /// <summary>選單開了，但本外掛的 detour 沒有被呼叫到：什麼都沒選。</summary>
@@ -36,6 +39,30 @@ namespace Marketbuddy
         /// <summary>原生端這次沒有重建選單（agent 記的目標格不是這一格），選單內容是上一次的：什麼都沒選。</summary>
         MenuStale,
     }
+
+    /// <summary>批次上架交給快速上架管線的那一件，最後怎麼了。</summary>
+    internal enum BatchListingState
+    {
+        /// <summary>出現在市場格（<see cref="BatchListingOutcome.MarketSlot"/>）。價格由呼叫端自己核對。</summary>
+        Listed,
+
+        /// <summary>選了到市場出售，上架視窗卻沒在時限內開（遊戲拒絕了這一件）。</summary>
+        WindowNotOpened,
+
+        /// <summary>上架視窗開了但填價／按確認失敗，視窗留給使用者。</summary>
+        FillFailed,
+
+        /// <summary>按了確認，時限內市場格沒出現：不知道上架了沒有。</summary>
+        ConfirmUnclear,
+
+        /// <summary>確認前換了僱員。</summary>
+        LeftRetainer,
+
+        /// <summary>延後確認被放棄、視窗交給使用者（或使用者自己按了確認）。</summary>
+        HandedToUser,
+    }
+
+    internal readonly record struct BatchListingOutcome(long Token, BatchListingState State, short MarketSlot, DateTime AtUtc);
 
     /// <summary>
     /// Native quick listing: while a configurable key is held and the retainer
@@ -111,6 +138,12 @@ namespace Marketbuddy
 
             /// <summary>false＝延後確認期間視窗被關掉、我們沒按確認；只等使用者自己按確認的那種結果，不擋下一筆。</summary>
             public bool Sent = true;
+
+            /// <summary>false＝批次上架那一件：已經照算好的價上架，配到市場格後不交給引擎定價。</summary>
+            public bool NeedsReprice = true;
+
+            /// <summary>批次上架的識別；0＝一般快速上架。</summary>
+            public long BatchToken;
         }
 
         /// <summary>上架視窗已開、確認延後到更早那筆上架出現在市場格。同時只會有一筆（遊戲只有一扇上架視窗）。</summary>
@@ -161,6 +194,12 @@ namespace Marketbuddy
             public required string[] NameCandidates;
             public required DateTime Deadline;
             public required ListingSource Source;
+
+            /// <summary>要填的價；null＝上限價（一般快速上架，之後交給引擎定價）。</summary>
+            public uint? Price;
+
+            /// <summary>批次上架的識別；0＝一般快速上架。</summary>
+            public long BatchToken;
         }
 
         private readonly Hook<OpenForItemSlotDelegate> hook;
@@ -170,21 +209,37 @@ namespace Marketbuddy
         private readonly string putUpForSaleText; // Addon sheet row 99
         private readonly string retainerSellText; // Addon sheet row 5480
 
-        private sealed class VendorSellArm
+        private sealed class MenuArm
         {
             public required InventoryType Type { get; init; }
             public required int Slot { get; init; }
             public required VendorSellKey Key { get; init; }
             public required int Quantity { get; init; }
+
+            /// <summary>要選的那一項（Addon 表文字）。</summary>
+            public required string EntryText { get; init; }
+
+            /// <summary>非 0＝批次上架：送出選取之前先排好帶這個 token 與 <see cref="Price"/> 的待處理項。</summary>
+            public long BatchToken { get; init; }
+
+            public uint Price { get; init; }
             public VendorSellMenuResult Result = VendorSellMenuResult.NotCalled;
             public string MenuDump = string.Empty;
         }
 
         /// <summary>
-        /// 只在 <see cref="OpenAndSelectVendorSell"/> 同步呼叫開選單的那一小段期間不為 null。
-        /// 不為 null 時 detour 一律走賣給商店那條路，快速上架整條不碰。
+        /// 只在 <see cref="OpenAndSelectVendorSell"/>／<see cref="OpenAndSelectPutUpForSale"/> 同步呼叫開選單的那一小段期間不為 null。
+        /// 不為 null 時 detour 只選它指名的那一項，快速上架整條不碰。
         /// </summary>
-        private VendorSellArm? vendorSellArm;
+        private MenuArm? menuArm;
+
+        private readonly Dictionary<long, BatchListingOutcome> batchOutcomes = new();
+
+        /// <summary>批次上架按了確認、還沒關的那扇上架視窗；只做等值比較。</summary>
+        private nint batchSellWindow;
+
+        /// <summary>批次上架；建構後注入。沒有 arm 的右鍵選單在它跑的時候出現＝使用者或別的插件介入。</summary>
+        internal BatchLister? BatchLister { get; set; }
 
         // Every quick-list still waiting for its menu-jump to open a RetainerSell
         // window. A list (not a single pending slot) so a fast burst of right-clicks
@@ -237,6 +292,9 @@ namespace Marketbuddy
         /// than the player manually adjusting a price. See <see cref="ownedSellWindows"/>.
         /// </summary>
         public bool IsCapListingInFlight => IsQuickListPending || ownedSellWindows.AnyOpen || deferredConfirm != null;
+
+        /// <summary>同 <see cref="IsCapListingInFlight"/>：語意是「快速上架（含批次上架）自己的上架視窗」，不只上限價那種。</summary>
+        public bool IsOwnListingInFlight => IsCapListingInFlight;
 
         /// <summary>這扇上架視窗是快速上架開的（按了確認、延後中、或放棄後交給使用者）。只做位址等值比較。</summary>
         public bool OwnsSellWindow(nint addon) => ownedSellWindows.Owns(addon, deferredConfirm?.Addon ?? 0);
@@ -327,9 +385,16 @@ namespace Marketbuddy
 
         private void HandleContextMenuOpened(AgentInventoryContext* agent, InventoryType inventoryType, int slot)
         {
-            if (vendorSellArm is { } arm)
+            if (menuArm is { } arm)
             {
-                HandleVendorSellMenu(arm, agent, inventoryType, slot);
+                HandleArmedMenu(arm, agent, inventoryType, slot);
+                return;
+            }
+
+            // 遊戲裡這支函式唯一的原生呼叫者是 UI 的右鍵處理：沒有 arm 就是使用者右鍵或別的插件，批次一律讓開。
+            if (BatchLister is { IsRunning: true } lister)
+            {
+                lister.StopByUser("a right-click menu was opened on an item".Loc(), $"{inventoryType}#{slot}");
                 return;
             }
 
@@ -534,6 +599,25 @@ namespace Marketbuddy
         /// <summary>Addon 表第 5480 列（「委託僱員出售物品」）讀得到，<see cref="VendorSeller"/> 才能用。</summary>
         internal bool CanVendorSell => retainerSellText.Length > 0;
 
+        /// <summary>Addon 表第 99 列（「到市場出售」）讀得到，<see cref="BatchLister"/> 才能用。</summary>
+        internal bool CanPutUpForSale => putUpForSaleText.Length > 0;
+
+        /// <summary>
+        /// 批次上架停了：這個 token 還沒按的不再替使用者按（撤掉待處理項）；延後確認中的那扇窗交給使用者。
+        /// 已經按了確認的那一件照常等它出現，不再碰窗。
+        /// </summary>
+        internal void ReleaseBatch(long token)
+        {
+            if (token == 0)
+                return;
+            var removed = pendingMenuSelects.RemoveAll(p => p.BatchToken == token);
+            if (deferredConfirm is { } deferred && deferred.Pending.BatchToken == token)
+                AbandonDeferredConfirm(deferred, "批次上架停止", handOver: true);
+            batchOutcomes.Remove(token);
+            if (removed > 0)
+                Log.Information($"QuickLister: 批次上架停止，撤掉 {removed} 筆還沒開窗的待處理項（之後開出的上架視窗留給使用者）");
+        }
+
         /// <summary>
         /// 替 <see cref="VendorSeller"/> 打開某一格的右鍵選單並選「委託僱員出售物品」。
         /// 🔑 選取發生在同一個呼叫堆疊裡的 detour：原生端剛開好選單，走的是與快速上架相同的守衛與送出路徑。
@@ -543,28 +627,74 @@ namespace Marketbuddy
             VendorSellKey key, int quantity, out string menuDump)
         {
             menuDump = string.Empty;
-            if (vendorSellArm != null || retainerSellText.Length == 0)
+            if (retainerSellText.Length == 0)
+                return VendorSellMenuResult.NotSent;
+            return OpenArmed(new MenuArm
+            {
+                Type = type, Slot = slot, Key = key, Quantity = quantity, EntryText = retainerSellText,
+            }, ownerAddonId, out menuDump);
+        }
+
+        /// <summary>
+        /// 替批次上架打開某一格的右鍵選單並選「到市場出售」（Addon 表第 99 列）。選取前先排好帶
+        /// <paramref name="price"/> 與 <paramref name="token"/> 的待處理項，上架視窗開了就照這個價填、按確認。
+        /// 結果用 <see cref="TryTakeBatchOutcome"/> 取。
+        /// </summary>
+        internal VendorSellMenuResult OpenAndSelectPutUpForSale(InventoryType type, short slot, uint ownerAddonId,
+            VendorSellKey key, int quantity, uint price, long token, out string menuDump)
+        {
+            menuDump = string.Empty;
+            if (putUpForSaleText.Length == 0 || token == 0 || price == 0)
+                return VendorSellMenuResult.NotSent;
+            return OpenArmed(new MenuArm
+            {
+                Type = type, Slot = slot, Key = key, Quantity = quantity, EntryText = putUpForSaleText,
+                BatchToken = token, Price = Math.Min(price, (uint)Configuration.MAX_PRICE),
+            }, ownerAddonId, out menuDump);
+        }
+
+        private VendorSellMenuResult OpenArmed(MenuArm arm, uint ownerAddonId, out string menuDump)
+        {
+            menuDump = string.Empty;
+            if (menuArm != null)
                 return VendorSellMenuResult.NotSent;
             var agent = AgentInventoryContext.Instance();
             if (agent == null)
                 return VendorSellMenuResult.MenuUnavailable;
 
-            var arm = new VendorSellArm { Type = type, Slot = slot, Key = key, Quantity = quantity };
-            vendorSellArm = arm;
+            menuArm = arm;
             try
             {
-                agent->OpenForItemSlot(type, slot, 0, ownerAddonId);
+                agent->OpenForItemSlot(arm.Type, arm.Slot, 0, ownerAddonId);
             }
             finally
             {
-                vendorSellArm = null;
+                menuArm = null;
             }
 
             menuDump = arm.MenuDump;
             return arm.Result;
         }
 
-        private void HandleVendorSellMenu(VendorSellArm arm, AgentInventoryContext* agent, InventoryType inventoryType, int slot)
+        /// <summary>批次上架那一件的結果；還沒有回 false。取走即刪。</summary>
+        internal bool TryTakeBatchOutcome(long token, out BatchListingOutcome outcome)
+            => batchOutcomes.Remove(token, out outcome);
+
+        private void NoteBatchOutcome(long token, BatchListingState state, short marketSlot = -1)
+        {
+            if (token == 0)
+                return;
+            var now = DateTime.UtcNow;
+            if (batchOutcomes.Count > 16)
+            {
+                foreach (var stale in batchOutcomes.Where(o => (now - o.Value.AtUtc).TotalMinutes > 5).Select(o => o.Key).ToList())
+                    batchOutcomes.Remove(stale);
+            }
+
+            batchOutcomes[token] = new BatchListingOutcome(token, state, marketSlot, now);
+        }
+
+        private void HandleArmedMenu(MenuArm arm, AgentInventoryContext* agent, InventoryType inventoryType, int slot)
         {
             // 只認第一次、而且是我們指名的那一格；其餘一律不選任何一項。
             if (arm.Result != VendorSellMenuResult.NotCalled)
@@ -615,7 +745,7 @@ namespace Marketbuddy
                     ? MemoryHelper.ReadSeStringNullTerminated((nint)param.String.Value).TextValue
                     : string.Empty;
                 labels.Add($"{i}:{entryText}");
-                if (entryText != retainerSellText)
+                if (entryText != arm.EntryText)
                     continue;
                 if (agent->IsContextItemDisabled(i))
                 {
@@ -626,9 +756,32 @@ namespace Marketbuddy
                 var contextMenuName = AddonHelpers.ReadAddonName(addon);
                 if (contextMenuName.Length == 0)
                     contextMenuName = "ContextMenu";
-                if (!AddonPressGuard.CanPress(contextMenuName, (nint)addon, PressKind.Terminal) ||
-                    !AddonHelpers.FireContextMenuSelect(addon, i, contextMenuName, out var closedByCallback))
+                if (!AddonPressGuard.CanPress(contextMenuName, (nint)addon, PressKind.Terminal))
                 {
+                    arm.Result = VendorSellMenuResult.NotSent;
+                    return;
+                }
+
+                // 上架視窗可能在這一發 callback 裡同步開出來：待處理項一定要先排好。
+                PendingMenuSelect? pending = null;
+                if (arm.BatchToken != 0)
+                {
+                    var name = ResolveItemName(item, out var nameCandidates);
+                    pending = new PendingMenuSelect
+                    {
+                        ItemId = item->ItemId, Name = name, NameCandidates = nameCandidates,
+                        Deadline = DateTime.UtcNow.AddMilliseconds(PendingTimeoutMs),
+                        Source = new ListingSource((int)inventoryType, slot, item->Quantity),
+                        Price = arm.Price, BatchToken = arm.BatchToken,
+                    };
+                    pendingMenuSelects.Add(pending);
+                    AcquireSuppression();
+                }
+
+                if (!AddonHelpers.FireContextMenuSelect(addon, i, contextMenuName, out var closedByCallback))
+                {
+                    if (pending != null)
+                        pendingMenuSelects.Remove(pending);
                     arm.Result = VendorSellMenuResult.NotSent;
                     return;
                 }
@@ -644,14 +797,14 @@ namespace Marketbuddy
                 if (stillOpen != addon)
                 {
                     Log.Information(
-                        $"QuickLister: 已選取『{retainerSellText}』({i}) 給 {inventoryType}#{slot}；callback 說沒關窗，但選單已經不在載入清單裡，不再動它");
+                        $"QuickLister: 已選取『{arm.EntryText}』({i}) 給 {inventoryType}#{slot}；callback 說沒關窗，但選單已經不在載入清單裡，不再動它");
                     return;
                 }
 
                 agent->AgentInterface.Hide();
                 stillOpen->Close(true);
                 Log.Information(
-                    $"QuickLister: 已選取『{retainerSellText}』({i}) 給 {inventoryType}#{slot}；原生端沒關窗，選單由我們自己關掉");
+                    $"QuickLister: 已選取『{arm.EntryText}』({i}) 給 {inventoryType}#{slot}；原生端沒關窗，選單由我們自己關掉");
                 return;
             }
 
@@ -729,12 +882,18 @@ namespace Marketbuddy
             // listing can be identified when the server ack lands.
             var preItems = GetOccupiedMarketItems();
 
-            if (!gui.QuickListFillAndConfirm(addon, Configuration.MAX_PRICE, out var fillFailReason))
+            var price = pending.Price is { } fixedPrice ? (int)fixedPrice : Configuration.MAX_PRICE;
+            if (!gui.QuickListFillAndConfirm(addon, price, out var fillFailReason))
             {
                 ChatGui.PrintError("[Marketbuddy] ??: quick listing failed - set the price manually".Loc(pending.Name));
                 WriteDiag("填價失敗", pending.ItemId, pending.Name, $"原因={fillFailReason}");
+                NoteBatchOutcome(pending.BatchToken, BatchListingState.FillFailed);
                 return false;
             }
+
+            // 自己的確認已經送完才記：送確認本身也會經過上架視窗的 ReceiveEvent。
+            if (pending.BatchToken != 0)
+                batchSellWindow = addon;
 
             // The window is still open pending the server's confirmation ack;
             // BatchReprice must not mistake it for a manual price adjustment
@@ -751,6 +910,8 @@ namespace Marketbuddy
                 RetainerId = CurrentRetainerId(),
                 Source = pending.Source,
                 CreatedAt = now,
+                NeedsReprice = pending.Price == null,
+                BatchToken = pending.BatchToken,
             });
             return true;
         }
@@ -780,7 +941,7 @@ namespace Marketbuddy
         private static readonly GamepadButtons[] AllGamepadButtons = Enum.GetValues<GamepadButtons>();
 
         /// <summary>手把任一鈕或確定鍵按著（level）。只在延後中呼叫；不配置。</summary>
-        private static bool HeldConfirmInput(out ushort gamepadMask, out int keyCode)
+        internal static bool HeldConfirmInput(out ushort gamepadMask, out int keyCode)
         {
             gamepadMask = 0;
             foreach (var button in AllGamepadButtons)
@@ -882,7 +1043,10 @@ namespace Marketbuddy
                 Source = deferred.Pending.Source,
                 CreatedAt = now,
                 Sent = false,
+                NeedsReprice = false,
+                BatchToken = deferred.Pending.BatchToken,
             });
+            NoteBatchOutcome(deferred.Pending.BatchToken, BatchListingState.HandedToUser);
             Log.Information(
                 $"[QuickListGate] 道具={deferred.Pending.Name}(#{deferred.Pending.ItemId}) 等了 {(now - deferred.Since).TotalMilliseconds:0} ms " +
                 $"結果=放棄：{reason}，沒按確認，視窗{(handedOver ? "交給使用者" : "已不在")} 等的是={deferred.WaitingFor}");
@@ -891,6 +1055,8 @@ namespace Marketbuddy
         private void OnRetainerSellFinalize(AddonEvent type, AddonArgs args)
         {
             ownedSellWindows.OnFinalize(args.Addon);
+            if (args.Addon == batchSellWindow)
+                batchSellWindow = 0;
             if (deferredConfirm is { } deferred && deferred.Addon == args.Addon)
                 AbandonDeferredConfirm(deferred, "上架視窗在等待期間被關掉", handOver: false);
         }
@@ -901,6 +1067,10 @@ namespace Marketbuddy
         /// </summary>
         private void OnRetainerSellReceiveEvent(AddonEvent type, AddonArgs args)
         {
+            if (batchSellWindow != 0 && args.Addon == batchSellWindow && BatchLister is { IsRunning: true } lister &&
+                args is AddonReceiveEventArgs batchEvent && QuickListConfirmGate.ShouldAbandonOnEvent(batchEvent.AtkEventType))
+                lister.StopByUser("you operated the sale window".Loc(), $"事件={batchEvent.AtkEventType}");
+
             if (deferredConfirm is not { } deferred || deferred.Addon != args.Addon ||
                 args is not AddonReceiveEventArgs eventArgs || !QuickListConfirmGate.ShouldAbandonOnEvent(eventArgs.AtkEventType))
                 return;
@@ -934,6 +1104,7 @@ namespace Marketbuddy
                     continue;
                 var expired = pendingMenuSelects[i];
                 pendingMenuSelects.RemoveAt(i);
+                NoteBatchOutcome(expired.BatchToken, BatchListingState.WindowNotOpened);
                 Log.Debug($"QuickLister: pending menu-select for '{expired.Name}' expired without a matching RetainerSell window");
 
                 var createdAt = expired.Deadline.AddMilliseconds(-PendingTimeoutMs);
@@ -959,6 +1130,7 @@ namespace Marketbuddy
                 if (activeRetainer != 0 && watch.RetainerId != activeRetainer)
                 {
                     watches.RemoveAt(w);
+                    NoteBatchOutcome(watch.BatchToken, BatchListingState.LeftRetainer);
                     ChatGui.PrintError(watch.Sent
                         ? "[Marketbuddy] ??: you left that retainer before the listing was confirmed - check its price!".Loc(watch.Name)
                         : "[Marketbuddy] ??: automatic confirm was cancelled and you left that retainer - check whether it was put up for sale".Loc(watch.Name));
@@ -980,8 +1152,16 @@ namespace Marketbuddy
                     // 刻意不交給引擎：沒按確認的那一件是使用者自己上架、價格自己填的。認領照留，免得別筆再認到它。
                     if (!watch.Sent)
                     {
+                        NoteBatchOutcome(watch.BatchToken, BatchListingState.HandedToUser, matchedSlot);
                         WriteDiag("使用者自行上架", watch.ItemId, watch.Name,
                             $"原因=延後確認放棄後市場格 {matchedSlot} 出現這件道具，是使用者自己按的確認，不交給引擎定價");
+                        continue;
+                    }
+
+                    // 批次上架那一件已經照算好的價上架：不交給引擎，價格由批次自己核對。
+                    if (!watch.NeedsReprice)
+                    {
+                        NoteBatchOutcome(watch.BatchToken, BatchListingState.Listed, matchedSlot);
                         continue;
                     }
 
@@ -1002,6 +1182,8 @@ namespace Marketbuddy
                 if (DateTime.UtcNow > watch.Deadline)
                 {
                     watches.RemoveAt(w);
+                    NoteBatchOutcome(watch.BatchToken,
+                        watch.Sent ? BatchListingState.ConfirmUnclear : BatchListingState.HandedToUser);
                     var retainerState = activeRetainer == 0 ? "目前不在僱員身上" : "還在同一名僱員";
                     var slotsText = SameItemSlotsText(watch.ItemId, watch.PreListingItems);
 
@@ -1324,7 +1506,7 @@ namespace Marketbuddy
         /// 目前這名僱員的市場容器已載入，且已佔＋已送出還沒出現在市場格的筆數 ≥ 上限才回 true。不在僱員身上、容器沒載入、
         /// 上限讀不到一律回 false（照舊送出）。已經出現在市場格、只是還沒認領的那筆不重複算。只在呼叫當幀讀，不保存指標。
         /// </summary>
-        private bool TryReadFullMarket(out int occupied, out int inFlight, out int capacity)
+        internal bool TryReadFullMarket(out int occupied, out int inFlight, out int capacity)
         {
             occupied = 0;
             inFlight = 0;

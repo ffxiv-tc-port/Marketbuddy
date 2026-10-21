@@ -51,6 +51,7 @@ namespace Marketbuddy
         ];
 
         private static readonly string[] InventoryAddonNames = ["InventoryExpansion", "InventoryLarge", "Inventory"];
+        private static readonly string[] RetainerInventoryAddonNames = ["InventoryRetainerLarge", "InventoryRetainer"];
 
         private sealed class Round
         {
@@ -129,6 +130,9 @@ namespace Marketbuddy
         private ulong runContentId;
         private bool runHasRoundJobs;
 
+        /// <summary>批次上架；建構後注入（兩者互斥）。</summary>
+        internal BatchLister? BatchLister { get; set; }
+
         private Configuration conf => Configuration.GetOrLoad();
 
         public bool IsRunning { get; private set; }
@@ -201,6 +205,35 @@ namespace Marketbuddy
 
             Log.Information($"[Marketbuddy] VendorSell: 背包分揀交來 {sortPicks.Count} 格（勾選 {picks.Count} 格）");
             return sortPicks.Count;
+        }
+
+        /// <summary>
+        /// 只加不換：批次上架判成低於門檻的那幾格加進清單（不開始賣）。依格子去重，已取消的勾選照留。
+        /// 回傳真的加進去幾格（商店不收、會跳確認框、兵裝庫的不收）。
+        /// </summary>
+        public int AddSortPicks(IReadOnlyList<SortPick> picks)
+        {
+            if (IsRunning)
+                return 0;
+            if (sortPicks.Count == 0)
+                sortContentId = PlayerState.ContentId;
+            else if (sortContentId != PlayerState.ContentId)
+                return 0;
+
+            var added = 0;
+            foreach (var pick in picks)
+            {
+                if (pick.VendorUnitPrice == 0 || pick.Slot.NeedsConfirmation || pick.Slot.Armory ||
+                    pick.Slot.Key.ItemId == 0 || pick.Slot.Key.ItemId == uint.MaxValue ||
+                    sortPicks.Exists(p => p.Slot.Container == pick.Slot.Container && p.Slot.Slot == pick.Slot.Slot))
+                    continue;
+                sortPicks.Add(pick);
+                added++;
+            }
+
+            if (added > 0)
+                SortVersion++;
+            return added;
         }
 
         public void ClearSortPicks()
@@ -898,7 +931,7 @@ namespace Marketbuddy
 
         private bool OtherTaskRunning()
             => reprice.IsRunning || delist.IsRunning || tour.IsRunning || gui.Survey?.IsRunning == true ||
-               (quickLister?.PendingCount ?? 0) > 0;
+               (quickLister?.PendingCount ?? 0) > 0 || gui.BatchLister?.IsRunning == true;
 
         /// <summary>
         /// 快速上架（本外掛）與 AutoRetainer／TCToolbox 的快捷右鍵都掛在同一支開選單的函式上，
@@ -943,8 +976,16 @@ namespace Marketbuddy
             }
         }
 
+        /// <summary>讀指定容器（不是兵裝庫）給批次上架用，格子的樣子與 <see cref="TryReadSlot"/> 同一套。🔴 framework 執行緒限定。</summary>
+        internal static void CaptureContainers(InventoryType[] types, List<uint> loaded, List<VendorSellSlot> slots)
+        {
+            var inventoryManager = InventoryManager.Instance();
+            if (inventoryManager != null)
+                Capture(inventoryManager, types, false, loaded, slots);
+        }
+
         /// <summary>讀某一格現在的內容。回 false＝這一刻讀不到；回 true 而 <paramref name="slot"/> 為 null＝空格。</summary>
-        private static bool TryReadSlot(InventoryType type, short index, out VendorSellSlot? slot)
+        internal static bool TryReadSlot(InventoryType type, short index, out VendorSellSlot? slot)
         {
             slot = null;
             var inventoryManager = InventoryManager.Instance();
@@ -988,8 +1029,21 @@ namespace Marketbuddy
                 armory, needsConfirmation);
         }
 
+        /// <summary>僱員物品欄視窗（大／一般）的 addon id（右鍵選單的父視窗）；當幀沒開回 0。</summary>
+        internal static uint GetRetainerInventoryAddonId()
+        {
+            foreach (var name in RetainerInventoryAddonNames)
+            {
+                var addon = AddonHelpers.GetReadyAddon(name);
+                if (addon != null)
+                    return addon->Id;
+            }
+
+            return 0;
+        }
+
         /// <summary>背包視窗的 addon id（右鍵選單的父視窗）；沒開回 0。</summary>
-        private static uint GetInventoryAddonId()
+        internal static uint GetInventoryAddonId()
         {
             var agent = AgentInventory.Instance();
             var id = agent == null ? 0u : agent->AgentInterface.GetAddonId();

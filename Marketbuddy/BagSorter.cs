@@ -283,7 +283,7 @@ namespace Marketbuddy
         /// InventoryTools 製作清單上的道具（每份清單要做的成品，加上目前啟用那份清單還要從僱員取回的材料）。
         /// 對方沒裝、還沒好或擲例外就回空集合、<paramref name="ok"/>＝false，這一層略過、不擋分揀。
         /// </summary>
-        private static HashSet<uint> ReadProtectedIds(out bool ok)
+        internal static HashSet<uint> ReadProtectedIds(out bool ok)
         {
             var ids = new HashSet<uint>();
             ok = false;

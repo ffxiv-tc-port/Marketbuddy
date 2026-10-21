@@ -210,6 +210,12 @@ namespace Marketbuddy
                 return false;
             }
 
+            if (gui.BatchLister?.IsRunning == true)
+            {
+                reason = "batch listing is running".Loc();
+                return false;
+            }
+
             if (AutoRetainerBridge.IsBusy)
             {
                 reason = "AutoRetainer is busy (or MultiMode is enabled), stop it first".Loc();

@@ -42,6 +42,9 @@ namespace Marketbuddy
         /// <summary>背包分揀；只在使用者按下按鈕時讀背包。</summary>
         internal BagSorter? BagSorter { get; private set; }
 
+        /// <summary>批次上架；只在使用者按下按鈕時動。</summary>
+        internal BatchLister? BatchLister { get; private set; }
+
         internal ManualRequery ManualRequery { get; private set; }
 
         /// <summary>跨世界掛售價格巡檢（唯讀、只在使用者按下按鈕時才動）。</summary>
@@ -202,6 +205,15 @@ namespace Marketbuddy
                 VendorSeller = new VendorSeller(MarketGuiEventHandler, BatchReprice, BatchDelist, MultiTour, QuickLister);
                 MarketGuiEventHandler.VendorSeller = VendorSeller;
 
+                // 批次上架的選取也走 QuickLister 的 detour；QuickLister 是 null 時面板會說不能用。
+                BatchLister = new BatchLister(MarketGuiEventHandler, BatchReprice, BatchDelist, MultiTour, QuickLister,
+                    VendorSeller);
+                MarketGuiEventHandler.BatchLister = BatchLister;
+                VendorSeller.BatchLister = BatchLister;
+                MultiTour.BatchLister = BatchLister;
+                if (QuickLister != null)
+                    QuickLister.BatchLister = BatchLister;
+
                 // 低價下架紀錄在執行緒池上讀檔；背包分揀只訂閱 Framework.Update、按了按鈕才做事。
                 LowPriceDelistLedger.BeginLoad();
                 BagSorter = new BagSorter(VendorSeller);
@@ -256,6 +268,7 @@ namespace Marketbuddy
             Safe(() => PendingWorklist?.Dispose());
             Safe(() => LiveSellList?.Dispose());
             // 排在 QuickLister 之前：它呼叫的是 QuickLister 的右鍵選單路徑。
+            Safe(() => BatchLister?.Dispose());
             Safe(() => BagSorter?.Dispose());
             Safe(() => VendorSeller?.Dispose());
             Safe(() => QuickLister?.Dispose());

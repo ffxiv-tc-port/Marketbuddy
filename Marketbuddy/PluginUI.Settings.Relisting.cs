@@ -258,7 +258,36 @@ namespace Marketbuddy
                     .Loc());
             ImGui.PopStyleColor();
 
+            DrawBatchListSettings();
             DrawMultiCharacterSettings();
+        }
+
+        /// <summary>批次上架與全僱員補上架的開關。🔴 市場紅線：預設關、開著也只是多一個面板／按鈕，要按才動。</summary>
+        private void DrawBatchListSettings()
+        {
+            ImGui.Spacing();
+            if (ImGui.Checkbox("Show a batch listing panel next to the retainer sell list".Loc(),
+                    ref conf.BatchListEnabled))
+                conf.Save();
+
+            DrawNestIndicator(1);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "Off by default. Tick items in the panel and press the button: each stack is priced one at a time with the same market check and the same pricing rules as the relist (no parallel queries, the server spacing is kept), and only then put up for sale at that price through the game's own right-click \"Put Up for Sale\". Anything that would sell below the NPC price or below your minimum is not listed; items nobody is selling are skipped rather than listed at the cap. Nothing starts on its own, and ESC, Cancel, a right-click, a confirm key or AutoRetainer starting stops it."
+                    .Loc());
+            ImGui.PopStyleColor();
+
+            DrawNestIndicator(1);
+            if (ImGui.Checkbox("Offer \"Replenish all retainers\" next to the retainer list".Loc(),
+                    ref conf.ReplenishTourEnabled))
+                conf.Save();
+
+            DrawNestIndicator(2);
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(
+                "Off by default. Visits every retainer like the relist tour, relists what is already up, then fills free market slots from that retainer's own inventory - but only with the items you ticked for that retainer in the batch listing panel (open the sell list with \"Sell items in your retainer's inventory\" to tick them). Items just delisted on this visit are not put straight back up. Items below your thresholds stay in the retainer's inventory and are only mentioned in the summary. It is never part of the multi-character round."
+                    .Loc());
+            ImGui.PopStyleColor();
         }
 
         /// <summary>

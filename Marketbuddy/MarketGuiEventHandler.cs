@@ -48,6 +48,9 @@ namespace Marketbuddy
         /// <summary>Injected after construction; 下架回背包之後交給僱員賣給商店（只在使用者按下按鈕時動）。</summary>
         internal VendorSeller? VendorSeller { get; set; }
 
+        /// <summary>Injected after construction; 批次上架（只在使用者按下按鈕時動）。</summary>
+        internal BatchLister? BatchLister { get; set; }
+
         private IntPtr AddonRetainerSellList = IntPtr.Zero;
         private IntPtr AddonRetainerList = IntPtr.Zero;
         private IntPtr AddonItemSearchResult = IntPtr.Zero;
