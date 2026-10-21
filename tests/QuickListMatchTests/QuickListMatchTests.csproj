@@ -1,5 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
-    <!-- 離線情境測試：只編 QuickListMatch.cs 這一個純函式檔，不引用 Dalamud。
+    <!-- 離線情境測試：只編 QuickListMatch.cs 與 QuickListConfirmGate.cs 兩個純函式檔，不引用 Dalamud。
          不在 Marketbuddy.sln 裡，CI 只建 Marketbuddy/Marketbuddy.csproj，不會碰到它。
          執行方式寫在 Program.cs 開頭。 -->
     <PropertyGroup>
@@ -11,5 +11,6 @@
     </PropertyGroup>
     <ItemGroup>
         <Compile Include="../../Marketbuddy/QuickListMatch.cs" Link="QuickListMatch.cs" />
+        <Compile Include="../../Marketbuddy/QuickListConfirmGate.cs" Link="QuickListConfirmGate.cs" />
     </ItemGroup>
 </Project>

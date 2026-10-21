@@ -26,6 +26,7 @@ namespace Marketbuddy.Common
         //[PluginService] public static GameNetwork            _Network         { get; private set; } = null!;
         //[PluginService] public static Condition              _Conditions      { get; private set; } = null!;
         [PluginService] public static IKeyState Keys        { get; private set; } = null!;
+        [PluginService] public static IGamepadState Gamepad { get; private set; } = null!;
         [PluginService] public static IGameGui GameGui { get; private set; } = null!;
         [PluginService] public static IFramework Framework { get; private set; } = null!;
         [PluginService] public static IMarketBoard MarketBoard { get; private set; } = null!;

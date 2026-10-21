@@ -26,6 +26,11 @@ internal static class Program
         ReservationKeptWhileContainerUnloaded();
         TwoStacksOfSameItemGetTwoSlots();
         SiblingFromSameBagSlot();
+        GateWaitsForEarlierListing();
+        GateCapReached();
+        GateIgnoresOtherRetainerUnsentAndLater();
+        GateAbandonsOnUserEvent();
+        GateAbandonsOnHeldInput();
 
         Console.WriteLine($"QUICKLISTMATCH_DONE pass={passes} fail={failures}");
         return failures == 0 ? 0 : 1;
@@ -126,6 +131,85 @@ internal static class Program
             QuickListMatch.FindSiblingMatch(before9, RetainerA, 4848, source, T0, 10000) != null, "");
         Check("按鍵前超過 10 秒的不算",
             QuickListMatch.FindSiblingMatch(before11, RetainerA, 4848, source, T0, 10000) == null, "");
+    }
+
+    // 楓糖（實機）：引擎下架 → 金屬黃染劑確認 → 0.65 秒後楓糖的上架視窗開出，金屬黃染劑還沒出現在市場格。
+    // 逐幀模擬：金屬黃染劑在開窗後 400 ms 出現。改前開窗當幀就按（被吞的那種）；改後等它出現那一幀才按。
+    private static void GateWaitsForEarlierListing()
+    {
+        var setup = T0.AddMilliseconds(800);
+        var l1 = new InFlightListing(RetainerA, T0.AddMilliseconds(150), Sent: true);
+        var landedAt = setup.AddMilliseconds(400);
+
+        double? FirstConfirmMs(Func<InFlightListing[], DateTime, ConfirmGateVerdict> rule)
+        {
+            for (var ms = 0; ms <= 4000; ms += 16)
+            {
+                var now = setup.AddMilliseconds(ms);
+                InFlightListing[] inFlight = now < landedAt ? [l1] : [];
+                if (rule(inFlight, now) != ConfirmGateVerdict.Wait)
+                    return ms;
+            }
+
+            return null;
+        }
+
+        var after = FirstConfirmMs((f, now) => QuickListConfirmGate.Decide(f, RetainerA, setup, now, out _));
+        var legacy = FirstConfirmMs((_, _) => ConfirmGateVerdict.ConfirmNow);
+        Check("更早那筆出現的那一幀才按確認", after is >= 400 and < 416, $"after={after}");
+        Check("改前開窗當幀就按、那筆還在飛（負對照）", legacy == 0, $"legacy={legacy}");
+
+        var blocked = QuickListConfirmGate.Decide([l1], RetainerA, setup, setup, out var blocking);
+        Check("開窗當下回報擋住 1 筆", blocked == ConfirmGateVerdict.Wait && blocking == 1, $"{blocked} blocking={blocking}");
+        var none = QuickListConfirmGate.Decide([], RetainerA, setup, setup, out _);
+        Check("沒有在飛的上架：開窗當下就按（行為不變）", none == ConfirmGateVerdict.ConfirmNow, $"{none}");
+    }
+
+    private static void GateCapReached()
+    {
+        var l1 = new InFlightListing(RetainerA, T0, Sent: true);
+        var setup = T0.AddMilliseconds(500);
+        var before = QuickListConfirmGate.Decide([l1], RetainerA, setup, setup.AddMilliseconds(2999), out _);
+        var at = QuickListConfirmGate.Decide([l1], RetainerA, setup, setup.AddMilliseconds(3000), out var blocking);
+        Check("上限前一刻還在等", before == ConfirmGateVerdict.Wait, $"{before}");
+        Check("等到 3 秒上限照送", at == ConfirmGateVerdict.CapReached && blocking == 1, $"{at}");
+    }
+
+    private static void GateIgnoresOtherRetainerUnsentAndLater()
+    {
+        var setup = T0.AddSeconds(1);
+        var otherRetainer = QuickListConfirmGate.Decide([new InFlightListing(RetainerB, T0, true)], RetainerA, setup, setup, out _);
+        var unsent = QuickListConfirmGate.Decide([new InFlightListing(RetainerA, T0, false)], RetainerA, setup, setup, out _);
+        var later = QuickListConfirmGate.Decide([new InFlightListing(RetainerA, setup.AddMilliseconds(1), true)], RetainerA, setup,
+            setup.AddMilliseconds(5), out _);
+        var noRetainer = QuickListConfirmGate.Decide([new InFlightListing(0, T0, true)], 0, setup, setup, out _);
+        Check("別名僱員的上架不擋", otherRetainer == ConfirmGateVerdict.ConfirmNow, $"{otherRetainer}");
+        Check("沒按確認的那筆不擋下一筆", unsent == ConfirmGateVerdict.ConfirmNow, $"{unsent}");
+        Check("開始等之後才送出的不擋", later == ConfirmGateVerdict.ConfirmNow, $"{later}");
+        Check("認不得僱員不等", noRetainer == ConfirmGateVerdict.ConfirmNow, $"{noRetainer}");
+    }
+
+    // 數值照本 pin 的 AtkEventType：ButtonClick 25、MouseDown 3；250 是列舉外的未知值。
+    private static void GateAbandonsOnUserEvent()
+    {
+        Check("ButtonClick 放棄", QuickListConfirmGate.ShouldAbandonOnEvent(25), "");
+        Check("MouseDown 放棄", QuickListConfirmGate.ShouldAbandonOnEvent(3), "");
+        Check("未知值 250 放棄", QuickListConfirmGate.ShouldAbandonOnEvent(250), "");
+        Check("0 放棄", QuickListConfirmGate.ShouldAbandonOnEvent(0), "");
+        foreach (var hover in new byte[] { 5, 6, 7, 18, 19 })
+            Check($"懸停／焦點 {hover} 不放棄", !QuickListConfirmGate.ShouldAbandonOnEvent(hover), "");
+    }
+
+    // 手把遮罩照本 pin 的 GamepadButtons：South 0x20、DpadUp 0x1、R1 0x800；鍵碼 Return 13、NumPad0 96、Space 32、W 87。
+    private static void GateAbandonsOnHeldInput()
+    {
+        Check("沒有輸入不放棄", !QuickListConfirmGate.ShouldAbandonOnInput(0, []), "");
+        foreach (ushort mask in new ushort[] { 0x20, 0x1, 0x800, 0x8000 })
+            Check($"手把 0x{mask:X} 按著放棄", QuickListConfirmGate.ShouldAbandonOnInput(mask, []), "");
+        foreach (var key in new[] { 13, 96, 32 })
+            Check($"鍵 {key} 按著放棄", QuickListConfirmGate.ShouldAbandonOnInput(0, [key]), "");
+        Check("W 按著不放棄", !QuickListConfirmGate.ShouldAbandonOnInput(0, [87]), "");
+        Check("W 與 Return 一起按著放棄", QuickListConfirmGate.ShouldAbandonOnInput(0, [87, 13]), "");
     }
 
     // 改前 QuickLister.PumpListingWatches 的比對：確認前有東西的格一律排除、只看佇列認領。
