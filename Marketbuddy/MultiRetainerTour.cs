@@ -331,6 +331,9 @@ namespace Marketbuddy
 
         public void CancelByButton() => Abort("cancelled by user".Loc());
 
+        /// <summary>全艦隊急停：同取消按鈕，只換原因。沒在跑就什麼都不做。</summary>
+        internal void EmergencyStop(string reason) => Abort(reason);
+
         /// <summary>
         /// 這個角色目前所有可用的僱員（**不看有沒有掛單**）。
         /// ⚠️ 只在 <c>IsReady</c> 時回傳資料：設定視窗隨時可以開（包括還沒登入時），

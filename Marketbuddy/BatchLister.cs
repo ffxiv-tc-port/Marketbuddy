@@ -529,6 +529,9 @@ namespace Marketbuddy
 
         public void CancelByButton() => Stop("cancelled by user".Loc(), BatchListEnd.Stopped);
 
+        /// <summary>全艦隊急停：同取消按鈕，只換原因（在途那一件交給使用者）。沒在跑就什麼都不做。</summary>
+        internal void EmergencyStop(string reason) => Stop(reason, BatchListEnd.Stopped);
+
         /// <summary>
         /// 使用者（或別的插件）介入。只記下來，下一個 Framework.Update 才真的停：
         /// 呼叫端是右鍵選單 hook 與上架視窗的事件處理，停的時候要撤待處理項、取消引擎查價，不在那個堆疊上做。

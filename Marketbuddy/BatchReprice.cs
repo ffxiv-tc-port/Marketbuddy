@@ -786,6 +786,9 @@ namespace Marketbuddy
 
         public void CancelByButton() => Cancel("cancelled by user".Loc());
 
+        /// <summary>全艦隊急停：同取消按鈕，只換原因。沒在跑就什麼都不做。</summary>
+        internal void EmergencyStop(string reason) => Cancel(reason);
+
         private void Cancel(string reason) => queue.Abort(reason);
 
         private void OnFrameworkUpdate(IFramework framework)

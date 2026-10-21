@@ -81,6 +81,9 @@ namespace Marketbuddy
         /// </summary>
         private MarketRequestResultProbe? requestResultProbe;
 
+        /// <summary>全艦隊急停端點；建構子跑到最後才建立，之前失敗時為 null。</summary>
+        private FleetStopIpc? fleetStopIpc;
+
         /// <summary>
         /// ReleaseAll() 的冪等旗標。初始化失敗路徑與 Dalamud 的 Dispose() 都會呼叫它。
         /// </summary>
@@ -229,6 +232,15 @@ namespace Marketbuddy
                 PluginInterface.UiBuilder.OpenConfigUi += DrawConfigUi;
                 IPCManager.Init();
 
+                // 急停端點建不起來只少這一個入口，其餘功能照常。
+                try
+                {
+                    fleetStopIpc = new FleetStopIpc(this);
+                }
+                catch (Exception e)
+                {
+                    Log.Error(e, "Marketbuddy: 全艦隊急停端點（Marketbuddy.StopAll）註冊失敗，其餘功能照常");
+                }
             }
             catch (Exception e)
             {
@@ -257,6 +269,7 @@ namespace Marketbuddy
                 return;
             released = true;
 
+            Safe(() => fleetStopIpc?.Dispose());
             Safe(() => IPCManager.Shutdown());
             Safe(() => PluginInterface.UiBuilder.Draw -= DrawUi);
             Safe(() => PluginInterface.UiBuilder.OpenConfigUi -= DrawConfigUi);

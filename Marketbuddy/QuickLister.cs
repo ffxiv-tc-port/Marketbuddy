@@ -650,6 +650,45 @@ namespace Marketbuddy
         }
 
         /// <summary>
+        /// 全艦隊急停：還沒開窗的待處理項全撤、延後確認中的窗交給使用者、掛在上限價等定價的不再交給引擎（聊天講是哪幾件）。
+        /// 已經按了確認的那一件照常等它出現，不再碰窗。只在框架執行緒呼叫。
+        /// </summary>
+        /// <returns>撤掉或交出去的件數。</returns>
+        internal int EmergencyStop(string reason)
+        {
+            var released = pendingMenuSelects.Count;
+            pendingMenuSelects.Clear();
+            if (deferredConfirm is { } deferred)
+            {
+                AbandonDeferredConfirm(deferred, reason, handOver: true);
+                released++;
+            }
+
+            foreach (var watch in watches)
+            {
+                if (!watch.NeedsReprice)
+                    continue;
+                watch.NeedsReprice = false;
+                released++;
+                ChatGui.PrintError("[Marketbuddy] ??: left at the price cap (??) because of the emergency stop - reprice it manually!"
+                    .Loc(watch.Name, Configuration.MAX_PRICE));
+            }
+
+            foreach (var entry in repriceQueue)
+            {
+                claimedSlots.Remove(entry.Slot);
+                released++;
+                ChatGui.PrintError("[Marketbuddy] ??: left at the price cap (??) because of the emergency stop - reprice it manually!"
+                    .Loc(entry.Name, Configuration.MAX_PRICE));
+            }
+
+            repriceQueue.Clear();
+            if (released > 0)
+                Log.Information($"QuickLister: 急停（{reason}），撤掉或交出 {released} 件快速上架待處理項");
+            return released;
+        }
+
+        /// <summary>
         /// 替 <see cref="VendorSeller"/> 打開某一格的右鍵選單並選「委託僱員出售物品」。
         /// 🔑 選取發生在同一個呼叫堆疊裡的 detour：原生端剛開好選單，走的是與快速上架相同的守衛與送出路徑。
         /// </summary>
