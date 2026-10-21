@@ -93,6 +93,30 @@ namespace Marketbuddy
         /// <summary>Key codes offered in the settings combo (VirtualKey values; 0 = disabled).</summary>
         public static readonly int[] SelectableKeyCodes = [0, 0x10 /* SHIFT */, 0x11 /* CTRL */, 0x12 /* ALT */];
 
+        private static readonly VirtualKey[] ModifierGroups = [VirtualKey.SHIFT, VirtualKey.CONTROL, VirtualKey.MENU];
+
+        /// <summary>Shift／Ctrl／Alt（含左右鍵）歸到通用鍵碼；其他鍵回 0。</summary>
+        private static int ModifierGroup(int vk) => vk switch
+        {
+            0x10 or 0xA0 or 0xA1 => 0x10,
+            0x11 or 0xA2 or 0xA3 => 0x11,
+            0x12 or 0xA4 or 0xA5 => 0x12,
+            _ => 0,
+        };
+
+        /// <summary>Shift／Ctrl／Alt 中，<paramref name="ownKeyCode"/> 那一組以外的有沒有按著。</summary>
+        private static bool OtherModifierHeld(int ownKeyCode)
+        {
+            var own = ModifierGroup(ownKeyCode);
+            foreach (var group in ModifierGroups)
+            {
+                if ((int)group != own && Keys[group])
+                    return true;
+            }
+
+            return false;
+        }
+
         private static readonly InventoryType[] CanSellFrom =
         [
             InventoryType.Inventory1,
@@ -410,6 +434,13 @@ namespace Marketbuddy
                 return;
             if (!Keys[(VirtualKey)conf.QuickListKeyCode])
                 return;
+            // AutoRetainer 快捷出售與 TCToolbox 轉移也在同一支開選單函式上、用修飾鍵觸發；兩邊同時選會打在關閉中的選單上。
+            // ⇒ 同時還按著 Shift／Ctrl／Alt 中其他的（不算自己那一組）就不快速上架。
+            if (OtherModifierHeld(conf.QuickListKeyCode))
+            {
+                Log.Debug($"QuickLister: 快速上架鍵有按，但同時按著其他修飾鍵，不動作（{inventoryType}#{slot}）");
+                return;
+            }
             // Deliberately NOT gated on engine.IsRunning: listing item #2 must not wait
             // for item #1's headless reprice to finish. BatchReprice's own abort checks
             // read IsCapListingInFlight to avoid mistaking this window for a manual price
