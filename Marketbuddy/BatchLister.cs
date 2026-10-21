@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using Dalamud.Game.ClientState.Keys;
 using Dalamud.Game.Text;
 using Dalamud.Plugin.Services;
@@ -928,7 +929,10 @@ namespace Marketbuddy
             return false;
         }
 
-        /// <summary>修飾鍵或快速上架鍵按著時，別的插件（AutoRetainer、TCToolbox）可能在同一個選單上選別的項目：等放開。</summary>
+        /// <summary>
+        /// 別的插件（AutoRetainer 的快捷出售、TCToolbox 的轉移）也掛在同一支開選單的函式上，按住它們的鍵時會在同一個選單上選別的項目；
+        /// 它們的鍵可以設成任何鍵（含滑鼠側鍵）⇒ 除了 Dalamud 看得到的修飾鍵，還要確認沒有任何實體按鍵按著。按著就等。
+        /// </summary>
         private bool KeysHeld(out string what)
         {
             what = string.Empty;
@@ -940,8 +944,27 @@ namespace Marketbuddy
                 return true;
             }
 
-            return false;
+            var held = FirstHeldPhysicalKey();
+            if (held == 0)
+                return false;
+            what = "release every key and mouse button to carry on (??)".Loc((VirtualKey)held);
+            return true;
         }
+
+        /// <summary>第一個實體上按著的虛擬鍵碼（含滑鼠鍵）；都沒按回 0。只看最高位元（現在按著），不看切換狀態。</summary>
+        private static int FirstHeldPhysicalKey()
+        {
+            for (var vk = 0x01; vk <= 0xFE; vk++)
+            {
+                if ((GetAsyncKeyState(vk) & 0x8000) != 0)
+                    return vk;
+            }
+
+            return 0;
+        }
+
+        [DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int vKey);
 
         private static uint OwnerAddonId(BatchListSource source) => source == BatchListSource.PlayerBags
             ? VendorSeller.GetInventoryAddonId()
