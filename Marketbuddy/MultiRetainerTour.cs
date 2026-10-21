@@ -16,6 +16,12 @@ namespace Marketbuddy
 
         /// <summary>全僱員下架（<see cref="BatchDelist"/>）。</summary>
         Delist,
+
+        /// <summary>
+        /// 全僱員補上架：每名僱員先重掛，再從他自己的物品欄補上架（<see cref="BatchLister"/>，只補使用者替他勾過的道具）。
+        /// 🔴 只由使用者按鈕開始；不掛進 <see cref="MultiCharacterTour"/>。
+        /// </summary>
+        Replenish,
     }
 
     /// <summary>
@@ -49,7 +55,16 @@ namespace Marketbuddy
         {
             public bool SkipRemainingSteps;
             public bool BatchStarted;
+
+            /// <summary>補上架：出售品視窗開了之後僱員物品欄視窗也就緒了。</summary>
+            public bool RetainerBagReady;
+
+            public DateTime SellListOpenedAt = DateTime.MinValue;
+            public bool ReplenishStarted;
         }
+
+        private const int RetainerBagWaitMs = 5000;
+        private const int ReplenishWatchdogSeconds = 900;
 
         private readonly MarketGuiEventHandler gui;
         private readonly BatchReprice repriceEngine;
@@ -88,6 +103,7 @@ namespace Marketbuddy
 
         // Aggregated stats for the final summary.
         private int totalRepriced, totalSkipped, totalDelisted, totalFailed, totalNeedsPricing, retainersDone;
+        private int totalReplenished, totalReplenishKept, totalReplenishSkipped;
 
         public bool IsRunning => queue.IsRunning;
 
@@ -174,6 +190,28 @@ namespace Marketbuddy
                 return false;
             }
 
+            if (mode == TourMode.Replenish)
+            {
+                if (!Configuration.GetOrLoad().ReplenishTourEnabled)
+                {
+                    reason = "the feature is turned off in /mbuddy".Loc();
+                    return false;
+                }
+
+                // 多角色巡迴是 AutoRetainer 叫號驅動的接手鏈：補上架刻意不在那裡面跑。
+                if (AutoRetainerBridge.ExternalDriveActive)
+                {
+                    reason = "not available while AutoRetainer hands over a character".Loc();
+                    return false;
+                }
+
+                if (BatchLister?.IsAvailable != true)
+                {
+                    reason = "the right-click menu hook is not available".Loc();
+                    return false;
+                }
+            }
+
             if (!gui.IsRetainerListOpen)
             {
                 reason = "retainer list is not open".Loc();
@@ -188,11 +226,13 @@ namespace Marketbuddy
             }
 
             var applySkipList = mode == TourMode.Delist;
-            if (CollectTargets(applySkipList).Count == 0)
+            if (CollectTargets(applySkipList, mode).Count == 0)
             {
                 // 🔑 「大家都沒東西掛」跟「有東西掛但全被你的跳過名單擋掉了」是**兩件事**，
                 // 講成同一句會讓使用者去找一個根本不存在的問題。名單擋掉的時候要指名是名單。
-                reason = applySkipList && CollectTargets(false).Count > 0
+                reason = mode == TourMode.Replenish
+                    ? "no retainer has listings or items ticked to replenish".Loc()
+                    : applySkipList && CollectTargets(false).Count > 0
                     ? "every retainer with listings is on your skip list".Loc()
                     : "no retainer has market listings".Loc();
                 return false;
@@ -217,7 +257,8 @@ namespace Marketbuddy
                 return;
             }
 
-            var sellEntryText = GetAddonSheetText(2380);  // 出售（玩家所持物品）
+            // 出售（玩家所持物品）／補上架改選出售（僱員所持物品）：右鍵的來源是僱員物品欄。
+            var sellEntryText = GetAddonSheetText(mode == TourMode.Replenish ? 2381u : 2380u);
             var quitEntryText = GetAddonSheetText(2383);  // 讓僱員返回
             if (sellEntryText.Length == 0 || quitEntryText.Length == 0)
             {
@@ -226,7 +267,7 @@ namespace Marketbuddy
             }
 
             var isDelist = mode == TourMode.Delist;
-            var targets = CollectTargets(isDelist);
+            var targets = CollectTargets(isDelist, mode);
             // 被使用者的跳過名單擋掉的僱員數（重掛巡迴一律 0，名單不作用在它身上）。
             var skippedRetainers = isDelist ? CollectTargets(false).Count - targets.Count : 0;
             Mode = mode;
@@ -234,6 +275,7 @@ namespace Marketbuddy
             CurrentRetainerNumber = 0;
             CurrentRetainerName = string.Empty;
             totalRepriced = totalSkipped = totalDelisted = totalFailed = totalNeedsPricing = retainersDone = 0;
+            totalReplenished = totalReplenishKept = totalReplenishSkipped = 0;
             aborting = false;
             tourStoppedForSpace = false;
 
@@ -261,6 +303,9 @@ namespace Marketbuddy
                     () => TickEnterSellList(ctx, sellEntryText));
                 queue.Enqueue($"batch {target.Name}", TimeSpan.FromSeconds(BatchWatchdogSeconds),
                     () => TickRunBatch(target, ctx));
+                if (mode == TourMode.Replenish)
+                    queue.Enqueue($"replenish {target.Name}", TimeSpan.FromSeconds(ReplenishWatchdogSeconds),
+                        () => TickReplenish(target, ctx));
                 queue.Enqueue($"leave {target.Name}", TimeSpan.FromSeconds(NavStepWatchdogSeconds),
                     () => TickLeaveRetainer(ctx, quitEntryText));
             }
@@ -270,9 +315,12 @@ namespace Marketbuddy
             AutoRetainerBridge.AcquireSuppression("multi-retainer tour");
             suppressionHeld = true;
 
-            ChatGui.Print(mode == TourMode.Delist
-                ? "[Marketbuddy] Delisting all retainers: ?? to visit...".Loc(targets.Count)
-                : "[Marketbuddy] Relisting all retainers: ?? to visit...".Loc(targets.Count));
+            ChatGui.Print(mode switch
+            {
+                TourMode.Delist => "[Marketbuddy] Delisting all retainers: ?? to visit...".Loc(targets.Count),
+                TourMode.Replenish => "[Marketbuddy] Relisting and replenishing all retainers: ?? to visit...".Loc(targets.Count),
+                _ => "[Marketbuddy] Relisting all retainers: ?? to visit...".Loc(targets.Count),
+            });
 
             // ⚠️ 名單擋掉人的時候要當場說幾個，而且是在**開跑訊息旁邊**：
             // 「怎麼少跑了一個僱員」是這個功能最可能被誤認成 bug 的地方。
@@ -333,12 +381,13 @@ namespace Marketbuddy
         /// 那些高價品，重掛也跳過的話它們就再也不會跟著市場調價，等於為了保護反而
         /// 讓它們永遠掛在過時的價格上。
         /// </param>
-        private static List<RetainerTarget> CollectTargets(bool applySkipList)
+        /// <param name="mode">補上架時，沒掛東西但有勾可補上架道具、市場還有空位的僱員也要去。</param>
+        private static List<RetainerTarget> CollectTargets(bool applySkipList, TourMode mode = TourMode.Reprice)
         {
             var targets = new List<RetainerTarget>();
             foreach (var retainer in EnumerateRetainers())
             {
-                if (retainer.Listed == 0)
+                if (retainer.Listed == 0 && !(mode == TourMode.Replenish && WantsReplenish(retainer.RetainerId, 0)))
                     continue;
                 if (applySkipList && IsSkippedByUser(retainer.RetainerId))
                     continue;
@@ -354,6 +403,10 @@ namespace Marketbuddy
         /// 而 <see cref="CanStart"/> 只給得出一句已經在地化的原因字串，比對字串會很脆。
         /// </summary>
         internal static int CountRetainersWithListings() => CollectTargets(false).Count;
+
+        /// <summary>補上架要不要去這名僱員：市場還有空位，而且使用者替他勾過道具。</summary>
+        private static bool WantsReplenish(ulong retainerId, int listed)
+            => listed < RetainerMarketPrice.SlotCount && BatchLister.HasReplenishPicks(retainerId);
 
         /// <summary>
         /// 僱員資料讀得到了沒有。
@@ -385,7 +438,8 @@ namespace Marketbuddy
             // engine applies its own guards; an engine abort surfaces through
             // OnEngineBatchAborted and stops the tour.
             var engine = ActiveEngine;
-            if (!engine.IsRunning)
+            // 補上架那一步由批次上架自己守（ESC、IPC 鎖、AutoRetainer、不屬於它的上架視窗都會讓它停）。
+            if (!engine.IsRunning && BatchLister?.IsRunning != true)
             {
                 if (Keys[VirtualKey.ESCAPE])
                 {
@@ -426,7 +480,9 @@ namespace Marketbuddy
 
             var retainerManager = RetainerManager.Instance();
             var retainer = retainerManager == null ? null : retainerManager->GetRetainerBySortedIndex(target.SortedIndex);
-            if (retainer == null || retainer->RetainerId != target.RetainerId || retainer->MarketItemCount == 0)
+            if (retainer == null || retainer->RetainerId != target.RetainerId ||
+                (retainer->MarketItemCount == 0 &&
+                 !(Mode == TourMode.Replenish && WantsReplenish(target.RetainerId, 0))))
             {
                 // Retainer list changed since the tour started: skip this one.
                 ctx.SkipRemainingSteps = true;
@@ -455,7 +511,25 @@ namespace Marketbuddy
                 return TickTaskResult.Done;
 
             if (gui.IsRetainerSellListOpen)
+            {
+                if (Mode != TourMode.Replenish)
+                    return TickTaskResult.Done;
+
+                // A3：「出售（僱員所持物品）」會一起開出僱員物品欄視窗。等不到就這名僱員只重掛。
+                var now = DateTime.UtcNow;
+                if (ctx.SellListOpenedAt == DateTime.MinValue)
+                    ctx.SellListOpenedAt = now;
+                if (VendorSeller.GetRetainerInventoryAddonId() != 0)
+                {
+                    ctx.RetainerBagReady = true;
+                    return TickTaskResult.Done;
+                }
+
+                if ((now - ctx.SellListOpenedAt).TotalMilliseconds < RetainerBagWaitMs)
+                    return TickTaskResult.Continue;
+                Log.Information($"[BatchList] 全僱員補上架：出售品視窗開了 {RetainerBagWaitMs / 1000} 秒僱員物品欄視窗都沒就緒，這名僱員只重掛");
                 return TickTaskResult.Done;
+            }
 
             if (TryAdvanceTalk())
                 return TickTaskResult.Continue;
@@ -478,6 +552,10 @@ namespace Marketbuddy
             var engine = ActiveEngine;
             if (!ctx.BatchStarted)
             {
+                // 補上架：這名僱員一件都沒掛就沒有東西要重掛，直接去補。
+                if (Mode == TourMode.Replenish && CurrentMarketItemCount() == 0)
+                    return TickTaskResult.Done;
+
                 engineBatchAborted = false;
                 engineAbortReason = string.Empty;
                 engine.Start();
@@ -486,7 +564,8 @@ namespace Marketbuddy
                     // Could not start (e.g. nothing listed after all): count as
                     // visited with no work and move on to leaving.
                     ChatGui.Print("[Marketbuddy] ??: batch did not start, moving on".Loc(target.Name));
-                    retainersDone++;
+                    if (Mode != TourMode.Replenish)
+                        retainersDone++;
                     return TickTaskResult.Done;
                 }
 
@@ -518,8 +597,65 @@ namespace Marketbuddy
                 return TickTaskResult.Continue; // queue is already cleared by Abort
             }
 
+            if (Mode != TourMode.Replenish)
+                retainersDone++;
+            return TickTaskResult.Done;
+        }
+
+        /// <summary>
+        /// 補上架這名僱員：只補使用者替他勾過、現在在他物品欄裡的道具，扣掉這一趟重掛剛下架回來的。
+        /// 市場滿了、沒有候選、物品欄視窗沒開、選單沒有「到市場出售」＝換下一名；其餘停下的原因整趟停。
+        /// </summary>
+        private TickTaskResult TickReplenish(RetainerTarget target, RetainerContext ctx)
+        {
+            if (ctx.SkipRemainingSteps)
+                return TickTaskResult.Done;
+            var lister = BatchLister;
+            if (!ctx.ReplenishStarted)
+            {
+                ctx.ReplenishStarted = true;
+                if (lister == null || !ctx.RetainerBagReady)
+                {
+                    retainersDone++;
+                    return TickTaskResult.Done;
+                }
+
+                var exclude = new HashSet<VendorSellKey>(repriceEngine.DelistedThisBatch);
+                var picks = lister.ReplenishPicksFor(target.RetainerId, exclude);
+                picks.RemoveAll(p => RetainerDelistLedger.HasRecent(target.RetainerId, p.Slot.Key.ItemId, p.Slot.Key.Hq));
+                if (picks.Count == 0 || !lister.Start(picks, BatchListSource.RetainerBags, forTour: true))
+                {
+                    Log.Information($"[BatchList] 全僱員補上架：{target.Name} 沒有可補的道具（或沒有開始），換下一名");
+                    retainersDone++;
+                    return TickTaskResult.Done;
+                }
+
+                return TickTaskResult.Continue;
+            }
+
+            if (lister == null || lister.IsRunning)
+                return TickTaskResult.Continue;
+
+            totalReplenished += lister.ListedCount;
+            totalReplenishKept += lister.BelowThresholdKept;
+            totalReplenishSkipped += lister.SkippedCount - lister.BelowThresholdKept;
+            if (lister.End == BatchListEnd.Stopped)
+            {
+                Abort(lister.EndReason.Length > 0 ? lister.EndReason : "batch aborted".Loc());
+                return TickTaskResult.Continue;
+            }
+
+            if (lister.End == BatchListEnd.NextRetainer)
+                ChatGui.Print("[Marketbuddy] ??: could not replenish (??), moving on".Loc(target.Name, lister.EndReason));
             retainersDone++;
             return TickTaskResult.Done;
+        }
+
+        private static int CurrentMarketItemCount()
+        {
+            var retainerManager = RetainerManager.Instance();
+            var active = retainerManager == null ? null : retainerManager->GetActiveRetainer();
+            return active == null ? -1 : active->MarketItemCount;
         }
 
         private TickTaskResult TickLeaveRetainer(RetainerContext ctx, string quitEntryText)
@@ -682,6 +818,8 @@ namespace Marketbuddy
                     .Loc(reason, retainersDone, totalDelisted, totalFailed)
                 : "[Marketbuddy] Tour cancelled: ?? (?? retainer(s) done: ?? repriced, ?? skipped, ?? delisted, ?? failed)"
                     .Loc(reason, retainersDone, totalRepriced, totalSkipped, totalDelisted, totalFailed));
+            if (Mode == TourMode.Replenish)
+                PrintReplenishSummary();
             if (AutoRetainerBridge.IsBusy)
             {
                 AutoRetainerBridge.ArmAvailabilityNotice();
@@ -689,6 +827,14 @@ namespace Marketbuddy
             }
 
             TourAborted?.Invoke(reason);
+        }
+
+        private void PrintReplenishSummary()
+        {
+            Log.Information(
+                $"[BatchList] 全僱員補上架：上架 {totalReplenished}、低於門檻留在僱員物品欄 {totalReplenishKept}、跳過 {totalReplenishSkipped}");
+            ChatGui.Print("[Marketbuddy] Replenished from retainer inventories: ?? listed, ?? kept (below your thresholds), ?? skipped"
+                .Loc(totalReplenished, totalReplenishKept, totalReplenishSkipped));
         }
 
         private void OnQueueCompleted()
@@ -706,6 +852,8 @@ namespace Marketbuddy
                     ChatGui.PrintError(
                         "[Marketbuddy] ?? item(s) have no market data and are still listed at the price cap - price them by hand."
                             .Loc(totalNeedsPricing));
+                if (Mode == TourMode.Replenish)
+                    PrintReplenishSummary();
 
                 // 純通知，零行為：整輪重掛跑完才響這一聲（途中每個僱員各自的批次收尾被
                 // BatchReprice.ExternalDriverActive 擋掉了）。下架巡迴不響——那不是「重掛跑完」。

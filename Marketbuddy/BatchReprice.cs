@@ -266,6 +266,11 @@ namespace Marketbuddy
         /// <summary>這一輪是 <see cref="StartPriceProbe"/> 開的：不發收尾通知、不動顯示用的格號與待處理清單。</summary>
         private bool probeBatch;
 
+        private readonly HashSet<VendorSellKey> delistedThisBatch = new();
+
+        /// <summary>上一輪重掛（不含只查價）下架掉的道具；全僱員補上架靠它不把剛下架的又掛回去。</summary>
+        public IReadOnlySet<VendorSellKey> DelistedThisBatch => delistedThisBatch;
+
         private long probeToken;
         private PriceProbeResult? lastProbe;
 
@@ -715,6 +720,8 @@ namespace Marketbuddy
 
             // 這一批要重新判定的格子先從「停在上限價」清單移掉；真的還是查不到行情時
             // HandleNoListings 會把它加回來。下架批次不動它——下架沒成功的那幾件還在板上。
+            if (!delistOnly && !jobs.Exists(j => j.ProbeOnly))
+                delistedThisBatch.Clear();
             if (!delistOnly)
             {
                 foreach (var job in jobs)
@@ -1812,6 +1819,7 @@ namespace Marketbuddy
             // 記進「我方下架」的短期帳：僱員銷售紀錄靠它把這一格的消失跟真正的賣出分開。
             // 只是記錄，記漏了最壞的結果是那一列變成低信心（見 RetainerDelistLedger）。
             RetainerDelistLedger.Note(CurrentBatchRetainerId, job.ItemId, job.IsHq, (int)quantity);
+            delistedThisBatch.Add(new VendorSellKey(job.ItemId, job.IsHq));
             if (vendorTracked && vendorCause is { } cause)
                 gui.VendorSeller?.NoteDelisted(job.ItemId, job.IsHq, (int)quantity, cause, job.VendorUnitPrice, job.Name);
             if (vendorCause != null)

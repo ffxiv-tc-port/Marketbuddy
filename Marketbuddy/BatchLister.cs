@@ -148,6 +148,9 @@ namespace Marketbuddy
         public int VendorQueuedCount { get; private set; }
         public int SkippedCount => Skipped.Count;
 
+        /// <summary>低於門檻、留在僱員物品欄沒上架的疊數（也算在 <see cref="SkippedCount"/> 裡）。</summary>
+        public int BelowThresholdKept { get; private set; }
+
         /// <summary>這一次（或上一次）跳過的道具與原因。</summary>
         public List<(string Name, string Reason)> Skipped { get; } = new();
 
@@ -498,6 +501,7 @@ namespace Marketbuddy
             jobs[0].PhaseStartedUtc = DateTime.UtcNow;
             ListedCount = 0;
             VendorQueuedCount = 0;
+            BelowThresholdKept = 0;
             Skipped.Clear();
             End = BatchListEnd.None;
             EndReason = string.Empty;
@@ -719,6 +723,7 @@ namespace Marketbuddy
                 }
             }
 
+            BelowThresholdKept++;
             Skip(job, "below your threshold (??), left where it is".Loc(result.Note));
         }
 

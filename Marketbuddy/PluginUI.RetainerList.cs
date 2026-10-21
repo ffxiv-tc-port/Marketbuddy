@@ -54,6 +54,8 @@ namespace Marketbuddy
             else
             {
                 DrawTourStartButton(tour);
+                if (conf.ReplenishTourEnabled)
+                    DrawReplenishTourButton(tour);
                 DrawDelistTourButton(tour);
             }
 
@@ -108,7 +110,18 @@ namespace Marketbuddy
 
             // 巡迴此刻驅動的引擎——重掛與下架是兩個不同的物件，不能寫死其中一個。
             var engine = tour.ActiveEngine;
-            if (engine.IsRunning)
+            if (marketbuddy.BatchLister is { IsRunning: true } lister)
+            {
+                var current = Math.Min(lister.FinishedJobs + 1, lister.TotalJobs);
+                ImGui.TextUnformatted(ProgressText("Listing ??/??: ??", current, lister.TotalJobs, lister.CurrentItemName));
+                if (lister.WaitingFor.Length > 0)
+                {
+                    ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+                    ImGui.TextUnformatted(lister.WaitingFor);
+                    ImGui.PopStyleColor();
+                }
+            }
+            else if (engine.IsRunning && !(engine is BatchReprice { IsProbeRunning: true }))
             {
                 var currentIndex = Math.Min(engine.ProcessedSlots + 1, engine.TotalSlots);
                 ImGui.TextUnformatted(ProgressText(tour.Mode == TourMode.Delist
@@ -148,6 +161,34 @@ namespace Marketbuddy
             else if (ImGui.IsItemHovered())
             {
                 ImGui.SetTooltip(PricingRuleText());
+            }
+        }
+
+        /// <summary>
+        /// 全僱員補上架：一段式（與重掛巡迴一致）。每名僱員先重掛，再只補使用者在批次上架面板替他勾過的道具。
+        /// </summary>
+        private void DrawReplenishTourButton(MultiRetainerTour tour)
+        {
+            var canStart = tour.CanStart(TourMode.Replenish, out var reason);
+            var disabled = !canStart && !AutoRetainerBridge.IsBusy;
+            if (disabled)
+                ImGui.BeginDisabled();
+            if (ImGui.Button(DrawText.Concat("Relist and replenish all retainers".Loc(), "##mbreplenishstart")))
+                tour.Start(TourMode.Replenish);
+            if (disabled)
+            {
+                ImGui.EndDisabled();
+                if (!string.IsNullOrEmpty(reason) && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                {
+                    using var tooltipAlpha = new ImRaii.Style().Push(ImGuiStyleVar.Alpha, 1f);
+                    ImGui.SetTooltip(reason);
+                }
+            }
+            else if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(
+                    "Relists every retainer like the button above, then fills that retainer's free market slots from its own inventory - only with the items you ticked for that retainer in the batch listing panel, each priced first. Items below your thresholds stay in the retainer's inventory. ESC, Cancel or any confirm key stops it."
+                        .Loc());
             }
         }
 

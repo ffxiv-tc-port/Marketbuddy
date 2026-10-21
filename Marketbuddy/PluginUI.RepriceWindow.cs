@@ -119,6 +119,9 @@ namespace Marketbuddy
         private void DrawBatchRepriceRow()
         {
             var engine = marketbuddy.BatchReprice;
+            // 批次上架借引擎查價：進度由批次上架那一段畫，這裡不畫成「重掛中」。
+            if (engine.IsProbeRunning || marketbuddy.BatchLister?.IsRunning == true)
+                return;
             if (engine.IsRunning)
             {
                 var currentIndex = Math.Min(engine.ProcessedSlots + 1, engine.TotalSlots);

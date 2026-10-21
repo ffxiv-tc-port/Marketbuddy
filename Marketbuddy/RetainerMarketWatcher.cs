@@ -111,6 +111,16 @@ namespace Marketbuddy
             }
         }
 
+        /// <summary>帳上有沒有這名僱員這件道具還沒過期的下架（只看、不認領）。</summary>
+        internal static bool HasRecent(ulong retainerId, uint itemId, bool hq)
+        {
+            lock (Gate)
+            {
+                Prune();
+                return Entries.Exists(e => e.RetainerId == retainerId && e.ItemId == itemId && e.Hq == hq);
+            }
+        }
+
         /// <summary>
         /// 認領最多 <paramref name="wanted"/> 件。回傳真的被這本帳解釋掉的件數。
         /// 認領掉的部分會從帳上扣除，不會被第二次快照重複認領。
