@@ -363,6 +363,16 @@ namespace Marketbuddy
                     continue;
                 }
 
+                // 市場滿了遊戲不開上架視窗，送出去只會白等到逾時。讀不到容器時照舊送（fail-open）。
+                if (TryReadFullMarket(out var occupiedSlots, out var marketCapacity))
+                {
+                    var fullName = ResolveItemName(item, out _);
+                    ChatGui.PrintError("[Marketbuddy] ??: this retainer's market is full (?? slots) - not listed".Loc(fullName, marketCapacity));
+                    WriteDiag("市場已滿未送出", item->ItemId, fullName,
+                        $"原因=送出前讀到這名僱員的市場已佔 {occupiedSlots}/上限 {marketCapacity}，沒有選出售");
+                    return;
+                }
+
                 // 守衛要在建立呼叫端狀態**之前**問，因為底下那發 callback 可能同步
                 // 開出 RetainerSell，待處理項必須先排好。CanPress 只問不記，
                 // 同一幀同一執行緒接著呼叫的 TryPress 一定得到相同答案。
@@ -927,6 +937,34 @@ namespace Marketbuddy
             }
 
             return $"已佔 {occupied}/上限 {container->Size}（僱員資料報 {retainerCount}）";
+        }
+
+        /// <summary>
+        /// 目前這名僱員的市場容器已載入且已佔 ≥ 上限才回 true。不在僱員身上、容器沒載入、
+        /// 上限讀不到一律回 false（照舊送出）。只在呼叫當幀讀，不保存指標。
+        /// </summary>
+        private static bool TryReadFullMarket(out int occupied, out int capacity)
+        {
+            occupied = 0;
+            capacity = 0;
+            if (CurrentRetainerId() == 0)
+                return false;
+            var inventoryManager = InventoryManager.Instance();
+            var container = inventoryManager == null
+                ? null
+                : inventoryManager->GetInventoryContainer(InventoryType.RetainerMarket);
+            if (container == null || !container->IsLoaded || container->Size <= 0)
+                return false;
+
+            capacity = (int)container->Size;
+            for (short i = 0; i < container->Size; i++)
+            {
+                var slot = inventoryManager->GetInventorySlot(InventoryType.RetainerMarket, i);
+                if (slot != null && slot->ItemId != 0)
+                    occupied++;
+            }
+
+            return occupied >= capacity;
         }
 
         /// <summary>以名稱查當幀的 RetainerSell；不保存位址。</summary>
