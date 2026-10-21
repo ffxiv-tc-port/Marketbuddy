@@ -131,7 +131,8 @@ namespace Marketbuddy
         {
             public required uint ItemId;
             public required string Name;
-            public required string BaseName; // sheet name only, for window identity check
+            /// <summary>道具表的 Name／Singular 正規化後的候選；空陣列＝查不到表，任何上架視窗都配。</summary>
+            public required string[] NameCandidates;
             public required DateTime Deadline;
         }
 
@@ -378,12 +379,12 @@ namespace Marketbuddy
                     return;
                 }
 
-                var name = ResolveItemName(item, out var baseName);
+                var name = ResolveItemName(item, out var nameCandidates);
                 var pending = new PendingMenuSelect
                 {
                     ItemId = item->ItemId,
                     Name = name,
-                    BaseName = baseName,
+                    NameCandidates = nameCandidates,
                     Deadline = DateTime.UtcNow.AddMilliseconds(PendingTimeoutMs),
                 };
                 pendingMenuSelects.Add(pending);
@@ -574,23 +575,25 @@ namespace Marketbuddy
             if (pendingMenuSelects.Count == 0)
                 return;
 
-            // Identity guard: take over the oldest pending entry whose sheet name shows
-            // up in the window. RetainerSell is reused sequentially for each queued
-            // quick-list, so matching by name keeps a burst of right-clicks from being
-            // attributed to the wrong item. No match (a genuine manual open) is left
-            // alone; every still-pending entry simply expires on its own.
+            // Identity guard: take over the oldest pending entry whose sheet name equals the
+            // window's item name (ItemNameMatch, normalized). A Singular hit beats a Name-only hit:
+            // 鮮奶油's Name is 奶油, the same as another item. The window exposes no item id.
+            // No match (a genuine manual open) is left alone; pending entries expire on their own.
             var itemNameNode = ((AddonRetainerSell*)(IntPtr)args.Addon)->ItemName;
             var shownName = itemNameNode != null ? Commons.Utf8StringToString(itemNameNode->NodeText) : string.Empty;
 
             var matchIndex = -1;
+            var bestRank = int.MaxValue;
             for (var i = 0; i < pendingMenuSelects.Count; i++)
             {
-                if (pendingMenuSelects[i].BaseName.Length == 0 ||
-                    (shownName.Length > 0 && shownName.Contains(pendingMenuSelects[i].BaseName, StringComparison.Ordinal)))
-                {
-                    matchIndex = i;
+                var candidates = pendingMenuSelects[i].NameCandidates;
+                var rank = candidates.Length == 0 ? 0 : ItemNameMatch.MatchRank(candidates, shownName);
+                if (rank < 0 || rank >= bestRank)
+                    continue;
+                matchIndex = i;
+                bestRank = rank;
+                if (rank == 0)
                     break;
-                }
             }
 
             lastSellSetupAt = DateTime.UtcNow;
@@ -861,12 +864,16 @@ namespace Marketbuddy
             NoteBlockReason($"engine refused: {engine.LastStartRefusalReason} (queued={repriceQueue.Count}, head='{next.Name}')");
         }
 
-        private static string ResolveItemName(InventoryItem* item, out string baseName)
+        private static string ResolveItemName(InventoryItem* item, out string[] nameCandidates)
         {
-            baseName = string.Empty;
+            var baseName = string.Empty;
+            nameCandidates = [];
             var itemSheet = DataManager.GetExcelSheet<Item>();
             if (itemSheet != null && itemSheet.TryGetRow(item->ItemId, out var row))
+            {
                 baseName = row.Name.ExtractText();
+                nameCandidates = ItemNameMatch.Candidates(baseName, row.Singular.ExtractText());
+            }
 
             var name = baseName.Length > 0 ? baseName : $"#{item->ItemId}";
             if ((item->Flags & InventoryItem.ItemFlags.HighQuality) != 0)
