@@ -311,6 +311,13 @@ namespace Marketbuddy
             if (!conf.MultiCharTourEnabled)
                 return;
 
+            DrawNestIndicator(1);
+            if (ImGui.Checkbox("In a Company Workshop, let AutoRetainer walk up to a nearby bell that is out of reach".Loc(),
+                    ref conf.MultiCharTourApproachWorkshopBell))
+                conf.Save();
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Only inside a Company Workshop and only for a summoning bell within 20 m: AutoRetainer walks your character up to it the same way it does before opening a workshop bell itself, then this plugin opens the bell. Off: such a character waits out the timeout and is skipped, as before.".Loc());
+
             var multi = marketbuddy.MultiCharTour;
             DrawNestIndicator(1);
             if (multi.IsArmed)

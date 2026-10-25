@@ -133,6 +133,15 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
 
     private readonly BellAbsenceGate bellGate = new();
 
+    /// <summary>這一角已經問過 AR「走到工坊的鈴邊」(每角最多問一次)。</summary>
+    private bool approachRequested;
+
+    /// <summary>AR 正在走向鈴;這段期間本外掛不送互動,免得在跑動中開鈴。</summary>
+    private bool approachInFlight;
+
+    /// <summary>上一次掃描看到的最近傳喚鈴距離(不論搆不搆得到);沒看到鈴是 -1。</summary>
+    private float lastNearestBellDistance = -1f;
+
     /// <summary>本外掛看到的最近一次換區；沒看過是 MinValue。</summary>
     private DateTime lastTerritoryChangeAt = DateTime.MinValue;
 
@@ -411,6 +420,9 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
 
         Log.Information($"[MultiCharacterTour] 接手角色 {CurrentCharacterName}（CID {currentLegCid:X}），開始開鈴。");
         bellGate.Reset();
+        approachRequested = false;
+        approachInFlight = false;
+        lastNearestBellDistance = -1f;
         EnterPhase(Phase.OpeningBell);
     }
 
@@ -501,10 +513,10 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
 
         if (DateTime.UtcNow - phaseStartedAt > TimeSpan.FromSeconds(OpenBellTimeoutSeconds))
         {
-            // 🔴 零自動走位：搆不到鈴就跳過這個角色，不去把角色移過去。
+            // 本外掛自己不走位；工坊裡要走過去只能經 MultiCharTourApproachWorkshopBell 請 AR 走。
             legOutcome = LegOutcome.Skipped;
             legReason = "no summoning bell within reach".Loc();
-            Log.Information($"[MultiCharacterTour] {CurrentCharacterName}：{OpenBellTimeoutSeconds} 秒內沒能開起僱員選單（多半是身邊沒有搆得到的傳喚鈴），跳過。");
+            Log.Information($"[MultiCharacterTour] {CurrentCharacterName}：{OpenBellTimeoutSeconds} 秒內沒能開起僱員選單（多半是身邊沒有搆得到的傳喚鈴），跳過。區域 {ClientState.TerritoryType}，最近的鈴 {(lastNearestBellDistance < 0 ? "沒看到" : $"{lastNearestBellDistance:F1} 米")}，請 AR 走過去={(approachRequested ? "問過" : "沒問")}。");
             EnterPhase(Phase.Closing);
             return;
         }
@@ -512,6 +524,19 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
         // ⚠️ 節流的是**嘗試**不是成功：找不到鈴的時候如果不記時間戳，這個函式會把
         //    整張物件表每一幀掃一次、掃滿 25 秒。25 秒 ÷ 3 秒 ≈ 8 次就夠了。
         //    表裡完全沒有鈴時改成每秒確認一次（不送互動），見 BellAbsenceGate。
+        if (approachInFlight)
+        {
+            if (DateTime.UtcNow - lastBellInteract < TimeSpan.FromMilliseconds(250))
+                return;
+            lastBellInteract = DateTime.UtcNow;
+            if (IPCManager.IsAutoRetainerTaskChainBusy())
+                return;
+            approachInFlight = false;
+            lastBellInteract = DateTime.MinValue;
+            Log.Information($"[MultiCharacterTour] {CurrentCharacterName}：AutoRetainer 走完了，重新找鈴。");
+            return;
+        }
+
         var interval = bellGate.NextScanInterval(TimeSpan.FromMilliseconds(BellInteractThrottleMs));
         if (DateTime.UtcNow - lastBellInteract < interval)
             return;
@@ -521,6 +546,20 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
         if (scan == BellScan.NoneInTable &&
             (Condition[ConditionFlag.BetweenAreas] || Condition[ConditionFlag.BetweenAreas51]))
             scan = BellScan.Unknown;
+
+        if (scan == BellScan.OutOfReach && !approachRequested && Configuration.GetOrLoad().MultiCharTourApproachWorkshopBell)
+        {
+            approachRequested = true;
+            if (IPCManager.TryEnqueueApproachWorkshopBell())
+            {
+                approachInFlight = true;
+                // 走路的時間不算進開鈴逾時。
+                phaseStartedAt = DateTime.UtcNow;
+                Log.Information($"[MultiCharacterTour] {CurrentCharacterName}：鈴在 {lastNearestBellDistance:F1} 米外搆不到，請 AutoRetainer 走到工坊的鈴邊。");
+                return;
+            }
+            Log.Information($"[MultiCharacterTour] {CurrentCharacterName}：鈴在 {lastNearestBellDistance:F1} 米外搆不到，AutoRetainer 沒有接下走過去的請求（原因見 AutoRetainer 那行），照舊等。");
+        }
 
         var sinceZoneChange = lastTerritoryChangeAt == DateTime.MinValue
             ? TimeSpan.MaxValue
@@ -557,6 +596,7 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
             return BellScan.Unknown;
 
         var sawBell = false;
+        lastNearestBellDistance = -1f;
         foreach (var obj in Objects)
         {
             if (obj.ObjectKind != ObjectKind.Housing && obj.ObjectKind != ObjectKind.EventObj)
@@ -567,10 +607,13 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
             if (!obj.IsTargetable)
                 continue;
 
+            var distance = Vector3.Distance(obj.Position, local.Position);
+            if (lastNearestBellDistance < 0 || distance < lastNearestBellDistance)
+                lastNearestBellDistance = distance;
             var maxDistance = obj.ObjectKind == ObjectKind.Housing
                 ? HousingBellInteractDistance
                 : DefaultBellInteractDistance;
-            if (Vector3.Distance(obj.Position, local.Position) >= maxDistance)
+            if (distance >= maxDistance)
                 continue;
 
             var address = obj.Address;

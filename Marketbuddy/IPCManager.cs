@@ -186,6 +186,33 @@ namespace Marketbuddy
             }
         }
 
+        /// <summary>AutoRetainer 自己的任務鏈(或它正在等的 Lifestream)還在跑。讀不到一律當作沒在跑。</summary>
+        internal static bool IsAutoRetainerTaskChainBusy()
+        {
+            try
+            {
+                return Svc.PluginInterface.GetIpcSubscriber<bool>("AutoRetainer.PluginState.IsBusy").InvokeFunc();
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>請 AutoRetainer 走到公會工坊裡 20 米內、但搆不到的傳喚鈴旁(只移動，不開鈴)。
+        /// false＝什麼都沒排(不在工坊、鈴太遠、AR 在忙，或舊版 AR 沒有這個端點)。</summary>
+        internal static bool TryEnqueueApproachWorkshopBell()
+        {
+            try
+            {
+                return Svc.PluginInterface.GetIpcSubscriber<bool>("AutoRetainer.PluginState.EnqueueApproachWorkshopBell").InvokeFunc();
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         /// <summary>
         /// True when AutoRetainer is currently suppressed (by us or anybody
         /// else). AutoRetainer absent: false.

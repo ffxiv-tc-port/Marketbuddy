@@ -175,6 +175,9 @@ namespace Marketbuddy
         /// </remarks>
         public bool MultiCharTourEnabled = false;
 
+        /// <summary>多角色重掛:在公會工坊裡鈴在 20 米內卻搆不到時，請 AutoRetainer 走過去再開鈴。預設關(照舊等滿逾時跳過)。</summary>
+        public bool MultiCharTourApproachWorkshopBell = false;
+
         /// <summary>
         /// 一整輪市場重掛跑完時，透過 IPC 請「塔塔露誇獎」(TataruPraise) 念一句。
         /// </summary>
