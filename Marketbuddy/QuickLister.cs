@@ -75,7 +75,6 @@ namespace Marketbuddy
     internal sealed unsafe class QuickLister : IDisposable
     {
         private const int PendingTimeoutMs = 5000;       // menu jump -> RetainerSell must open within this
-        private const int ListingAckTimeoutMs = 6000;    // confirm -> item appears in a market slot
 
         /// <summary>
         /// 引擎必須在這麼久之內接手這一格。
@@ -152,7 +151,9 @@ namespace Marketbuddy
 
             /// <summary>確認前每一格的道具 id。只排除「確認前就是這件道具」的格：別的道具被引擎下架空出來的格，新上架的會補進去。</summary>
             public required Dictionary<short, uint> PreListingItems;
-            public required DateTime Deadline;
+
+            /// <summary>已經在聊天講過「還在確認」；每筆只講一次。</summary>
+            public bool SlowNoticeSent;
 
             /// <summary>掛在哪一名僱員身上。市場容器是「目前這名僱員的」，換人之後同一個索引指的是別的東西。</summary>
             public required ulong RetainerId;
@@ -976,7 +977,6 @@ namespace Marketbuddy
                 ItemId = pending.ItemId,
                 Name = pending.Name,
                 PreListingItems = preItems,
-                Deadline = now.AddMilliseconds(ListingAckTimeoutMs),
                 RetainerId = CurrentRetainerId(),
                 Source = pending.Source,
                 CreatedAt = now,
@@ -1108,7 +1108,6 @@ namespace Marketbuddy
                 ItemId = deferred.Pending.ItemId,
                 Name = deferred.Pending.Name,
                 PreListingItems = deferred.PreListingItems,
-                Deadline = now.AddMilliseconds(ListingAckTimeoutMs),
                 RetainerId = deferred.RetainerId,
                 Source = deferred.Pending.Source,
                 CreatedAt = now,
@@ -1249,8 +1248,17 @@ namespace Marketbuddy
                     continue;
                 }
 
-                if (DateTime.UtcNow > watch.Deadline)
+                var ageMs = (DateTime.UtcNow - watch.CreatedAt).TotalMilliseconds;
+                var stage = QuickListAckTiming.Classify(watch.Sent, ageMs, watch.SlowNoticeSent);
+                if (stage == QuickListAckTiming.Stage.Slow)
                 {
+                    watch.SlowNoticeSent = true;
+                    NoteSlowAck(watch, activeRetainer);
+                }
+
+                if (stage == QuickListAckTiming.Stage.TimedOut)
+                {
+                    var waitedSec = QuickListAckTiming.TimeoutMs(watch.Sent) / 1000;
                     watches.RemoveAt(w);
                     NoteBatchOutcome(watch.BatchToken,
                         watch.Sent ? BatchListingState.ConfirmUnclear : BatchListingState.HandedToUser);
@@ -1275,7 +1283,7 @@ namespace Marketbuddy
                     {
                         ChatGui.PrintError("[Marketbuddy] ??: was not put up for sale (it is still in your bag) - right-click it again".Loc(watch.Name));
                         WriteDiag(timeoutStage, watch.ItemId, watch.Name,
-                            $"原因={timeoutWhat} {ListingAckTimeoutMs / 1000} 秒內市場格沒出現這件道具，背包原格（{sourceText}）還是同一件同數量 {watch.Source.Quantity}；{retainerState}；{slotsText}");
+                            $"原因={timeoutWhat} {waitedSec} 秒內市場格沒出現這件道具，背包原格（{sourceText}）還是同一件同數量 {watch.Source.Quantity}；{retainerState}；{slotsText}");
                         continue;
                     }
 
@@ -1283,9 +1291,28 @@ namespace Marketbuddy
                         ? "[Marketbuddy] ??: could not confirm the listing; if it is up, its price is the cap - check it!".Loc(watch.Name)
                         : "[Marketbuddy] ??: automatic confirm was cancelled and it could not be told whether it was put up for sale - check the sale list".Loc(watch.Name));
                     WriteDiag(timeoutStage, watch.ItemId, watch.Name,
-                        $"原因={timeoutWhat} {ListingAckTimeoutMs / 1000} 秒內市場格沒出現這件道具，背包原格（{sourceText}）已經不是原本那一疊；{retainerState}；{slotsText}");
+                        $"原因={timeoutWhat} {waitedSec} 秒內市場格沒出現這件道具，背包原格（{sourceText}）已經不是原本那一疊；{retainerState}；{slotsText}");
                 }
             }
+        }
+
+        /// <summary>
+        /// 按下確認後 <see cref="QuickListAckTiming.SlowNoticeMs"/> 還沒看到市場格：繼續等，只告訴使用者還在確認。
+        /// 同一格背包已有別筆認領＝這筆是重按，不再提示。批次上架自己會講結果。
+        /// </summary>
+        private void NoteSlowAck(ListingWatch watch, ulong activeRetainer)
+        {
+            if (QuickListMatch.FindSiblingMatch(recentSourceMatches, watch.RetainerId, watch.ItemId,
+                    watch.Source, watch.CreatedAt, DuplicatePressWindowMs) != null)
+                return;
+
+            if (watch.BatchToken == 0)
+                ChatGui.Print("[Marketbuddy] ??: still waiting for the server to confirm the listing - please don't press again, pricing continues once it shows up".Loc(watch.Name));
+            var sourceText = $"{(InventoryType)watch.Source.Container}#{watch.Source.Slot}";
+            WriteDiag("上架確認較慢", watch.ItemId, watch.Name,
+                $"原因=按下確認後 {QuickListAckTiming.SlowNoticeMs / 1000} 秒市場格還沒出現這件道具，繼續等到 {QuickListAckTiming.SentTimeoutMs / 1000} 秒；" +
+                $"背包原格（{sourceText}）{(SourceStillHoldsStack(watch.Source, watch.ItemId) ? "還是同一件同數量" : "已經不是原本那一疊")}；" +
+                $"{(activeRetainer == 0 ? "目前不在僱員身上" : "還在同一名僱員")}；{SameItemSlotsText(watch.ItemId, watch.PreListingItems)}");
         }
 
         /// <summary>背包原格還是同一件、同數量＝這次確認什麼都沒搬走。只在呼叫當幀讀；讀不到算「不是」。</summary>
@@ -1342,7 +1369,7 @@ namespace Marketbuddy
         /// <summary>認領過的格一旦換了道具（下架、賣掉）或換了僱員就放掉；容器沒載入時只看僱員。</summary>
         private void PruneMatchedSlots()
         {
-            var cutoff = DateTime.UtcNow.AddMilliseconds(-(ListingAckTimeoutMs + 2 * DuplicatePressWindowMs));
+            var cutoff = DateTime.UtcNow.AddMilliseconds(-QuickListAckTiming.SiblingRetentionMs(DuplicatePressWindowMs));
             for (var i = recentSourceMatches.Count - 1; i >= 0; i--)
             {
                 if (recentSourceMatches[i].At < cutoff)

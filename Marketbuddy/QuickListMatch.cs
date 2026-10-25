@@ -10,6 +10,31 @@ namespace Marketbuddy
 
     internal readonly record struct SourceMatch(ulong RetainerId, uint ItemId, ListingSource Source, short Slot, DateTime At);
 
+    /// <summary>
+    /// 按下確認之後的等待分兩段：過 <see cref="SlowNoticeMs"/> 只提示「還在確認」並繼續認領，過 <see cref="SentTimeoutMs"/> 才說沒上架。
+    /// 沒按確認的那種（延後確認放棄）沒有第一段，維持短逾時。
+    /// </summary>
+    internal static class QuickListAckTiming
+    {
+        internal const int SlowNoticeMs = 6000;
+        internal const int SentTimeoutMs = 45000;
+        internal const int UnsentTimeoutMs = 6000;
+
+        internal enum Stage { Waiting, Slow, TimedOut }
+
+        internal static int TimeoutMs(bool sent) => sent ? SentTimeoutMs : UnsentTimeoutMs;
+
+        internal static Stage Classify(bool sent, double ageMs, bool noticeSent)
+        {
+            if (ageMs > (sent ? SentTimeoutMs : UnsentTimeoutMs))
+                return Stage.TimedOut;
+            return sent && !noticeSent && ageMs > SlowNoticeMs ? Stage.Slow : Stage.Waiting;
+        }
+
+        /// <summary>認領紀錄至少留到「最晚逾時＋前後各一個重按視窗」，逾時時的重按比對才找得到。</summary>
+        internal static int SiblingRetentionMs(int duplicateWindowMs) => SentTimeoutMs + 2 * duplicateWindowMs;
+    }
+
     /// <summary>快速上架「哪一格是剛上架的那一筆」的純判斷；呼叫端當幀把市場容器讀成道具 id 陣列再交進來。</summary>
     internal static class QuickListMatch
     {

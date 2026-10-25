@@ -35,6 +35,9 @@ internal static class Program
         DeferredConfirmChecksSourceSlot();
         SiblingRequiresSameQuantity();
         HandedOverWindowStaysInFlight();
+        SlowAckKeepsWaiting();
+        UnsentWatchKeepsShortTimeout();
+        SiblingRetentionCoversHardTimeout();
 
         Console.WriteLine($"QUICKLISTMATCH_DONE pass={passes} fail={failures}");
         return failures == 0 ? 0 : 1;
@@ -297,6 +300,44 @@ internal static class Program
         }
 
         return null;
+    }
+
+    // 實機 10-22～10-25：26 筆「上架確認逾時」都在 6 秒之後才出現市場格（上界 9.1 秒中位、21.2 秒 p90、35.3 秒最長）。
+    private static void SlowAckKeepsWaiting()
+    {
+        foreach (var ageMs in new[] { 3000.0, 7000.0, 21200.0, 35300.0 })
+        {
+            var stage = QuickListAckTiming.Classify(true, ageMs, false);
+            var expect = ageMs <= 6000 ? QuickListAckTiming.Stage.Waiting : QuickListAckTiming.Stage.Slow;
+            Check($"SlowAck age={ageMs}: not timed out, notice once", stage == expect, $"stage={stage}");
+            Check($"SlowAck age={ageMs}: noticed -> waiting", QuickListAckTiming.Classify(true, ageMs, true) == QuickListAckTiming.Stage.Waiting, "");
+        }
+
+        Check("SlowAck 45s boundary still waiting", QuickListAckTiming.Classify(true, 45000, true) == QuickListAckTiming.Stage.Waiting, "");
+        Check("SlowAck past 45s times out", QuickListAckTiming.Classify(true, 45001, true) == QuickListAckTiming.Stage.TimedOut, "");
+        Check("SlowAck 35.3s is not a timeout (legacy: timeout)", QuickListAckTiming.Classify(true, 35300, true) != QuickListAckTiming.Stage.TimedOut, "");
+    }
+
+    private static void UnsentWatchKeepsShortTimeout()
+    {
+        Check("Unsent 6s waiting", QuickListAckTiming.Classify(false, 6000, false) == QuickListAckTiming.Stage.Waiting, "");
+        Check("Unsent past 6s times out", QuickListAckTiming.Classify(false, 6001, false) == QuickListAckTiming.Stage.TimedOut, "");
+        Check("Unsent never gets the slow notice", QuickListAckTiming.Classify(false, 5000, false) == QuickListAckTiming.Stage.Waiting, "");
+        Check("TimeoutMs", QuickListAckTiming.TimeoutMs(true) == 45000 && QuickListAckTiming.TimeoutMs(false) == 6000, "");
+    }
+
+    // 逾時當下要找得到 45 秒前後的重按認領：改前的保留長度（6+2*10 秒）不夠。
+    private static void SiblingRetentionCoversHardTimeout()
+    {
+        var created = T0;
+        var claimedAt = created.AddSeconds(15);
+        var timeoutAt = created.AddSeconds(45.5);
+        var recent = new List<SourceMatch> { new(RetainerA, 5, new ListingSource(Inv1, 3, 1), 4, claimedAt) };
+        var legacyCutoff = timeoutAt.AddMilliseconds(-(6000 + 2 * 10000));
+        var newCutoff = timeoutAt.AddMilliseconds(-QuickListAckTiming.SiblingRetentionMs(10000));
+        Check("Retention legacy would have pruned the claim", claimedAt < legacyCutoff, $"legacyCutoff={legacyCutoff:O}");
+        Check("Retention new keeps the claim", claimedAt >= newCutoff, $"newCutoff={newCutoff:O}");
+        Check("Retention sibling still found", QuickListMatch.FindSiblingMatch(recent, RetainerA, 5, new ListingSource(Inv1, 3, 1), created.AddSeconds(4), 10000) != null, "");
     }
 
     // 改前 QuickLister.PumpListingWatches 的比對：確認前有東西的格一律排除、只看佇列認領。
