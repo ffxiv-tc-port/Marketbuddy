@@ -20,6 +20,15 @@ namespace Marketbuddy
         internal const int SentTimeoutMs = 45000;
         internal const int UnsentTimeoutMs = 6000;
 
+        /// <summary>選單選了出售之後，上架視窗必須在這段時間內開出來，否則放棄這一筆。</summary>
+        internal const int MenuToWindowMs = 5000;
+
+        /// <summary>
+        /// 批次上架從送出選單起算、等快速上架回報結果的上限：
+        /// 開窗＋確認前的等待上限＋按下確認後的逾時＋一點餘裕，一定比快速上架自己的 watch 晚放棄。
+        /// </summary>
+        internal const int BatchOutcomeTimeoutMs = MenuToWindowMs + QuickListConfirmGate.WaitCapMs + SentTimeoutMs + 5000;
+
         internal enum Stage { Waiting, Slow, TimedOut }
 
         internal static int TimeoutMs(bool sent) => sent ? SentTimeoutMs : UnsentTimeoutMs;
@@ -34,6 +43,9 @@ namespace Marketbuddy
         /// <summary>認領紀錄至少留到「最晚逾時＋前後各一個重按視窗」，逾時時的重按比對才找得到。</summary>
         internal static int SiblingRetentionMs(int duplicateWindowMs) => SentTimeoutMs + 2 * duplicateWindowMs;
     }
+
+    /// <summary>一次右鍵上架的身分：同僱員、同道具、同一格背包同數量。</summary>
+    internal readonly record struct PressKey(ulong RetainerId, uint ItemId, ListingSource Source, DateTime CreatedAt);
 
     /// <summary>快速上架「哪一格是剛上架的那一筆」的純判斷；呼叫端當幀把市場容器讀成道具 id 陣列再交進來。</summary>
     internal static class QuickListMatch
@@ -77,6 +89,18 @@ namespace Marketbuddy
             }
 
             return drop;
+        }
+
+        /// <summary>
+        /// 兩筆是同一格背包的重按：身分相同且建立時間差在 <paramref name="windowMs"/> 內。
+        /// 同一格同數量只會有一筆真的上架，認領到一筆後另一筆永遠等不到市場格。
+        /// </summary>
+        internal static bool IsDuplicatePress(in PressKey a, in PressKey b, int windowMs)
+        {
+            return a.RetainerId == b.RetainerId && a.ItemId == b.ItemId &&
+                   a.Source.Container == b.Source.Container && a.Source.Slot == b.Source.Slot &&
+                   a.Source.Quantity == b.Source.Quantity &&
+                   Math.Abs((a.CreatedAt - b.CreatedAt).TotalMilliseconds) <= windowMs;
         }
 
         /// <summary>

@@ -53,6 +53,9 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
     private const int BellInteractThrottleMs = 3000;
     private const int CloseListThrottleMs = 1000;
     private const int OpenBellTimeoutSeconds = 25;
+
+    /// <summary>請 AutoRetainer 走過去的整段上限；走路期間不套 <see cref="OpenBellTimeoutSeconds"/>，走完才重新計時。</summary>
+    private const int ApproachWalkCapSeconds = 90;
     private const int StartTourTimeoutSeconds = 15;
     private const int CloseListTimeoutSeconds = 15;
 
@@ -138,6 +141,8 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
 
     /// <summary>AR 正在走向鈴;這段期間本外掛不送互動,免得在跑動中開鈴。</summary>
     private bool approachInFlight;
+
+    private DateTime approachStartedAt = DateTime.MinValue;
 
     /// <summary>上一次掃描看到的最近傳喚鈴距離(不論搆不搆得到);沒看到鈴是 -1。</summary>
     private float lastNearestBellDistance = -1f;
@@ -511,12 +516,14 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
             return;
         }
 
-        if (DateTime.UtcNow - phaseStartedAt > TimeSpan.FromSeconds(OpenBellTimeoutSeconds))
+        var timeoutSeconds = approachInFlight ? ApproachWalkCapSeconds : OpenBellTimeoutSeconds;
+        var timeoutSince = approachInFlight ? approachStartedAt : phaseStartedAt;
+        if (DateTime.UtcNow - timeoutSince > TimeSpan.FromSeconds(timeoutSeconds))
         {
             // 本外掛自己不走位；工坊裡要走過去只能經 MultiCharTourApproachWorkshopBell 請 AR 走。
             legOutcome = LegOutcome.Skipped;
             legReason = "no summoning bell within reach".Loc();
-            Log.Information($"[MultiCharacterTour] {CurrentCharacterName}：{OpenBellTimeoutSeconds} 秒內沒能開起僱員選單（多半是身邊沒有搆得到的傳喚鈴），跳過。區域 {ClientState.TerritoryType}，最近的鈴 {(lastNearestBellDistance < 0 ? "沒看到" : $"{lastNearestBellDistance:F1} 米")}，請 AR 走過去={(approachRequested ? "問過" : "沒問")}。");
+            Log.Information($"[MultiCharacterTour] {CurrentCharacterName}：{timeoutSeconds} 秒內沒能開起僱員選單（多半是身邊沒有搆得到的傳喚鈴），跳過。區域 {ClientState.TerritoryType}，最近的鈴 {(lastNearestBellDistance < 0 ? "沒看到" : $"{lastNearestBellDistance:F1} 米")}，請 AR 走過去={(approachRequested ? "問過" : "沒問")}。");
             EnterPhase(Phase.Closing);
             return;
         }
@@ -532,6 +539,7 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
             if (IPCManager.IsAutoRetainerTaskChainBusy())
                 return;
             approachInFlight = false;
+            phaseStartedAt = DateTime.UtcNow;
             lastBellInteract = DateTime.MinValue;
             Log.Information($"[MultiCharacterTour] {CurrentCharacterName}：AutoRetainer 走完了，重新找鈴。");
             return;
@@ -553,8 +561,9 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
             if (IPCManager.TryEnqueueApproachWorkshopBell())
             {
                 approachInFlight = true;
-                // 走路的時間不算進開鈴逾時。
-                phaseStartedAt = DateTime.UtcNow;
+                // 走路的時間不算進開鈴逾時：走路期間改看 ApproachWalkCapSeconds，走完（見上）再重置 phaseStartedAt。
+                approachStartedAt = DateTime.UtcNow;
+                phaseStartedAt = approachStartedAt;
                 Log.Information($"[MultiCharacterTour] {CurrentCharacterName}：鈴在 {lastNearestBellDistance:F1} 米外搆不到，請 AutoRetainer 走到工坊的鈴邊。");
                 return;
             }

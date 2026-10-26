@@ -74,7 +74,7 @@ namespace Marketbuddy
     /// </summary>
     internal sealed unsafe class QuickLister : IDisposable
     {
-        private const int PendingTimeoutMs = 5000;       // menu jump -> RetainerSell must open within this
+        private const int PendingTimeoutMs = QuickListAckTiming.MenuToWindowMs;       // menu jump -> RetainerSell must open within this
 
         /// <summary>
         /// 引擎必須在這麼久之內接手這一格。
@@ -282,6 +282,9 @@ namespace Marketbuddy
         // Listings confirmed at the cap that we are waiting to see land in a
         // market slot, plus slots waiting for their single-slot engine run.
         private readonly List<ListingWatch> watches = [];
+
+        /// <summary>這一幀認領成功的一般上架；幀尾用來清掉同一格的重按。</summary>
+        private readonly List<ListingWatch> claimedThisPump = [];
         private readonly List<PendingReprice> repriceQueue = [];
         private readonly HashSet<short> claimedSlots = [];
 
@@ -1218,6 +1221,8 @@ namespace Marketbuddy
                     watches.RemoveAt(w);
                     matchedSlots[matchedSlot] = new MatchedListing(watch.ItemId, watch.RetainerId);
                     recentSourceMatches.Add(new SourceMatch(watch.RetainerId, watch.ItemId, watch.Source, matchedSlot, DateTime.UtcNow));
+                    if (watch.Sent && watch.BatchToken == 0)
+                        claimedThisPump.Add(watch);
                     // 刻意不交給引擎：沒按確認的那一件是使用者自己上架、價格自己填的。認領照留，免得別筆再認到它。
                     if (!watch.Sent)
                     {
@@ -1294,6 +1299,34 @@ namespace Marketbuddy
                         $"原因={timeoutWhat} {waitedSec} 秒內市場格沒出現這件道具，背包原格（{sourceText}）已經不是原本那一疊；{retainerState}；{slotsText}");
                 }
             }
+
+            if (claimedThisPump.Count > 0)
+                DropDuplicatePressWatches();
+        }
+
+        /// <summary>
+        /// 同一格背包重按的另一筆永遠認領不到市場格；認領成功的當下就收掉，免得它佔著「在途上架」45 秒。
+        /// 批次上架與沒按確認的不動。
+        /// </summary>
+        private void DropDuplicatePressWatches()
+        {
+            foreach (var claimed in claimedThisPump)
+            {
+                var claimedKey = new PressKey(claimed.RetainerId, claimed.ItemId, claimed.Source, claimed.CreatedAt);
+                for (var j = watches.Count - 1; j >= 0; j--)
+                {
+                    var other = watches[j];
+                    if (!other.Sent || other.BatchToken != 0 ||
+                        !QuickListMatch.IsDuplicatePress(claimedKey,
+                            new PressKey(other.RetainerId, other.ItemId, other.Source, other.CreatedAt), DuplicatePressWindowMs))
+                        continue;
+                    watches.RemoveAt(j);
+                    WriteDiag("上架確認重複", other.ItemId, other.Name,
+                        $"原因=同一格背包（{(InventoryType)other.Source.Container}#{other.Source.Slot}）的另一次按鍵已認領市場格，這次按鍵沒有另外上架，不再等逾時");
+                }
+            }
+
+            claimedThisPump.Clear();
         }
 
         /// <summary>

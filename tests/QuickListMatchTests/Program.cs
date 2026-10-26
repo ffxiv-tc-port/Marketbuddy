@@ -38,6 +38,8 @@ internal static class Program
         SlowAckKeepsWaiting();
         UnsentWatchKeepsShortTimeout();
         SiblingRetentionCoversHardTimeout();
+        BatchOutcomeOutlastsQuickListWatch();
+        DuplicatePressIdentity();
 
         Console.WriteLine($"QUICKLISTMATCH_DONE pass={passes} fail={failures}");
         return failures == 0 ? 0 : 1;
@@ -338,6 +340,32 @@ internal static class Program
         Check("Retention legacy would have pruned the claim", claimedAt < legacyCutoff, $"legacyCutoff={legacyCutoff:O}");
         Check("Retention new keeps the claim", claimedAt >= newCutoff, $"newCutoff={newCutoff:O}");
         Check("Retention sibling still found", QuickListMatch.FindSiblingMatch(recent, RetainerA, 5, new ListingSource(Inv1, 3, 1), created.AddSeconds(4), 10000) != null, "");
+    }
+
+    // 批次從送出選單起算的等待要比快速上架自己的 watch 晚放棄，否則慢確認時批次先說「無法確定」。
+    private static void BatchOutcomeOutlastsQuickListWatch()
+    {
+        const int legacyBatchTimeout = 20000;
+        var worstWatchGiveUp = QuickListAckTiming.MenuToWindowMs + QuickListConfirmGate.WaitCapMs + QuickListAckTiming.SentTimeoutMs;
+        Check("Batch timeout outlasts slowest watch", QuickListAckTiming.BatchOutcomeTimeoutMs > worstWatchGiveUp,
+            $"batch={QuickListAckTiming.BatchOutcomeTimeoutMs} watch={worstWatchGiveUp}");
+        Check("Batch legacy 20s gave up before a 25s ack (negative control)", legacyBatchTimeout < QuickListAckTiming.MenuToWindowMs + 25000, "");
+        Check("Batch timeout covers a 35s ack (longest seen)", QuickListAckTiming.BatchOutcomeTimeoutMs > QuickListAckTiming.MenuToWindowMs + 35300, "");
+    }
+
+    // 重按的另一筆在認領成功時就收掉；不同格、不同數量、不同僱員、超出視窗的都不動。
+    private static void DuplicatePressIdentity()
+    {
+        var src = new ListingSource(Inv1, 3, 99);
+        var a = new PressKey(RetainerA, 4848, src, T0);
+        Check("Duplicate same press 3s apart", QuickListMatch.IsDuplicatePress(a, a with { CreatedAt = T0.AddSeconds(3) }, 10000), "");
+        Check("Duplicate order does not matter", QuickListMatch.IsDuplicatePress(a with { CreatedAt = T0.AddSeconds(3) }, a, 10000), "");
+        Check("Duplicate outside window kept", !QuickListMatch.IsDuplicatePress(a, a with { CreatedAt = T0.AddSeconds(11) }, 10000), "");
+        Check("Duplicate other slot kept", !QuickListMatch.IsDuplicatePress(a, a with { Source = new ListingSource(Inv1, 4, 99) }, 10000), "");
+        Check("Duplicate other quantity kept", !QuickListMatch.IsDuplicatePress(a, a with { Source = new ListingSource(Inv1, 3, 50) }, 10000), "");
+        Check("Duplicate other bag kept", !QuickListMatch.IsDuplicatePress(a, a with { Source = new ListingSource(Inv2, 3, 99) }, 10000), "");
+        Check("Duplicate other retainer kept", !QuickListMatch.IsDuplicatePress(a, a with { RetainerId = RetainerB }, 10000), "");
+        Check("Duplicate other item kept", !QuickListMatch.IsDuplicatePress(a, a with { ItemId = 4849 }, 10000), "");
     }
 
     // 改前 QuickLister.PumpListingWatches 的比對：確認前有東西的格一律排除、只看佇列認領。

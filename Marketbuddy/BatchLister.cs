@@ -48,7 +48,7 @@ namespace Marketbuddy
         private const int ProbeTimeoutMs = 150000;
         private const int OpenPhaseTimeoutMs = 30000;
         private const int DisabledEntryRetryMs = 2000;
-        private const int ListingOutcomeTimeoutMs = 20000;
+        private const int ListingOutcomeTimeoutMs = QuickListAckTiming.BatchOutcomeTimeoutMs;
         private const int PriceVerifyMs = 3000;
         private const int SettleTimeoutMs = 5000;
         private const int CandidateRefreshMs = 1000;
