@@ -13,18 +13,39 @@ namespace Marketbuddy
 {
     internal partial class PluginUI
     {
+        /// <summary>設定視窗左側的分類（英文原文＝loc 鍵）；順序＝畫面順序，索引對應 <see cref="DrawSettingsPage"/>。</summary>
+        private static readonly string[] SettingsPages =
+        [
+            "Price list window",
+            "Listing",
+            "Relist pricing",
+            "Price safeguards",
+            "All retainers & multi-character",
+            "Delisting",
+            "Clear-out",
+            "Panels",
+            "Survey & diagnostics",
+        ];
+
+        /// <summary>目前選的分類。刻意不存檔：只是「看到哪一頁」，不是設定。</summary>
+        private int settingsPage;
+
         /// <summary>
-        /// 設定視窗（分頁）。
-        /// 🔴 IPC 鎖的告示刻意留在**分頁列之外的最上面**：那是「整個外掛已經停擺」的狀態，
-        /// 藏進任何一個分頁都等於要使用者先猜對分頁才知道自己被鎖住了。
+        /// 設定視窗：左側分類清單＋右側可捲動的內容。
+        /// 🔴 IPC 鎖的告示刻意留在**分類之外的最上面**：那是「整個外掛已經停擺」的狀態，
+        /// 藏進任何一個分類都等於要使用者先猜對分類才知道自己被鎖住了。
         /// </summary>
         public void DrawSettingsWindow()
         {
             if (!SettingsVisible) return;
 
-            if (!ImGui.Begin("Marketbuddy config".Loc() + "###MarketbuddyConfig", ref _settingsVisible,
-                    ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoScrollbar |
-                    ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.AlwaysAutoResize))
+            // 視窗 id 換過：舊 id 存的是自動撐高的尺寸，可能比螢幕還高。
+            var scale = ImGuiHelpers.GlobalScale;
+            var minSize = new Vector2(560f, 320f) * scale;
+            ImGui.SetNextWindowSize(new Vector2(900f, 600f) * scale, ImGuiCond.FirstUseEver);
+            ImGui.SetNextWindowSizeConstraints(minSize, Vector2.Max(minSize, ImGui.GetMainViewport().WorkSize));
+            if (!ImGui.Begin("Marketbuddy config".Loc() + "###MarketbuddyConfigV2", ref _settingsVisible,
+                    ImGuiWindowFlags.NoCollapse))
             {
                 ImGui.End();
                 return;
@@ -32,51 +53,79 @@ namespace Marketbuddy
 
             DrawIpcLockNotice();
 
-            // 🔑 視窗是 AlwaysAutoResize，而每個分頁的內容寬度天生不一樣——沒有一個共同的
-            // 寬度下限，每切一次分頁整個視窗就跳一次大小。這只是視覺上的錨，不碰任何設定。
-            ImGui.Dummy(new Vector2(SettingsContentWidth, 0f));
+            var navWidth = 0f;
+            foreach (var page in SettingsPages)
+                navWidth = Math.Max(navWidth, ImGui.CalcTextSize(page.Loc()).X);
+            navWidth += ImGui.GetStyle().WindowPadding.X * 2 + ImGui.GetStyle().FramePadding.X * 2;
 
-            if (ImGui.BeginTabBar("##mbsettingstabs"))
+            ImGui.BeginChild("##mbsettingsnav", new Vector2(navWidth, 0f), true);
+            for (var i = 0; i < SettingsPages.Length; i++)
             {
-                if (ImGui.BeginTabItem("Prices".Loc() + "##mbtabprices"))
-                {
-                    DrawPriceSettingsTab();
-                    ImGui.EndTabItem();
-                }
-
-                if (ImGui.BeginTabItem("Relisting".Loc() + "##mbtabrelist"))
-                {
-                    DrawRelistSettingsTab();
-                    ImGui.EndTabItem();
-                }
-
-                if (ImGui.BeginTabItem("Delisting".Loc() + "##mbtabdelist"))
-                {
-                    DrawDelistSettingsTab();
-                    ImGui.EndTabItem();
-                }
-
-                if (ImGui.BeginTabItem("Clear-out".Loc() + "##mbtabclearout"))
-                {
-                    DrawClearOutTab();
-                    ImGui.EndTabItem();
-                }
-
-                if (ImGui.BeginTabItem("Panels & diagnostics".Loc() + "##mbtabpanels"))
-                {
-                    DrawPanelSettingsTab();
-                    ImGui.EndTabItem();
-                }
-
-                ImGui.EndTabBar();
+                ImGui.PushID(i);
+                if (ImGui.Selectable(SettingsPages[i].Loc(), settingsPage == i))
+                    settingsPage = i;
+                ImGui.PopID();
             }
+
+            ImGui.EndChild();
+
+            ImGui.SameLine();
+            ImGui.BeginChild("##mbsettingspage", Vector2.Zero, false, ImGuiWindowFlags.HorizontalScrollbar);
+            DrawSettingsPage(Math.Clamp(settingsPage, 0, SettingsPages.Length - 1));
+            ImGui.EndChild();
 
             ImGui.End();
         }
 
+        private void DrawSettingsPage(int page)
+        {
+            ImGui.TextUnformatted(SettingsPages[page].Loc());
+            ImGui.Separator();
+            ImGui.Spacing();
+            switch (page)
+            {
+                case 0: DrawPriceSettingsTab(); break;
+                case 1: DrawListingSettingsPage(); break;
+                case 2: DrawRelistPricingPage(); break;
+                case 3: DrawPriceSafeguardsPage(); break;
+                case 4: DrawTourSettingsPage(); break;
+                case 5: DrawDelistSettingsTab(); break;
+                case 6: DrawClearOutTab(); break;
+                case 7: DrawPanelSettingsTab(); break;
+                case 8: DrawSurveyAndDiagnosticsPage(); break;
+            }
+        }
+
+        /// <summary>列尾的「(?)」：長說明收進滑鼠提示，<paramref name="more"/> 另起一段。放不下就換到下一行。</summary>
+        private static void HelpMarker(string text, string? more = null)
+        {
+            SameLineIfFits(ImGui.CalcTextSize("(?)").X);
+            ImGui.TextDisabled("(?)");
+            if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                WrappedTooltip(text, more);
+        }
+
+        /// <summary>會自動換行的滑鼠提示；停用（或淡化）區段裡打開也要全亮。</summary>
+        private static void WrappedTooltip(string text, string? more = null)
+        {
+            ImGui.PushStyleVar(ImGuiStyleVar.Alpha, 1f);
+            ImGui.BeginTooltip();
+            ImGui.PushTextWrapPos(ImGui.GetFontSize() * 32f);
+            ImGui.TextUnformatted(text);
+            if (more != null)
+            {
+                ImGui.Spacing();
+                ImGui.TextUnformatted(more);
+            }
+
+            ImGui.PopTextWrapPos();
+            ImGui.EndTooltip();
+            ImGui.PopStyleVar();
+        }
+
         /// <summary>
         /// 別的外掛透過 IPC 送來的停止鎖。
-        /// 🔴 畫在分頁列**上面**：這是「整個外掛已經停擺」的狀態，不能藏進某一個分頁。
+        /// 🔴 畫在分類**上面**：這是「整個外掛已經停擺」的狀態，不能藏進某一個分類。
         /// </summary>
         private void DrawIpcLockNotice()
         {

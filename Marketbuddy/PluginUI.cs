@@ -90,12 +90,6 @@ namespace Marketbuddy
         /// <summary>本僱員全下架的「已武裝」到期時間；<see cref="DateTime.MinValue"/> = 沒武裝。</summary>
         private DateTime sellListDelistArmedUntil = DateTime.MinValue;
 
-        /// <summary>
-        /// 分頁內容的共同寬度**下限**。視窗是 AlwaysAutoResize，沒有下限的話每切一次分頁
-        /// 視窗就跳一次大小。內容比它寬時視窗照樣會自己長大，所以這是下限不是上限。
-        /// </summary>
-        private const float SettingsContentWidth = 620f;
-
         public void Draw()
         {
             DrawSettingsWindow();

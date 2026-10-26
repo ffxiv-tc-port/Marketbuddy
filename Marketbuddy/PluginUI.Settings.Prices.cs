@@ -14,21 +14,16 @@ namespace Marketbuddy
     internal partial class PluginUI
     {
         /// <summary>
-        /// 「比價」分頁：市場比價視窗那一套互動——查詢卡住時自動重試、自動開窗、
+        /// 「比價視窗」：市場比價視窗那一套互動——查詢卡住時自動重試、自動開窗、
         /// 修飾鍵、點一個價格要做什麼，以及那些動作共用的降價幅度。
         /// </summary>
         private void DrawPriceSettingsTab()
         {
             if (ImGui.Checkbox("Auto-retry a market search that looks throttled/stuck".Loc(), ref conf.AutoRequeryOnThrottle))
                 conf.Save();
-
-            DrawNestIndicator(1);
-            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
-            ImGui.TextWrapped(
+            HelpMarker(
                 "Applies to any market price list window - the market board search and the retainer sell \"compare prices\" popup alike. No packets, hooks or memory edits: if the server keeps rejecting the query, this simply gives up after a few tries and the window is left as-is."
                     .Loc());
-            ImGui.PopStyleColor();
-
 
             ImGui.Spacing();
             if (ImGui.Checkbox("Open current prices list when adjusting a price".Loc(), ref conf.AutoOpenComparePrices))
@@ -133,13 +128,9 @@ namespace Marketbuddy
                 conf.Save();
             }
             if (!roundingOn) PopStyleDisabled();
-
-            DrawNestIndicator(2);
-            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
-            ImGui.TextWrapped(
+            HelpMarker(
                 "Every price worked out from the cheapest listing - clicking a price in the current prices list, \"Relist this retainer\", \"Relist all retainers\", and the figures in the live listings panel and the pending list - is lowered to a multiple of this number: with 100, 12,345 becomes 12,300. It only ever goes down. If that would take it below 1 gil or below your \"delist items whose target price is below\" minimum, that price is left unrounded. With an undercut of 0, a lowest price already on a multiple is matched, not undercut. Prices taken from the most recent sale are not affected."
                     .Loc());
-            ImGui.PopStyleColor();
         }
     }
 }

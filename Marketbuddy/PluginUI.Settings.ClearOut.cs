@@ -49,7 +49,7 @@ namespace Marketbuddy
             var threshold = (long)conf.BatchMinPrice;
             if (threshold <= 0)
             {
-                GreyWrapped("Set a minimum price under Relisting (\"Delist items whose target price is below\") first - without it there is no telling what is still too cheap."
+                GreyWrapped("Set a minimum price under Price safeguards (\"Delist items whose target price is below\") first - without it there is no telling what is still too cheap."
                     .Loc());
                 return;
             }
@@ -169,10 +169,10 @@ namespace Marketbuddy
                 return;
 
             if (!conf.RelistUseLastSoldPrice)
-                GreyWrapped("\"Also price from the most recent sale\" (Relisting) is off, so no prices are looked up and everything lands in \"Needs a price check\"."
+                GreyWrapped("\"Also price from the most recent sale\" (Relist pricing) is off, so no prices are looked up and everything lands in \"Needs a price check\"."
                     .Loc());
             if (conf.BatchMinPrice <= 0)
-                GreyWrapped("No minimum price is set under Relisting, so nothing lands in \"Sell to the shop\".".Loc());
+                GreyWrapped("No minimum price is set under Price safeguards, so nothing lands in \"Sell to the shop\".".Loc());
             GreyWrapped(sorter.ProtectedCount is { } protectedCount
                 ? DrawText.Loc("InventoryTools craft lists: ?? item(s) protected and left alone.", protectedCount)
                 : "InventoryTools craft lists could not be read (not installed?) - that protection is skipped.".Loc());
@@ -289,7 +289,7 @@ namespace Marketbuddy
                 BagSortReason.PriceLoading => "Still asking Universalis...".Loc(),
                 BagSortReason.PriceFailed => "Universalis could not be reached; try sorting again later.".Loc(),
                 BagSortReason.NoSaleData => "Universalis has no sale of this on your data centre.".Loc(),
-                BagSortReason.SaleStale => "The last sale is older than your freshness limit under Relisting.".Loc(),
+                BagSortReason.SaleStale => "The last sale is older than your freshness limit under Relist pricing.".Loc(),
                 BagSortReason.BelowThresholdAndDelisted => "Delisted for a low price before, and the last sale is still below your minimum.".Loc(),
                 BagSortReason.BelowThresholdNeverDelisted => "The last sale is below your minimum, but it has never been delisted for a low price, so it is not ticked.".Loc(),
                 BagSortReason.AtOrAboveThreshold => "The last sale is at or above your minimum.".Loc(),

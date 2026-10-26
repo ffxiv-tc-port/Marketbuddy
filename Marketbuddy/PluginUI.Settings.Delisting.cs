@@ -22,7 +22,6 @@ namespace Marketbuddy
             // 兩顆手動下架按鈕（出售品視窗的「本僱員全下架」、僱員選單的「全僱員下架」）
             // 通通聽它。所以它跟兩個下架篩選同屬這一個分頁、同一個最外層縮排——
             // 三項一起構成「按下下架按鈕會發生什麼事」。
-            ImGui.Spacing();
             ImGui.TextUnformatted("Delist destination".Loc());
             ImGui.SameLine();
             ImGui.SetNextItemWidth(160);
@@ -44,12 +43,9 @@ namespace Marketbuddy
                 ImGui.EndCombo();
             }
 
-            DrawNestIndicator(1);
-            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
-            ImGui.TextWrapped(
-                "Where delisted items go - this applies to every delist this plugin does: the automatic ones during relisting (the two settings above) and both manual buttons, \"Delist this retainer\" in the sell list and \"Delist all retainers\" in the retainer menu. Player inventory is the default because it is the only choice that merges stacks: identical items spread across several retainers only combine when they all land in the same container, and each retainer's inventory is separate from every other one's. Your bags are smaller than what nine retainers can list, so a full-inventory stop is normal - clear space and press the button again to carry on."
+            HelpMarker(
+                "Where delisted items go - this applies to every delist this plugin does: the automatic ones during relisting (the two under \"Price safeguards\") and both manual buttons, \"Delist this retainer\" in the sell list and \"Delist all retainers\" in the retainer menu. Player inventory is the default because it is the only choice that merges stacks: identical items spread across several retainers only combine when they all land in the same container, and each retainer's inventory is separate from every other one's. Your bags are smaller than what nine retainers can list, so a full-inventory stop is normal - clear space and press the button again to carry on."
                     .Loc());
-            ImGui.PopStyleColor();
 
             DrawDelistFilterSettings();
         }
@@ -75,6 +71,10 @@ namespace Marketbuddy
                 conf.Save();
             }
 
+            HelpMarker(
+                "The threshold is the price per item, the same number the sell list shows in its unit price column - not the price of the whole stack. It applies to both manual delist buttons (\"Delist this retainer\" and \"Delist all retainers\"). It deliberately does NOT touch the two automatic delists under \"Price safeguards\", which exist to take cheap listings off the board: those two do the opposite job, so filtering them by \"only the expensive ones\" would just cancel them out. If a price cannot be read for some reason, that listing is left alone."
+                    .Loc());
+
             // 🔴 「現在是停用的」這件事本身要在**列上**看得見，不能只靠「值是 0」讓人自己推。
             // 停用是預設狀態，而預設狀態下按鈕會把東西全部收回來——那是要當場講清楚的事。
             DrawNestIndicator(1);
@@ -93,15 +93,7 @@ namespace Marketbuddy
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip(DelistPriceFilterTooltip());
 
-            DrawNestIndicator(1);
-            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
-            ImGui.TextWrapped(
-                "The threshold is the price per item, the same number the sell list shows in its unit price column - not the price of the whole stack. It applies to both manual delist buttons (\"Delist this retainer\" and \"Delist all retainers\"). It deliberately does NOT touch the two automatic delists above, which exist to take cheap listings off the board: those two do the opposite job, so filtering them by \"only the expensive ones\" would just cancel them out. If a price cannot be read for some reason, that listing is left alone."
-                    .Loc());
-            ImGui.PopStyleColor();
-
-            // 🔴 僱員清單是這個設定視窗裡唯一**會長高**的區塊（最多九名僱員），而視窗是
-            // AlwaysAutoResize + NoScrollbar：長過螢幕就沒有捲軸可以救。所以收進摺疊標題裡。
+            // 僱員清單（最多九名）收進摺疊標題，免得把這一頁撐長。
             // ⚠️ 但「有幾名被跳過」必須留在**摺起來也看得見**的那一行上——把狀態藏進
             // 要展開才看得到的地方，等於使用者永遠不知道自己設過這個東西。
             ImGui.Spacing();
