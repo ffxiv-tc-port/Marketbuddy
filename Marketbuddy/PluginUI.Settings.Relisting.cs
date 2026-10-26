@@ -304,7 +304,7 @@ namespace Marketbuddy
             DrawNestIndicator(1);
             ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
             ImGui.TextWrapped(
-                "Needs AutoRetainer. Each time AutoRetainer has finished a character and is about to log out to the next one, it hands over and this plugin runs one all-retainer relist tour, then hands control straight back. You have to arm it by hand for each round: arming is never saved, so restarting the game or reloading the plugin always leaves it off, and it disarms itself as soon as every character in the round is done. Nothing walks your character anywhere - a character that is not standing within reach of a summoning bell is simply skipped."
+                "Needs AutoRetainer. Each time AutoRetainer has finished a character and is about to log out to the next one, it hands over and this plugin runs one all-retainer relist tour, then hands control straight back. You have to arm it by hand for each round: arming is never saved, so restarting the game or reloading the plugin always leaves it off, and it disarms itself as soon as every character in the round is done. Nothing walks your character anywhere - a character that is not standing within reach of a summoning bell is simply skipped, unless you turn on \"In a Company Workshop, let AutoRetainer walk up to a nearby bell that is out of reach\"."
                     .Loc());
             ImGui.PopStyleColor();
 
