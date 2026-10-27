@@ -28,6 +28,7 @@ internal static class Program
         SiblingFromSameBagSlot();
         GateWaitsForEarlierListing();
         GateCapReached();
+        GateIgnoresSlowInFlight();
         GateIgnoresOtherRetainerUnsentAndLater();
         GateAbandonsOnUserEvent();
         GateAbandonsOnHeldInput();
@@ -182,6 +183,50 @@ internal static class Program
         var at = QuickListConfirmGate.Decide([l1], RetainerA, setup, setup.AddMilliseconds(3000), out var blocking);
         Check("上限前一刻還在等", before == ConfirmGateVerdict.Wait, $"{before}");
         Check("等到 3 秒上限照送", at == ConfirmGateVerdict.CapReached && blocking == 1, $"{at}");
+    }
+
+    // 實機 10-26：慢確認的在途上架（送出 6～45 秒）讓閘門把下一件擋下 3 秒再放棄；過了慢提示時間的不再擋。
+    private static void GateIgnoresSlowInFlight()
+    {
+        var sentAt = T0;
+        var setup = sentAt.AddSeconds(10);
+        var slow = new InFlightListing(RetainerA, sentAt, Sent: true);
+        var verdict = QuickListConfirmGate.Decide([slow], RetainerA, setup, setup, out var blocking);
+        Check("送出 10 秒仍未認領的在途上架不擋下一件", verdict == ConfirmGateVerdict.ConfirmNow && blocking == 0, $"{verdict} blocking={blocking}");
+
+        var fresh = new InFlightListing(RetainerA, setup.AddSeconds(-3), Sent: true);
+        var freshVerdict = QuickListConfirmGate.Decide([fresh], RetainerA, setup, setup, out var freshBlocking);
+        Check("送出 3 秒的在途上架照舊讓閘門等", freshVerdict == ConfirmGateVerdict.Wait && freshBlocking == 1, $"{freshVerdict} blocking={freshBlocking}");
+
+        var edgeSetup = sentAt.AddMilliseconds(QuickListAckTiming.SlowNoticeMs);
+        var edge = QuickListConfirmGate.Decide([slow], RetainerA, edgeSetup, edgeSetup, out _);
+        Check("剛好滿慢提示時間仍算新鮮", edge == ConfirmGateVerdict.Wait, $"{edge}");
+        var pastEdge = QuickListConfirmGate.Decide([slow], RetainerA, edgeSetup.AddMilliseconds(1), edgeSetup.AddMilliseconds(1), out _);
+        Check("超過慢提示時間 1 ms 不再擋", pastEdge == ConfirmGateVerdict.ConfirmNow, $"{pastEdge}");
+
+        // 等待途中那筆越過慢提示時間：同一個等待當幀改判放行，而不是等滿 3 秒上限。
+        var waitStart = sentAt.AddMilliseconds(5000);
+        var midWait = QuickListConfirmGate.Decide([slow], RetainerA, waitStart, sentAt.AddMilliseconds(6001), out _);
+        Check("等待途中在途上架越過 6 秒就放行", midWait == ConfirmGateVerdict.ConfirmNow, $"{midWait}");
+
+        // 市場剩 1 格、那筆送出 10 秒未認領：仍占格，滿格預檢要攔下下一件；沒送出的與別名僱員的不占。
+        uint[] market = [9, 9, 9];
+        var noPre = new Dictionary<short, uint>();
+        var none = new HashSet<short>();
+        var noReserved = new Dictionary<short, MatchedListing>();
+        InFlightWatch[] slowWatch = [new(RetainerA, 12545, true, noPre)];
+        var counted = QuickListMatch.CountUnlandedInFlight(market, RetainerA, slowWatch, none, noReserved);
+        Check("送出 10 秒未認領的在途上架仍計入滿格預檢", counted == 1, $"counted={counted}");
+        Check("滿格預檢：已佔 + 在途 ≥ 上限", market.Length - 1 + counted >= market.Length, "");
+        InFlightWatch[] others = [new(RetainerB, 12545, true, noPre), new(RetainerA, 12545, false, noPre)];
+        Check("滿格預檢不算別名僱員與沒送出的", QuickListMatch.CountUnlandedInFlight(market, RetainerA, others, none, noReserved) == 0, "");
+        uint[] landed = [9, 12545, 0];
+        Check("已出現在市場格的不重複算", QuickListMatch.CountUnlandedInFlight(landed, RetainerA, slowWatch, none, noReserved) == 0, "");
+
+        Check("45 秒逾時與 6 秒慢提示常數不變",
+            QuickListAckTiming.SentTimeoutMs == 45000 && QuickListAckTiming.SlowNoticeMs == 6000, "");
+        Check("送出 10 秒的在途上架在認領／逾時側仍是慢提示不是逾時",
+            QuickListAckTiming.Classify(true, 10000, false) == QuickListAckTiming.Stage.Slow, "");
     }
 
     private static void GateIgnoresOtherRetainerUnsentAndLater()

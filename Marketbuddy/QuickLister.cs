@@ -301,6 +301,7 @@ namespace Marketbuddy
 
         private DeferredConfirm? deferredConfirm;
         private InFlightListing[] gateScratch = new InFlightListing[8];
+        private InFlightWatch[] watchScratch = new InFlightWatch[8];
 
         private bool suppressionHeld;
 
@@ -1004,7 +1005,7 @@ namespace Marketbuddy
             var parts = new List<string>();
             foreach (var w in watches)
             {
-                if (w.Sent && w.RetainerId == retainerId && w.CreatedAt <= since)
+                if (QuickListConfirmGate.BlocksGate(new InFlightListing(w.RetainerId, w.CreatedAt, w.Sent), retainerId, since, since))
                     parts.Add($"{w.Name}(#{w.ItemId}) 已送出 {(since - w.CreatedAt).TotalMilliseconds:0} ms");
             }
 
@@ -1085,7 +1086,7 @@ namespace Marketbuddy
             var confirmed = ConfirmListing((nint)addon, deferred.Pending);
             Log.Information(
                 $"[QuickListGate] 道具={deferred.Pending.Name}(#{deferred.Pending.ItemId}) 等了 {(now - deferred.Since).TotalMilliseconds:0} ms " +
-                $"結果={(verdict == ConfirmGateVerdict.CapReached ? $"等到 {QuickListConfirmGate.WaitCapMs} ms 上限還有 {blocking} 筆沒出現，照送" : "更早那幾筆都已出現在市場格")}" +
+                $"結果={(verdict == ConfirmGateVerdict.CapReached ? $"等到 {QuickListConfirmGate.WaitCapMs} ms 上限還有 {blocking} 筆沒出現，照送" : $"更早那幾筆都已出現在市場格或已送出超過 {QuickListConfirmGate.BlockerMaxAgeMs / 1000} 秒不再等")}" +
                 $"{(confirmed ? "，已按確認" : "，填價失敗沒按確認")} 等的是={deferred.WaitingFor}");
         }
 
@@ -1663,12 +1664,11 @@ namespace Marketbuddy
                     occupied++;
             }
 
-            foreach (var watch in watches)
-            {
-                if (watch.Sent && watch.RetainerId == retainerId &&
-                    QuickListMatch.FindNewListingSlot(slotItems, watch.ItemId, watch.PreListingItems, claimedSlots, matchedSlots) < 0)
-                    inFlight++;
-            }
+            if (watchScratch.Length < watches.Count)
+                watchScratch = new InFlightWatch[watches.Count * 2];
+            for (var i = 0; i < watches.Count; i++)
+                watchScratch[i] = new InFlightWatch(watches[i].RetainerId, watches[i].ItemId, watches[i].Sent, watches[i].PreListingItems);
+            inFlight = QuickListMatch.CountUnlandedInFlight(slotItems, retainerId, watchScratch.AsSpan(0, watches.Count), claimedSlots, matchedSlots);
 
             return occupied + inFlight >= capacity;
         }

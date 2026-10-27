@@ -8,6 +8,9 @@ namespace Marketbuddy
 
     internal readonly record struct MatchedListing(uint ItemId, ulong RetainerId);
 
+    internal readonly record struct InFlightWatch(ulong RetainerId, uint ItemId, bool Sent,
+        IReadOnlyDictionary<short, uint> PreListingItems);
+
     internal readonly record struct SourceMatch(ulong RetainerId, uint ItemId, ListingSource Source, short Slot, DateTime At);
 
     /// <summary>
@@ -68,6 +71,24 @@ namespace Marketbuddy
             }
 
             return -1;
+        }
+
+        /// <summary>
+        /// 已送出、市場格還沒出現的筆數（市場已滿預檢占格用）。刻意不看送出多久：只要 watch 還活著（到 45 秒逾時）就占格，
+        /// 否則慢確認的上架會讓使用者多掛一件超過上限。
+        /// </summary>
+        internal static int CountUnlandedInFlight(ReadOnlySpan<uint> slotItems, ulong retainerId,
+            ReadOnlySpan<InFlightWatch> watches, ISet<short> claimed, IReadOnlyDictionary<short, MatchedListing> reserved)
+        {
+            var count = 0;
+            foreach (var watch in watches)
+            {
+                if (watch.Sent && watch.RetainerId == retainerId &&
+                    FindNewListingSlot(slotItems, watch.ItemId, watch.PreListingItems, claimed, reserved) < 0)
+                    count++;
+            }
+
+            return count;
         }
 
         /// <summary>

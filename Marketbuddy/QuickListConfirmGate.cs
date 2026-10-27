@@ -15,11 +15,19 @@ namespace Marketbuddy
 
     /// <summary>
     /// 快速上架「確認」要不要先等：同一名僱員還有更早送出、市場格還沒出現的上架就等，最多 <see cref="WaitCapMs"/>。
+    /// 只等送出後未滿 <see cref="BlockerMaxAgeMs"/> 的；更慢的仍占格（見 <see cref="QuickListMatch.CountUnlandedInFlight"/>），但不再卡下一件。
     /// 純函式，呼叫端當幀把等待清單抄進來；不認得僱員（0）一律不等。
     /// </summary>
     internal static class QuickListConfirmGate
     {
         internal const int WaitCapMs = 3000;
+
+        internal const int BlockerMaxAgeMs = QuickListAckTiming.SlowNoticeMs;
+
+        /// <summary>這筆在途上架現在還值得讓下一件等：同僱員、真的送出過、在下一件開始等之前送出、送出未滿 <see cref="BlockerMaxAgeMs"/>。</summary>
+        internal static bool BlocksGate(in InFlightListing listing, ulong retainerId, DateTime waitingSince, DateTime now)
+            => listing.Sent && listing.RetainerId == retainerId && listing.ConfirmedAt <= waitingSince &&
+               (now - listing.ConfirmedAt).TotalMilliseconds <= BlockerMaxAgeMs;
 
         // 本 pin 的 AtkEventType：MouseMove 5、MouseOver 6、MouseOut 7、FocusStart 18、FocusStop 19、ButtonRelease 24。
         private const byte MouseMove = 5, MouseOver = 6, MouseOut = 7, FocusStart = 18, FocusStop = 19, ButtonRelease = 24;
@@ -66,7 +74,7 @@ namespace Marketbuddy
                 return ConfirmGateVerdict.ConfirmNow;
             foreach (var listing in inFlight)
             {
-                if (listing.Sent && listing.RetainerId == retainerId && listing.ConfirmedAt <= waitingSince)
+                if (BlocksGate(listing, retainerId, waitingSince, now))
                     blocking++;
             }
 
