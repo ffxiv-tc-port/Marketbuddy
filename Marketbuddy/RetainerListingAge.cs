@@ -5,6 +5,7 @@ using System.IO;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Marketbuddy.Common;
 using static Marketbuddy.Common.Dalamud;
 
 namespace Marketbuddy
@@ -48,8 +49,6 @@ namespace Marketbuddy
         private const int FieldCount = 5;
 
         private const string TimestampFormat = "yyyy-MM-dd HH:mm:ss";
-
-        private static readonly byte[] Utf8Bom = [0xEF, 0xBB, 0xBF];
 
         /// <summary>🔴 只在持有這把鎖時碰 <see cref="Entries"/>／<see cref="RetainersSeen"/>。鎖內不做 I/O、不寫 log。</summary>
         private static readonly object Gate = new();
@@ -289,11 +288,6 @@ namespace Marketbuddy
 
         private static void WriteAll(List<Row> rows)
         {
-            var path = FilePath;
-            var directory = Path.GetDirectoryName(path);
-            if (!string.IsNullOrEmpty(directory))
-                Directory.CreateDirectory(directory);
-
             var text = new StringBuilder();
             text.Append(Header).Append("\r\n");
             foreach (var row in rows)
@@ -307,15 +301,7 @@ namespace Marketbuddy
                     .Append("\r\n");
             }
 
-            var bytes = new UTF8Encoding(false).GetBytes(text.ToString());
-            var temp = path + ".tmp";
-            using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
-            {
-                stream.Write(Utf8Bom, 0, Utf8Bom.Length);
-                stream.Write(bytes, 0, bytes.Length);
-            }
-
-            File.Move(temp, path, true);
+            CsvRewriteFile.Write(FilePath, text.ToString());
         }
 
         private static void ReportWriteFailure(Exception e)

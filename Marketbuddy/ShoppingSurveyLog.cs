@@ -5,6 +5,7 @@ using System.IO;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Marketbuddy.Common;
 using static Marketbuddy.Common.Dalamud;
 
 namespace Marketbuddy
@@ -80,134 +81,36 @@ namespace Marketbuddy
 
         private const string TimestampFormat = "yyyy-MM-dd HH:mm:ss";
 
-        private static readonly byte[] Utf8Bom = [0xEF, 0xBB, 0xBF];
-
-        /// <summary>待寫清單。🔴 只在持有 <see cref="PendingGate"/> 時碰它。</summary>
-        private static readonly List<ShoppingSurveyRow> Pending = [];
-
-        /// <summary>🔴 鎖內只碰 <see cref="Pending"/>：不做 I/O、不寫 log、不呼叫任何別的外掛。</summary>
+        /// <summary>🔴 鎖內只碰待寫清單：不做 I/O、不寫 log、不呼叫任何別的外掛。</summary>
         private static readonly object PendingGate = new();
 
-        /// <summary>單一飛行閘：0＝沒有 flush 工作在跑，1＝有。</summary>
-        private static int flushing;
+        /// <summary>待寫清單與寫檔；路徑只算一次（<c>PluginInterface.ConfigDirectory</c> 每次存取都會去檔案系統確認）。</summary>
+        private static readonly CsvAppendLog<ShoppingSurveyRow> Writer = new(
+            PendingGate,
+            () => Path.Combine(PluginInterface.ConfigDirectory.FullName, FileName),
+            Header,
+            Format,
+            ReportWriteFailure);
 
-        private static int writeFailureLogged;
-
-        private static string? cachedFilePath;
-
-        /// <summary>
-        /// 記錄檔的完整路徑。
-        /// 🔴 只算一次：<c>PluginInterface.ConfigDirectory</c> 每次存取都會去檔案系統確認。
-        /// </summary>
-        internal static string FilePath
-            => cachedFilePath ??= Path.Combine(PluginInterface.ConfigDirectory.FullName, FileName);
+        /// <summary>記錄檔的完整路徑。</summary>
+        internal static string FilePath => Writer.FilePath;
 
         /// <summary>追加一列。任何執行緒都可以呼叫；實際寫檔一定在執行緒池上。</summary>
         internal static void Append(ShoppingSurveyRow row)
         {
-            lock (PendingGate)
-            {
-                Pending.Add(row);
-            }
-
-            Kick();
+            Writer.Enqueue(row);
+            Writer.Kick();
         }
 
         /// <summary>還沒落地的列數（UI 顯示用）。</summary>
-        internal static int PendingCount
-        {
-            get
-            {
-                lock (PendingGate)
-                {
-                    return Pending.Count;
-                }
-            }
-        }
-
-        private static void Kick()
-        {
-            if (Interlocked.CompareExchange(ref flushing, 1, 0) != 0)
-                return;
-            Task.Run(Flush);
-        }
-
-        private static void Flush()
-        {
-            try
-            {
-                while (true)
-                {
-                    List<ShoppingSurveyRow> batch;
-                    lock (PendingGate)
-                    {
-                        if (Pending.Count == 0)
-                            break;
-                        batch = new List<ShoppingSurveyRow>(Pending);
-                        Pending.Clear();
-                    }
-
-                    // 🔴 I/O 在鎖外做。
-                    WriteBatch(batch);
-                }
-            }
-            catch (Exception e)
-            {
-                ReportWriteFailure(e);
-            }
-            finally
-            {
-                Volatile.Write(ref flushing, 0);
-
-                var again = false;
-                lock (PendingGate)
-                {
-                    again = Pending.Count > 0;
-                }
-
-                if (again)
-                    Kick();
-            }
-        }
-
-        private static void WriteBatch(List<ShoppingSurveyRow> batch)
-        {
-            var path = FilePath;
-            var directory = Path.GetDirectoryName(path);
-            if (!string.IsNullOrEmpty(directory))
-                Directory.CreateDirectory(directory);
-
-            var needHeader = !File.Exists(path) || new FileInfo(path).Length == 0;
-
-            var text = new StringBuilder();
-            if (needHeader)
-                text.Append(Header).Append("\r\n");
-            foreach (var row in batch)
-                text.Append(Format(row)).Append("\r\n");
-
-            using var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
-            if (needHeader)
-                stream.Write(Utf8Bom, 0, Utf8Bom.Length);
-            var bytes = new UTF8Encoding(false).GetBytes(text.ToString());
-            stream.Write(bytes, 0, bytes.Length);
-        }
+        internal static int PendingCount => Writer.PendingCount;
 
         private static void ReportWriteFailure(Exception e)
         {
-            if (Interlocked.Exchange(ref writeFailureLogged, 1) != 0)
-                return;
-
-            try
-            {
-                Log.Information(
-                    e,
-                    $"[Marketbuddy] 採購清單記錄檔寫入失敗（{FileName}）；這一輪的結果只留在畫面上，不會落地。" +
-                    "本工作階段不再重複回報這個錯誤。");
-            }
-            catch
-            {
-                // 記錄失敗絕不能中斷巡檢。
-            }
+            Log.Information(
+                e,
+                $"[Marketbuddy] 採購清單記錄檔寫入失敗（{FileName}）；這一輪的結果只留在畫面上，不會落地。" +
+                "本工作階段不再重複回報這個錯誤。");
         }
 
         private static string Format(ShoppingSurveyRow row)

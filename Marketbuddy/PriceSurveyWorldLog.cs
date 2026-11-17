@@ -5,6 +5,7 @@ using System.IO;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Marketbuddy.Common;
 using static Marketbuddy.Common.Dalamud;
 
 namespace Marketbuddy
@@ -91,8 +92,6 @@ namespace Marketbuddy
         private const int FieldCount = 8;
 
         private const string TimestampFormat = "yyyy-MM-dd HH:mm:ss";
-
-        private static readonly byte[] Utf8Bom = [0xEF, 0xBB, 0xBF];
 
         /// <summary>🔴 只在持有 <see cref="Gate"/> 時碰它。世界最多十來個，整份拷貝很便宜。</summary>
         private static readonly Dictionary<uint, SurveyWorldRow> Rows = new();
@@ -298,28 +297,13 @@ namespace Marketbuddy
 
         private static void WriteAll(List<SurveyWorldRow> rows)
         {
-            var path = FilePath;
-            var directory = Path.GetDirectoryName(path);
-            if (!string.IsNullOrEmpty(directory))
-                Directory.CreateDirectory(directory);
-
             rows.Sort((a, b) => a.WorldId.CompareTo(b.WorldId));
 
             var text = new StringBuilder();
             text.Append(Header).Append("\r\n");
             foreach (var row in rows)
                 text.Append(Format(row)).Append("\r\n");
-            var bytes = new UTF8Encoding(false).GetBytes(text.ToString());
-
-            // 🔴 先寫暫存檔再換過去。
-            var temp = path + ".tmp";
-            using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
-            {
-                stream.Write(Utf8Bom, 0, Utf8Bom.Length);
-                stream.Write(bytes, 0, bytes.Length);
-            }
-
-            File.Move(temp, path, true);
+            CsvRewriteFile.Write(FilePath, text.ToString());
         }
 
         private static void ReportWriteFailure(Exception e)

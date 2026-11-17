@@ -5,6 +5,7 @@ using System.IO;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Marketbuddy.Common;
 using static Marketbuddy.Common.Dalamud;
 
 namespace Marketbuddy
@@ -135,8 +136,6 @@ namespace Marketbuddy
         private const int FieldCount = 13;
 
         private const string TimestampFormat = "yyyy-MM-dd HH:mm:ss";
-
-        private static readonly byte[] Utf8Bom = [0xEF, 0xBB, 0xBF];
 
         /// <summary>🔴 只在持有 <see cref="Gate"/> 時碰它。</summary>
         private static readonly Dictionary<PendingActionKey, PendingActionRow> Rows = new();
@@ -458,29 +457,13 @@ namespace Marketbuddy
 
         private static void WriteAll(List<PendingActionRow> rows)
         {
-            var path = FilePath;
-            var directory = Path.GetDirectoryName(path);
-            if (!string.IsNullOrEmpty(directory))
-                Directory.CreateDirectory(directory);
-
             rows.Sort(CompareForFile);
 
             var text = new StringBuilder();
             text.Append(Header).Append("\r\n");
             foreach (var row in rows)
                 text.Append(Format(row)).Append("\r\n");
-            var bytes = new UTF8Encoding(false).GetBytes(text.ToString());
-
-            // 🔴 先寫暫存檔再換過去：整份重寫的檔案寫到一半崩潰會留下半份清單，
-            //    而半份清單與「真的只剩這些」長得一模一樣。
-            var temp = path + ".tmp";
-            using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
-            {
-                stream.Write(Utf8Bom, 0, Utf8Bom.Length);
-                stream.Write(bytes, 0, bytes.Length);
-            }
-
-            File.Move(temp, path, true);
+            CsvRewriteFile.Write(FilePath, text.ToString());
         }
 
         private static int CompareForFile(PendingActionRow a, PendingActionRow b)

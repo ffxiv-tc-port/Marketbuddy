@@ -5,6 +5,7 @@ using System.IO;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Marketbuddy.Common;
 using static Marketbuddy.Common.Dalamud;
 
 namespace Marketbuddy
@@ -86,147 +87,50 @@ namespace Marketbuddy
 
         private const string TimestampFormat = "yyyy-MM-dd HH:mm:ss";
 
-        private static readonly byte[] Utf8Bom = [0xEF, 0xBB, 0xBF];
-
-        /// <summary>待寫清單。🔴 只在持有 <see cref="PendingGate"/> 時碰它。</summary>
-        private static readonly List<PriceSurveyRow> Pending = [];
-
-        /// <summary>🔴 鎖內只碰 <see cref="Pending"/>：不做 I/O、不寫 log、不呼叫任何別的外掛。</summary>
+        /// <summary>🔴 鎖內只碰待寫清單：不做 I/O、不寫 log、不呼叫任何別的外掛。</summary>
         private static readonly object PendingGate = new();
 
-        /// <summary>單一飛行閘：0＝沒有 flush 工作在跑，1＝有。</summary>
-        private static int flushing;
-
-        /// <summary>寫檔失敗只吵一次，避免每一件都刷一行。</summary>
-        private static int writeFailureLogged;
-
         /// <summary>
-        /// 記錄檔的完整路徑。
-        /// 🔴 只算一次：<c>PluginInterface.ConfigDirectory</c> 每次存取都會去檔案系統確認
-        /// （不存在就建），而畫面上的 tooltip 每一幀都會取這個值——那等於每幀一次磁碟操作。
+        /// 待寫清單與寫檔。
+        /// 🔴 路徑只算一次：<c>PluginInterface.ConfigDirectory</c> 每次存取都會去檔案系統確認
+        /// （不存在就建），而畫面上的 tooltip 每一幀都會取 <see cref="FilePath"/>。
         /// </summary>
-        internal static string FilePath
-            => cachedFilePath ??= Path.Combine(PluginInterface.ConfigDirectory.FullName, FileName);
+        private static readonly CsvAppendLog<PriceSurveyRow> Writer = new(
+            PendingGate,
+            () => Path.Combine(PluginInterface.ConfigDirectory.FullName, FileName),
+            Header,
+            Format,
+            ReportWriteFailure);
 
-        private static string? cachedFilePath;
+        /// <summary>記錄檔的完整路徑。</summary>
+        internal static string FilePath => Writer.FilePath;
 
         /// <summary>
         /// 追加一列。可以從任何執行緒呼叫；實際寫檔一定在執行緒池上。
         /// </summary>
         internal static void Append(PriceSurveyRow row)
         {
-            lock (PendingGate)
-            {
-                Pending.Add(row);
-            }
+            Writer.Enqueue(row);
 
             // 🔴 記憶體索引要在**落地之前**就更新：重掛的巡檢補位讀的是索引（framework
             // 執行緒不做檔案 I/O），而剛剛掃到的那一列正是最有價值的那一列。
             // ⚠️ 刻意放在鎖**外**：Note 走 ConcurrentDictionary，不需要這把鎖，
-            // 而這把鎖的契約是「鎖內只碰 Pending」。
+            // 而這把鎖的契約是「鎖內只碰待寫清單」。
             PriceSurveySnapshot.Note(row);
 
-            Kick();
+            Writer.Kick();
         }
 
         /// <summary>還沒落地的列數（UI 顯示用）。</summary>
-        internal static int PendingCount
-        {
-            get
-            {
-                lock (PendingGate)
-                {
-                    return Pending.Count;
-                }
-            }
-        }
-
-        private static void Kick()
-        {
-            // 已經有一個 flush 在跑就不再開第二個；它離開之前會再看一次待寫清單。
-            if (Interlocked.CompareExchange(ref flushing, 1, 0) != 0)
-                return;
-            Task.Run(Flush);
-        }
-
-        private static void Flush()
-        {
-            try
-            {
-                while (true)
-                {
-                    List<PriceSurveyRow> batch;
-                    lock (PendingGate)
-                    {
-                        if (Pending.Count == 0)
-                            break;
-                        batch = new List<PriceSurveyRow>(Pending);
-                        Pending.Clear();
-                    }
-
-                    // 🔴 I/O 在鎖外做。
-                    WriteBatch(batch);
-                }
-            }
-            catch (Exception e)
-            {
-                ReportWriteFailure(e);
-            }
-            finally
-            {
-                Volatile.Write(ref flushing, 0);
-
-                // 放掉閘門與上面那次「清單是空的」判斷之間可能又有人加了東西進來。
-                var again = false;
-                lock (PendingGate)
-                {
-                    again = Pending.Count > 0;
-                }
-
-                if (again)
-                    Kick();
-            }
-        }
-
-        private static void WriteBatch(List<PriceSurveyRow> batch)
-        {
-            var path = FilePath;
-            var directory = Path.GetDirectoryName(path);
-            if (!string.IsNullOrEmpty(directory))
-                Directory.CreateDirectory(directory);
-
-            var needHeader = !File.Exists(path) || new FileInfo(path).Length == 0;
-
-            var text = new StringBuilder();
-            if (needHeader)
-                text.Append(Header).Append("\r\n");
-            foreach (var row in batch)
-                text.Append(Format(row)).Append("\r\n");
-
-            using var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
-            if (needHeader)
-                stream.Write(Utf8Bom, 0, Utf8Bom.Length);
-            var bytes = new UTF8Encoding(false).GetBytes(text.ToString());
-            stream.Write(bytes, 0, bytes.Length);
-        }
+        internal static int PendingCount => Writer.PendingCount;
 
         private static void ReportWriteFailure(Exception e)
         {
-            if (Interlocked.Exchange(ref writeFailureLogged, 1) != 0)
-                return;
-
             // 要使用者回報的診斷。
-            try
-            {
-                Log.Information(
-                    e,
-                    $"[Marketbuddy] 巡檢記錄檔寫入失敗（{FileName}）；這一輪的結果只留在畫面上，不會落地。" +
-                    "本工作階段不再重複回報這個錯誤。");
-            }
-            catch
-            {
-                // 記錄失敗絕不能中斷巡檢。
-            }
+            Log.Information(
+                e,
+                $"[Marketbuddy] 巡檢記錄檔寫入失敗（{FileName}）；這一輪的結果只留在畫面上，不會落地。" +
+                "本工作階段不再重複回報這個錯誤。");
         }
 
         private static string Format(PriceSurveyRow row)

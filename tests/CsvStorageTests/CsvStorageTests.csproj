@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <!-- 離線測試：只編 Common/CsvStorage.cs（不引用 Dalamud），拿抽出前的寫檔碼當基準逐位元組比對。
+         不在 Marketbuddy.sln 裡，CI 只建 Marketbuddy/Marketbuddy.csproj，不會碰到它。
+         StorageSource 可指到別的檔（給突變體驗證用），預設是正式那份。 -->
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net9.0</TargetFramework>
+        <Nullable>enable</Nullable>
+        <LangVersion>latest</LangVersion>
+        <ImplicitUsings>disable</ImplicitUsings>
+        <StorageSource Condition="'$(StorageSource)' == ''">../../Marketbuddy/Common/CsvStorage.cs</StorageSource>
+    </PropertyGroup>
+    <ItemGroup>
+        <Compile Include="$(StorageSource)" Link="CsvStorage.cs" />
+    </ItemGroup>
+</Project>

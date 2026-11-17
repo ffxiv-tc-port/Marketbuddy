@@ -4,6 +4,7 @@ using System.IO;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Marketbuddy.Common;
 using static Marketbuddy.Common.Dalamud;
 
 namespace Marketbuddy
@@ -20,8 +21,6 @@ namespace Marketbuddy
 
         private const int MaxRecords = 3000;
         private const int MaxAgeDays = 180;
-
-        private static readonly byte[] Utf8Bom = [0xEF, 0xBB, 0xBF];
 
         /// <summary>🔴 只在持有 <see cref="Gate"/> 時碰它。</summary>
         private static readonly LowPriceDelistBook Book = new(MaxRecords, MaxAgeDays);
@@ -187,20 +186,7 @@ namespace Marketbuddy
 
         private static void WriteAll(string csv)
         {
-            var path = FilePath;
-            var directory = Path.GetDirectoryName(path);
-            if (!string.IsNullOrEmpty(directory))
-                Directory.CreateDirectory(directory);
-
-            var bytes = new UTF8Encoding(false).GetBytes(csv);
-            var temp = path + ".tmp";
-            using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
-            {
-                stream.Write(Utf8Bom, 0, Utf8Bom.Length);
-                stream.Write(bytes, 0, bytes.Length);
-            }
-
-            File.Move(temp, path, true);
+            CsvRewriteFile.Write(FilePath, csv);
         }
 
         private static void ReportFailure(Exception e, string what)

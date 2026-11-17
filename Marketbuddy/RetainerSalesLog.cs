@@ -7,6 +7,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Marketbuddy.Common;
 using static Marketbuddy.Common.Dalamud;
 
 namespace Marketbuddy
@@ -115,36 +116,31 @@ namespace Marketbuddy
         /// <summary>記憶體裡最多留幾列（只給 UI 補空窗用，不是資料的家）。</summary>
         private const int MaxSessionRows = 1000;
 
-        private static readonly byte[] Utf8Bom = [0xEF, 0xBB, 0xBF];
-
-        /// <summary>待寫清單。🔴 只在持有 <see cref="Gate"/> 時碰它。</summary>
-        private static readonly List<RetainerSaleRow> Pending = [];
-
         /// <summary>這個工作階段寫過的列。🔴 只在持有 <see cref="Gate"/> 時碰它。</summary>
         private static readonly List<RetainerSaleRow> Session = [];
 
-        /// <summary>🔴 鎖內只碰上面那兩個清單：不做 I/O、不寫 log、不呼叫任何別的外掛。</summary>
+        /// <summary>🔴 鎖內只碰 <see cref="Session"/> 與待寫清單：不做 I/O、不寫 log、不呼叫任何別的外掛。</summary>
         private static readonly object Gate = new();
 
-        /// <summary>單一飛行閘：0＝沒有 flush 工作在跑，1＝有。</summary>
-        private static int flushing;
-
-        private static int writeFailureLogged;
+        /// <summary>
+        /// 待寫清單與寫檔（與 <see cref="Session"/> 共用 <see cref="Gate"/>）。
+        /// 🔴 路徑只算一次：<c>PluginInterface.ConfigDirectory</c> 每次存取都會去檔案系統確認
+        /// （不存在就建），而畫面上的 tooltip 每一幀都會取 <see cref="FilePath"/>。
+        /// </summary>
+        private static readonly CsvAppendLog<RetainerSaleRow> Writer = new(
+            Gate,
+            () => Path.Combine(PluginInterface.ConfigDirectory.FullName, FileName),
+            Header,
+            Format,
+            ReportWriteFailure);
 
         /// <summary>每追加一列 +1。UI 拿它判斷「要不要重新讀檔」。</summary>
         private static long revision;
 
         internal static long Revision => Volatile.Read(ref revision);
 
-        /// <summary>
-        /// 記錄檔的完整路徑。
-        /// 🔴 只算一次：<c>PluginInterface.ConfigDirectory</c> 每次存取都會去檔案系統確認
-        /// （不存在就建），而畫面上的 tooltip 每一幀都會取這個值——那等於每幀一次磁碟操作。
-        /// </summary>
-        internal static string FilePath
-            => cachedFilePath ??= Path.Combine(PluginInterface.ConfigDirectory.FullName, FileName);
-
-        private static string? cachedFilePath;
+        /// <summary>記錄檔的完整路徑。</summary>
+        internal static string FilePath => Writer.FilePath;
 
         /// <summary>
         /// <see cref="LoadAll"/> 的增量快取。🔴 只在持有 <see cref="LoadGate"/> 時碰。
@@ -164,14 +160,14 @@ namespace Marketbuddy
         {
             lock (Gate)
             {
-                Pending.Add(row);
+                Writer.EnqueueLocked(row);
                 Session.Add(row);
                 if (Session.Count > MaxSessionRows)
                     Session.RemoveRange(0, Session.Count - MaxSessionRows);
             }
 
             Interlocked.Increment(ref revision);
-            Kick();
+            Writer.Kick();
         }
 
         /// <summary>這個工作階段寫過的列的複本（UI 補讀檔空窗用）。</summary>
@@ -219,91 +215,13 @@ namespace Marketbuddy
             return missing;
         }
 
-        private static void Kick()
-        {
-            // 已經有一個 flush 在跑就不再開第二個；它離開之前會再看一次待寫清單。
-            if (Interlocked.CompareExchange(ref flushing, 1, 0) != 0)
-                return;
-            Task.Run(Flush);
-        }
-
-        private static void Flush()
-        {
-            try
-            {
-                while (true)
-                {
-                    List<RetainerSaleRow> batch;
-                    lock (Gate)
-                    {
-                        if (Pending.Count == 0)
-                            break;
-                        batch = new List<RetainerSaleRow>(Pending);
-                        Pending.Clear();
-                    }
-
-                    // 🔴 I/O 在鎖外做。
-                    WriteBatch(batch);
-                }
-            }
-            catch (Exception e)
-            {
-                ReportWriteFailure(e);
-            }
-            finally
-            {
-                Volatile.Write(ref flushing, 0);
-
-                var again = false;
-                lock (Gate)
-                {
-                    again = Pending.Count > 0;
-                }
-
-                if (again)
-                    Kick();
-            }
-        }
-
-        private static void WriteBatch(List<RetainerSaleRow> batch)
-        {
-            var path = FilePath;
-            var directory = Path.GetDirectoryName(path);
-            if (!string.IsNullOrEmpty(directory))
-                Directory.CreateDirectory(directory);
-
-            var needHeader = !File.Exists(path) || new FileInfo(path).Length == 0;
-
-            var text = new StringBuilder();
-            if (needHeader)
-                text.Append(Header).Append("\r\n");
-            foreach (var row in batch)
-                text.Append(Format(row)).Append("\r\n");
-
-            using var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
-            if (needHeader)
-                stream.Write(Utf8Bom, 0, Utf8Bom.Length);
-            var bytes = new UTF8Encoding(false).GetBytes(text.ToString());
-            stream.Write(bytes, 0, bytes.Length);
-        }
-
         private static void ReportWriteFailure(Exception e)
         {
-            if (Interlocked.Exchange(ref writeFailureLogged, 1) != 0)
-                return;
-
             // 要使用者回報的診斷寫 Information。
-            try
-            {
-                Log.Information(
-                    e,
-                    $"[Marketbuddy] 僱員銷售記錄檔寫入失敗（{FileName}）；這一輪的事件只留在畫面上，" +
-                    "重開遊戲就會消失。本工作階段不再重複回報這個錯誤。");
-            }
-            catch
-            {
-                // 記錄失敗絕不能中斷任何流程。
-            }
+            Log.Information(
+                e,
+                $"[Marketbuddy] 僱員銷售記錄檔寫入失敗（{FileName}）；這一輪的事件只留在畫面上，" +
+                "重開遊戲就會消失。本工作階段不再重複回報這個錯誤。");
         }
 
         /// <summary>
