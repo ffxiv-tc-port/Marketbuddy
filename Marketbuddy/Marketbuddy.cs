@@ -249,8 +249,7 @@ namespace Marketbuddy
 
                 // 🔴 初始化到一半失敗時,前面已經建好的元件必須全部釋放。
                 // QuickLister 與 MarketRequestResultProbe 各自持有一個已 Enable 的 Hook,
-                // 而且是直接用 IGameInteropProvider.HookFromAddress 建的,沒有進 Commons 的
-                // HookList,所以只有它們自己的 Dispose() 會拆。
+                // 只有它們自己的 Dispose() 會拆。
                 // 這個 catch 把例外吞掉 ⇒ Dalamud 認為外掛「載入成功」,卸載時仍會呼叫 Dispose()(ReleaseAll 具冪等性)。
                 ReleaseAll();
             }
@@ -260,7 +259,7 @@ namespace Marketbuddy
 
         /// <summary>
         /// 釋放所有已建立的資源。每一步各自獨立防護,任何一步失敗都不會擋住後面的步驟
-        /// (關鍵是持有 hook 的 QuickLister / requestResultProbe 與 Commons.DisposeHooks 一定要跑到)。
+        /// (關鍵是持有 hook 的 QuickLister / requestResultProbe 一定要跑到)。
         /// 具冪等性:初始化失敗路徑與 Dalamud 的 Dispose() 都會呼叫。
         /// </summary>
         private void ReleaseAll()
@@ -306,8 +305,6 @@ namespace Marketbuddy
             Safe(() => AutoRetainerBridge.Shutdown());
             // 所有會按下去的模組都拆完之後才收掉重按守衛。
             Safe(() => AddonPressGuard.Shutdown());
-            // 收尾:任何經由 Commons.Hook() 註冊的 hook 都在這裡拆掉。
-            Safe(() => Commons.Dispose());
         }
 
         /// <summary>
