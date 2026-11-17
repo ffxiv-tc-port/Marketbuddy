@@ -4,8 +4,10 @@ using System.Collections.Generic;
 using System.Numerics;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Objects.Enums;
+using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
+using FFXIVClientStructs.FFXIV.Client.Game.Event;
 using Marketbuddy.Common;
 using static Marketbuddy.Common.Dalamud;
 
@@ -160,6 +162,11 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
 
     /// <summary>傳喚鈴名稱的快取（見 <see cref="SummoningBellName"/>）。</summary>
     private static string cachedBellName = string.Empty;
+
+    /// <summary>互動距離診斷（見 <see cref="DiagnoseInteractRange"/>）：下一行最早何時可記、期間被壓下的差異數。</summary>
+    private DateTime nextRangeDiagLogAt = DateTime.MinValue;
+    private int rangeDiagSuppressed;
+    private bool rangeDiagUnavailableLogged;
 
     private ulong currentLegCid;
     private LegOutcome legOutcome = LegOutcome.Skipped;
@@ -622,6 +629,7 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
             var maxDistance = obj.ObjectKind == ObjectKind.Housing
                 ? HousingBellInteractDistance
                 : DefaultBellInteractDistance;
+            DiagnoseInteractRange(local, obj, distance, maxDistance);
             if (distance >= maxDistance)
                 continue;
 
@@ -636,6 +644,62 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
         }
 
         return sawBell ? BellScan.OutOfReach : BellScan.NoneInTable;
+    }
+
+    /// <summary>
+    /// 常數判定與遊戲 <c>EventFramework.CheckInteractRange</c> 不同時記 Information（最多每 30 秒一行）。
+    /// 只記錄，判斷照舊用常數。兩個物件都是呼叫端這一幀從物件表拿到的，位址不留到下一幀。
+    /// </summary>
+    private void DiagnoseInteractRange(IGameObject local, IGameObject bell, float distance, float maxDistance)
+    {
+        var game = IsWithinGameInteractRange(local.Address, bell.Address);
+        if (game == null)
+        {
+            if (!rangeDiagUnavailableLogged)
+            {
+                rangeDiagUnavailableLogged = true;
+                Log.Information("[MultiCharacterTour][互動距離] 問不到遊戲的互動距離判定，無法比對（之後同樣情況不再記；不影響判斷）。");
+            }
+            return;
+        }
+
+        var byConstant = distance < maxDistance;
+        if (game.Value == byConstant)
+            return;
+
+        var now = DateTime.UtcNow;
+        if (now < nextRangeDiagLogAt)
+        {
+            rangeDiagSuppressed++;
+            return;
+        }
+
+        nextRangeDiagLogAt = now.AddSeconds(30);
+        Log.Information($"[MultiCharacterTour][互動距離] 傳喚鈴判定不同（只記錄，照常數判斷）：常數={Reach(byConstant)}（{distance:F2} 米，門檻 {maxDistance:F2} 米，{bell.ObjectKind}），遊戲={Reach(game.Value)}；高低差 {bell.Position.Y - local.Position.Y:F2} 米，區域 {ClientState.TerritoryType}，上一行之後另有 {rangeDiagSuppressed} 次不同。");
+        rangeDiagSuppressed = 0;
+    }
+
+    private static string Reach(bool reachable) => reachable ? "搆得到" : "搆不到";
+
+    /// <returns>遊戲的答案；<see langword="null"/>＝問不到（位址為零、函式沒解析到，或單例還沒建立）。</returns>
+    private static bool? IsWithinGameInteractRange(nint source, nint target)
+    {
+        if (source == 0 || target == 0) return null;
+        if (EventFramework.MemberFunctionPointers.CheckInteractRange is null) return null;
+
+        try
+        {
+            var framework = EventFramework.Instance();
+            if (framework == null) return null;
+
+            return framework->CheckInteractRange(
+                (FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject*)source,
+                (FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject*)target, 1, false);
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
