@@ -51,13 +51,14 @@ namespace Marketbuddy
         /// <summary>Injected after construction; 批次上架（只在使用者按下按鈕時動）。</summary>
         internal BatchLister? BatchLister { get; set; }
 
-        private IntPtr AddonRetainerSellList = IntPtr.Zero;
-        private IntPtr AddonRetainerList = IntPtr.Zero;
-        private IntPtr AddonItemSearchResult = IntPtr.Zero;
+        // 三扇視窗的位址每次都向遊戲重查，不跨幀保存。「開著」＝查得到且版面已載入
+        // （對應原本 PostSetup 之後才算開；建立中、版面還沒載好的那幾幀不算）。不看 IsVisible：隱藏中仍算開著。
+        internal bool IsRetainerSellListOpen => IsLoaded(Commons.GetUnitBase("RetainerSellList"));
 
-        internal bool IsRetainerSellListOpen => AddonRetainerSellList != IntPtr.Zero;
+        internal bool IsRetainerListOpen => IsLoaded(Commons.GetUnitBase("RetainerList"));
 
-        internal bool IsRetainerListOpen => AddonRetainerList != IntPtr.Zero;
+        private static bool IsLoaded(AtkUnitBase* addon)
+            => addon != null && addon->UldManager.LoadedState == AtkLoadState.Loaded;
 
         /// <summary>
         /// True while the market price list (ItemSearchResult) is open, be it
@@ -65,7 +66,7 @@ namespace Marketbuddy
         /// opened from a retainer's sell window. Used by <see cref="ManualRequery"/>
         /// to know when to watch for a stalled/throttled query.
         /// </summary>
-        internal bool IsItemSearchResultOpen => AddonItemSearchResult != IntPtr.Zero;
+        internal bool IsItemSearchResultOpen => IsLoaded(Commons.GetUnitBase("ItemSearchResult"));
 
         public MarketGuiEventHandler()
         {
@@ -73,22 +74,6 @@ namespace Marketbuddy
 
             AddonLifecycle.RegisterListener(AddonEvent.PostSetup, "RetainerSell", OnRetainerSellSetup);
             AddonLifecycle.RegisterListener(AddonEvent.PostSetup, "ItemSearchResult", OnItemSearchResultSetup);
-            AddonLifecycle.RegisterListener(AddonEvent.PreFinalize, "ItemSearchResult", OnItemSearchResultFinalize);
-            AddonLifecycle.RegisterListener(AddonEvent.PostSetup, "RetainerSellList", OnRetainerSellListSetup);
-            AddonLifecycle.RegisterListener(AddonEvent.PreFinalize, "RetainerSellList", OnRetainerSellListFinalize);
-
-            AddonLifecycle.RegisterListener(AddonEvent.PostSetup, "RetainerList", OnRetainerListSetup);
-            AddonLifecycle.RegisterListener(AddonEvent.PreFinalize, "RetainerList", OnRetainerListFinalize);
-        }
-
-        private void OnRetainerListSetup(AddonEvent type, AddonArgs args)
-        {
-            AddonRetainerList = args.Addon;
-        }
-
-        private void OnRetainerListFinalize(AddonEvent type, AddonArgs args)
-        {
-            AddonRetainerList = IntPtr.Zero;
         }
 
         /// <summary>
@@ -101,11 +86,8 @@ namespace Marketbuddy
         {
             topLeft = Vector2.Zero;
             size = Vector2.Zero;
-            if (AddonRetainerList == IntPtr.Zero)
-                return false;
-
-            var addon = (AtkUnitBase*)AddonRetainerList;
-            if (!addon->IsVisible || addon->RootNode == null ||
+            var addon = Commons.GetUnitBase("RetainerList");
+            if (addon == null || !addon->IsVisible || addon->RootNode == null ||
                 addon->UldManager.LoadedState != AtkLoadState.Loaded)
                 return false;
 
@@ -118,29 +100,10 @@ namespace Marketbuddy
             return true;
         }
 
-        private void OnRetainerSellListFinalize(AddonEvent type, AddonArgs args)
-        {
-            var addon = args.Addon;
-            if (addon == AddonRetainerSellList)
-                DebugMessage($"AddonRetainerSellList.OnFinalize (known: {addon:X})");
-            else
-                DebugMessage(
-                    $"AddonRetainerSellList.OnFinalize (unk. have {AddonRetainerSellList:X} got {addon:X})");
-            AddonRetainerSellList = IntPtr.Zero;
-        }
-
-        private void OnRetainerSellListSetup(AddonEvent type, AddonArgs args)
-        {
-            var addon = args.Addon;
-            DebugMessage($"AddonRetainerSellList.OnSetup (got: {addon:X})");
-            AddonRetainerSellList = addon;
-        }
-
         private void OnItemSearchResultSetup(AddonEvent type, AddonArgs args)
         {
             DebugMessage("AddonItemSearchResult.OnSetup");
             IntPtr addon = args.Addon;
-            AddonItemSearchResult = addon;
 
             if (!IPCManager.IsLocked)
             {
@@ -253,11 +216,6 @@ namespace Marketbuddy
             }
         }
 
-        private void OnItemSearchResultFinalize(AddonEvent type, AddonArgs args)
-        {
-            AddonItemSearchResult = IntPtr.Zero;
-        }
-
         /// <summary>
         /// 出售品視窗目前的螢幕矩形：左上角座標與**已套用縮放**的尺寸。
         /// 重掛面板靠它貼在原生視窗下方並跟著它跑。
@@ -270,11 +228,8 @@ namespace Marketbuddy
         {
             topLeft = Vector2.Zero;
             size = Vector2.Zero;
-            if (AddonRetainerSellList == IntPtr.Zero)
-                return false;
-
-            var addon = (AtkUnitBase*)AddonRetainerSellList;
-            if (!addon->IsVisible || addon->RootNode == null ||
+            var addon = Commons.GetUnitBase("RetainerSellList");
+            if (addon == null || !addon->IsVisible || addon->RootNode == null ||
                 addon->UldManager.LoadedState != AtkLoadState.Loaded)
                 return false;
 
@@ -293,12 +248,6 @@ namespace Marketbuddy
 
             AddonLifecycle.UnregisterListener(AddonEvent.PostSetup, "RetainerSell", OnRetainerSellSetup);
             AddonLifecycle.UnregisterListener(AddonEvent.PostSetup, "ItemSearchResult", OnItemSearchResultSetup);
-            AddonLifecycle.UnregisterListener(AddonEvent.PreFinalize, "ItemSearchResult", OnItemSearchResultFinalize);
-            AddonLifecycle.UnregisterListener(AddonEvent.PostSetup, "RetainerSellList", OnRetainerSellListSetup);
-            AddonLifecycle.UnregisterListener(AddonEvent.PreFinalize, "RetainerSellList", OnRetainerSellListFinalize);
-
-            AddonLifecycle.UnregisterListener(AddonEvent.PostSetup, "RetainerList", OnRetainerListSetup);
-            AddonLifecycle.UnregisterListener(AddonEvent.PreFinalize, "RetainerList", OnRetainerListFinalize);
         }
 
         private unsafe void SetPrice(int newPrice)
