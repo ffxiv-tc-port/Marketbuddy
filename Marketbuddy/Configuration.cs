@@ -449,6 +449,7 @@ namespace Marketbuddy
         /// </summary>
         public Vector2 MarketBuyPanelOffset = new Vector2(4, 0);
 
+        /// <summary><see cref="IPluginConfiguration"/> 介面要求的欄位；目前沒有任何遷移讀它。</summary>
         public int Version { get; set; } = 0;
 
         // the below exist just to make saving/loading less cumbersome
@@ -628,7 +629,7 @@ namespace Marketbuddy
         }
     }
 
-    /// <summary>某名僱員「可補上架」的一種道具。🔴 類別名與欄位名會進存檔，改了既有的勾選就讀不回來。</summary>
+    /// <summary>某名僱員「可補上架」的一種道具。🔴 欄位名＝存檔的 JSON 鍵，改了既有的勾選就讀不回來；類別名不影響讀檔（讀取不看 <c>$type</c>）。</summary>
     [Serializable]
     public class ReplenishPick
     {
