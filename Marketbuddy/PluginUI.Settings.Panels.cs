@@ -52,7 +52,7 @@ namespace Marketbuddy
                 conf.Save();
             if (!buyTallyOn) ImGui.EndDisabled();
 
-            // 重掛面板與即時掛單面板是**同一欄**（重掛在上、即時掛單接在下面），
+            // 重掛面板與即時掛單面板是**同一欄**（重掛面板貼基準點、即時掛單接在它外側），
             // 所以位置只有一組，調它就是整欄一起動。
             ImGui.Spacing();
             ImGui.Separator();
@@ -162,7 +162,7 @@ namespace Marketbuddy
         {
             if (DrawAnchorOptions("##mbsidecolumn", "Side panel anchor".Loc(), ref conf.LiveSellListAnchor,
                     ref conf.LiveSellListOffset, nativeOpen, nativeTopLeft, nativeSize,
-                    "Moves both side panels at once: the relisting controls always sit on top and the live listing table is stacked directly against them."
+                    "Moves both side panels at once: the relisting controls sit right at the anchor point (at the bottom when the anchor is a bottom edge) and the live listing table is stacked directly against them."
                         .Loc()))
                 conf.Save();
         }

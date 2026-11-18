@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Numerics;
 using Marketbuddy;
 
@@ -29,6 +30,8 @@ internal static class Program
         BottomColumnEndToEnd();
         ListHeightCap();
         SwitchingAnchorResetsOffset();
+        TopColumnHeightCap();
+        LeftWidthNeverShrinks();
 
         Console.WriteLine($"PANELPLACEMENT_DONE pass={passes} fail={failures}");
         return failures == 0 ? 0 : 1;
@@ -157,19 +160,62 @@ internal static class Program
         Check("外緣：往上長取上緣", PanelPlacementMath.OuterEdgeY(up, new(0, 680), new(10, 120)) == 680f, "");
     }
 
-    // 下緣基準點：即時掛單先畫（貼下緣），重掛面板接在它上面；兩塊不重疊、間隙 4。
+    // 下緣基準點：重掛面板先畫（貼下緣），即時掛單接在它上面；兩塊不重疊、間隙 4，整欄總高不超過原生視窗高。
     private static void BottomColumnEndToEnd()
     {
         var column = PanelPlacementMath.Compute(PanelAnchor.OutsideBottomRight, NativeTopLeft, Size(1f),
             PanelPlacementMath.DefaultOffset(PanelAnchor.OutsideBottomRight), Vector2.Zero);
-        var listSize = new Vector2(400, 300);
-        var listTl = WindowTopLeft(PanelPlacementMath.Stack(column, null), listSize);
-        var edge = PanelPlacementMath.OuterEdgeY(column, listTl, listSize);
         var repriceSize = new Vector2(250, 150);
-        var repriceTl = WindowTopLeft(PanelPlacementMath.Stack(column, edge), repriceSize);
-        Check("下緣：清單下緣貼原生下緣", listTl.Y + listSize.Y == 800, $"listTl={listTl}");
-        Check("下緣：重掛面板在清單上方、間隙 4", repriceTl.Y + repriceSize.Y == listTl.Y - 4, $"repriceTl={repriceTl}");
+        var repriceTl = WindowTopLeft(PanelPlacementMath.Stack(column, null), repriceSize);
+        var edge = PanelPlacementMath.OuterEdgeY(column, repriceTl, repriceSize);
+        var listPlacement = PanelPlacementMath.Stack(column, edge);
+        var cap = PanelPlacementMath.ListMaxHeight(Size(1f).Y, column, listPlacement, 200f);
+        var listSize = new Vector2(400, Math.Min(900f, cap));
+        var listTl = WindowTopLeft(listPlacement, listSize);
+        Check("下緣：重掛面板下緣貼原生下緣", repriceTl.Y + repriceSize.Y == 800, $"repriceTl={repriceTl}");
+        Check("下緣：即時掛單在重掛面板上方、間隙 4", listTl.Y + listSize.Y == repriceTl.Y - 4, $"listTl={listTl}");
         Check("下緣：兩塊左緣都在原生右緣＋4", listTl.X == 1404 && repriceTl.X == 1404, "");
+        var total = repriceTl.Y + repriceSize.Y - listTl.Y;
+        Check("下緣：整欄總高 ≤ 原生視窗高（很長的清單）", total <= Size(1f).Y, $"total={total}");
+
+        // 負對照：改版前即時掛單先畫、貼基準點，高度上限沒扣重掛面板 ⇒ 整欄超出原生視窗上緣。
+        var oldListCap = PanelPlacementMath.ListMaxHeight(Size(1f).Y, column, PanelPlacementMath.Stack(column, null), 200f);
+        var oldTotal = Math.Min(900f, oldListCap) + PanelPlacementMath.Gap + repriceSize.Y;
+        Check("負對照：舊順序整欄超高", oldTotal > Size(1f).Y, $"oldTotal={oldTotal}");
+    }
+
+    // 上緣基準點的對稱情形：整欄總高同樣 ≤ 原生視窗高。
+    private static void TopColumnHeightCap()
+    {
+        var column = PanelPlacementMath.Compute(PanelAnchor.OutsideTopRight, NativeTopLeft, Size(1f), new Vector2(4, 0), Vector2.Zero);
+        var repriceSize = new Vector2(250, 150);
+        var repriceTl = WindowTopLeft(PanelPlacementMath.Stack(column, null), repriceSize);
+        var listPlacement = PanelPlacementMath.Stack(column, PanelPlacementMath.OuterEdgeY(column, repriceTl, repriceSize));
+        var cap = PanelPlacementMath.ListMaxHeight(Size(1f).Y, column, listPlacement, 200f);
+        var listTl = WindowTopLeft(listPlacement, new Vector2(400, cap));
+        Check("上緣：整欄總高 ≤ 原生視窗高", listTl.Y + cap - repriceTl.Y <= Size(1f).Y, $"cap={cap}");
+    }
+
+    // 左側基準點寬度只增不減；右側不設下限。
+    private static void LeftWidthNeverShrinks()
+    {
+        var left = PanelPlacementMath.Compute(PanelAnchor.OutsideBottomLeft, NativeTopLeft, Size(1f), new Vector2(-4, 0), Vector2.Zero);
+        var right = PanelPlacementMath.Compute(PanelAnchor.OutsideTopRight, NativeTopLeft, Size(1f), new Vector2(4, 0), Vector2.Zero);
+        Check("左側：下限＝最寬", PanelPlacementMath.MinWidth(left, 320f) == 320f, "");
+        Check("左側：還沒量過＝0", PanelPlacementMath.MinWidth(left, 0f) == 0f, "");
+        Check("左側：NaN＝0", PanelPlacementMath.MinWidth(left, float.NaN) == 0f, "");
+        Check("右側：不設下限", PanelPlacementMath.MinWidth(right, 320f) == 0f, "");
+        // 量到的內容寬依序 300→320→280：右緣貼著時左緣停在 320 寬的位置，不回縮。
+        var widest = 0f;
+        var lefts = new List<float>();
+        foreach (var measured in new[] { 300f, 320f, 280f })
+        {
+            var drawn = Math.Max(measured, PanelPlacementMath.MinWidth(left, widest));
+            lefts.Add(WindowTopLeft(left, new Vector2(drawn, 100)).X);
+            widest = Math.Max(widest, drawn);
+        }
+
+        Check("左側：內容變窄時左緣不回縮", lefts[2] == lefts[1] && lefts[1] < lefts[0], string.Join(",", lefts));
     }
 
     private static void ListHeightCap()

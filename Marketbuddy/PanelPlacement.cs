@@ -109,6 +109,13 @@ namespace Marketbuddy
             return Compute(from, nativeTopLeft, nativeSize, offset, Vector2.Zero).Position;
         }
 
+        /// <summary>
+        /// 左側基準點（樞紐 X＝1）時面板的寬度下限：只增不減，面板變窄時右緣貼著、左緣不往回縮，裡面的按鈕不跟著橫移。
+        /// 其餘基準點回 0（不設下限）。<paramref name="widest"/> 是這塊面板這次開著以來量到的最寬值。
+        /// </summary>
+        public static float MinWidth(PanelPlacement placement, float widest)
+            => placement.Pivot.X >= 0.5f && float.IsFinite(widest) && widest > 0f ? widest : 0f;
+
         /// <summary>換基準點時改用的偏移：貼原生視窗的留一個間隙，左側往左。</summary>
         public static Vector2 DefaultOffset(PanelAnchor anchor)
             => Normalize(anchor) switch

@@ -14,7 +14,7 @@ namespace Marketbuddy
     internal partial class PluginUI
     {
         /// <summary>
-        /// 重掛面板：獨立視窗，形式比照 <see cref="LiveSellList"/>，與即時掛單面板同一欄（重掛在上）。
+        /// 重掛面板：獨立視窗，形式比照 <see cref="LiveSellList"/>，與即時掛單面板同一欄（重掛面板貼基準點、即時掛單接在它外側）。
         /// 兩者共用 <see cref="Configuration.LiveSellListAnchor"/> 與 <see cref="Configuration.LiveSellListOffset"/>，
         /// 所以調位置是兩塊一起動；另一塊高度變化時，後畫的那塊照**量到的外緣**重新定位，不會重疊。
         /// </summary>
@@ -30,12 +30,18 @@ namespace Marketbuddy
                                 (conf.BatchListEnabled || marketbuddy.BatchLister?.IsRunning == true);
             if ((!showStack && !showBatch && quickListPending == 0 && !showVendorSell && !showBatchList) ||
                 !marketbuddy.MarketGuiEventHandler.AddonRetainerSellList_Frame(out var topLeft, out var size))
+            {
+                repriceWidest = 0f;
                 return null;
+            }
 
             var column = PanelPlacementMath.Compute(conf.LiveSellListAnchor, topLeft, size,
                 conf.LiveSellListOffset, ImGuiHelpers.MainViewport.Pos);
             var placement = PanelPlacementMath.Stack(column, stackEdgeY);
             ImGui.SetNextWindowPos(placement.Position, ImGuiCond.Always, placement.Pivot);
+            var minWidth = PanelPlacementMath.MinWidth(placement, repriceWidest);
+            if (minWidth > 0f)
+                ImGui.SetNextWindowSizeConstraints(new Vector2(minWidth, 0f), new Vector2(float.MaxValue, float.MaxValue));
 
             if (!ImGui.Begin("Marketbuddy_reprice",
                     ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove |
@@ -43,8 +49,12 @@ namespace Marketbuddy
                     ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoSavedSettings))
             {
                 ImGui.End();
+                repriceWidest = 0f;
                 return null;
             }
+
+            var windowSize = ImGui.GetWindowSize();
+            repriceWidest = Math.Max(repriceWidest, windowSize.X);
 
             ImGui.TextUnformatted("Relisting".Loc());
             if (ImGui.IsItemHovered())
