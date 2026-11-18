@@ -4,6 +4,7 @@ using Dalamud.Game.ClientState.Keys;
 using Dalamud.Game.Text;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
+using FFXIVClientStructs.FFXIV.Component.Exd;
 using Lumina.Excel.Sheets;
 using Marketbuddy.Common;
 using static Marketbuddy.Common.Dalamud;
@@ -80,12 +81,44 @@ namespace Marketbuddy
         internal const int MoveOk = 0;
         private const int MoveErrNoSourceSlot = 4;
 
-        /// <summary>檢查子函式查不到這件道具的資料列。</summary>
-        private const int MoveErrUnknownItem = 6;
+        /// <summary>
+        /// 檢查子函式的 <c>ExdModule.GetItemRowById</c> 回 null（那一刻 Excel 快取沒有這件道具的分頁）。
+        /// 這個分支在送出之前就返回：什麼都沒送，道具原價留在市場上 ⇒ 算略過，不算失敗。
+        /// </summary>
+        internal const int MoveErrItemDataNotLoaded = 6;
 
         private const int MoveErrNotAllowedNow = 10;
         private const int MoveErrNoSpace = 0x19;
         private const int MoveErrUniqueAlreadyHeld = 0x1C;
+
+        /// <summary>這個回傳碼代表「這件沒有動、仍在市場上」：照略過處理，不算失敗。</summary>
+        internal static bool IsLeftListedResult(int result) => result == MoveErrItemDataNotLoaded;
+
+        /// <summary>取回函式查資料列前做的同一種 id 還原：HQ（+1,000,000）與收藏品（+500,000）的位移拿掉。</summary>
+        internal static uint ToBaseItemId(uint itemId) => itemId switch
+        {
+            > 1_000_000 and < 2_000_000 => itemId - 1_000_000,
+            > 500_000 and < 1_000_000 => itemId - 500_000,
+            _ => itemId,
+        };
+
+        /// <summary>
+        /// 取回之前的閘門：與兩支取回函式內部同一個查詢，查不到＝這一刻送了也必回 6。
+        /// 只在 framework 執行緒、緊接著取回的同一幀呼叫；回傳的列指標只判 null、絕不解參。
+        /// 解不出位址就不擋（取回函式自己回 6 也不會送出）。
+        /// </summary>
+        internal static bool IsItemDataLoaded(uint itemId)
+            => ExdModule.MemberFunctionPointers.GetItemRowById == null
+               || ExdModule.GetItemRowById(ToBaseItemId(itemId)) != null;
+
+        /// <summary>本插件看到的最近一次換區；只給 DELIST-DATA-NOT-LOADED 診斷用，沒看過是 MinValue。</summary>
+        private static DateTime lastTerritoryChangeAt = DateTime.MinValue;
+
+        private static void OnTerritoryChanged(ushort _) => lastTerritoryChangeAt = DateTime.UtcNow;
+
+        internal static double MsSinceTerritoryChange => lastTerritoryChangeAt == DateTime.MinValue
+            ? -1
+            : (DateTime.UtcNow - lastTerritoryChangeAt).TotalMilliseconds;
 
         private enum DelistPhase
         {
@@ -121,7 +154,14 @@ namespace Marketbuddy
         private Configuration conf => Configuration.GetOrLoad();
 
         private DateTime lastMove = DateTime.MinValue;
+        private DateTime startedAt = DateTime.MinValue;
         private bool suppressionHeld;
+
+        /// <summary>
+        /// 這一輪因資料還沒載入而略過的道具；之後找格子時跳過它們。
+        /// 🔑 沒有這份的話，「每次都找第一個有東西的格子」會讓後面每個 job 都撞同一件＝變相自動重試。
+        /// </summary>
+        private readonly HashSet<uint> leftForDataNotLoaded = new();
 
         /// <summary>
         /// 這一輪的目的地：true = 僱員自己的物品欄，false = 玩家背包。
@@ -173,11 +213,13 @@ namespace Marketbuddy
             queue.Aborted += OnQueueAborted;
             queue.Completed += OnQueueCompleted;
             Framework.Update += OnFrameworkUpdate;
+            ClientState.TerritoryChanged += OnTerritoryChanged;
         }
 
         public void Dispose()
         {
             Framework.Update -= OnFrameworkUpdate;
+            ClientState.TerritoryChanged -= OnTerritoryChanged;
             // 先拆掉處理器，卸載時的中止才會是安靜的。
             queue.Aborted -= OnQueueAborted;
             queue.Completed -= OnQueueCompleted;
@@ -305,6 +347,8 @@ namespace Marketbuddy
             StoppedForSpace = false;
             CurrentItemName = string.Empty;
             lastMove = DateTime.MinValue;
+            startedAt = DateTime.UtcNow;
+            leftForDataNotLoaded.Clear();
 
             // 🔑 目的地在這裡定案，整輪不再改（理由見 toRetainerInventory 的說明）。
             toRetainerInventory = conf.DelistToRetainerInventory;
@@ -404,7 +448,7 @@ namespace Marketbuddy
                     if (inventoryManager == null)
                         return TickTaskResult.Continue; // 看門狗兜底
 
-                    var slot = FindFirstListedSlot(inventoryManager, aboveUnitPrice, out var slotIndex);
+                    var slot = FindFirstListedSlot(inventoryManager, aboveUnitPrice, leftForDataNotLoaded, out var slotIndex);
                     if (slot == null)
                     {
                         // 已經沒有**該下架**的掛單了：比開始時預期的少（別人買走、或本來就估多了；
@@ -423,6 +467,12 @@ namespace Marketbuddy
                     var quantity = (uint)Math.Max(1, slot->Quantity);
                     job.Hq = (slot->Flags & InventoryItem.ItemFlags.HighQuality) != 0;
                     job.Quantity = (int)quantity;
+
+                    if (!IsItemDataLoaded(job.ItemId))
+                    {
+                        LeaveForDataNotLoaded(job, "gate");
+                        return TickTaskResult.Done;
+                    }
 
                     // ⚠️ 兩支函式**不能**互相退回：目的地是使用者的設定，撞牆時如實
                     // 停手／回報，絕不靜默改送到另一個容器（那會把東西放到使用者沒
@@ -447,6 +497,12 @@ namespace Marketbuddy
                         StoppedForSpace = true;
                         queue.Abort(DestinationFullReason(toRetainerInventory));
                         return TickTaskResult.Continue; // Abort 已經清空佇列
+                    }
+
+                    if (IsLeftListedResult(result))
+                    {
+                        LeaveForDataNotLoaded(job, "rc");
+                        return TickTaskResult.Done;
                     }
 
                     if (result != MoveOk)
@@ -513,6 +569,21 @@ namespace Marketbuddy
         }
 
         /// <summary>
+        /// 這件沒有送出、仍在市場上：只講原因並在這一輪跳過同款，**不等待、不重試**（市場自動化紅線）。
+        /// 刻意不算進 <see cref="SkippedCount"/>：那個數字專指單價門檻留下的件數，收工訊息照它講門檻。
+        /// </summary>
+        private void LeaveForDataNotLoaded(DelistJob job, string via)
+        {
+            leftForDataNotLoaded.Add(job.ItemId);
+            ProcessedSlots++;
+            Log.Information(
+                $"[MBDIAG] DELIST-DATA-NOT-LOADED engine=delist via={via} item={job.ItemId} slot={job.Slot} " +
+                $"sinceBatchMs={(DateTime.UtcNow - startedAt).TotalMilliseconds:F0} sinceTerritoryMs={MsSinceTerritoryChange:F0}");
+            ChatGui.Print("[Marketbuddy] ??: skipped - ??".Loc(job.Name,
+                DescribeMoveError(MoveErrItemDataNotLoaded, toRetainerInventory)));
+        }
+
+        /// <summary>
         /// 「目的地滿了」的說法。
         /// 🔑 刻意直接轉呼 <see cref="DescribeMoveError"/> 的 0x19 分支：停手原因與錯誤
         /// 字串共用**同一份來源**，措辭才不可能分岔成兩套。
@@ -536,7 +607,8 @@ namespace Marketbuddy
                 : "you already hold this unique item".Loc(),
             MoveErrNotAllowedNow => "the game refused the delist right now".Loc(),
             MoveErrNoSourceSlot => "the market slot was already empty".Loc(),
-            MoveErrUnknownItem => "the game did not recognise this item".Loc(),
+            MoveErrItemDataNotLoaded =>
+                "the game has not loaded this item's data yet at this moment - this one was not touched and is still listed; wait a few seconds and run it again".Loc(),
             _ => "the delist was rejected (code ??)".Loc(result),
         };
 
@@ -619,7 +691,7 @@ namespace Marketbuddy
         /// 被門檻留下來的那一格會一直待在那裡，只看第一格的話整輪會卡在它身上重試到看門狗。
         /// </summary>
         private static InventoryItem* FindFirstListedSlot(InventoryManager* inventoryManager, int aboveUnitPrice,
-            out short slotIndex)
+            HashSet<uint> excludedItems, out short slotIndex)
         {
             slotIndex = -1;
             var container = inventoryManager->GetInventoryContainer(InventoryType.RetainerMarket);
@@ -631,6 +703,8 @@ namespace Marketbuddy
             {
                 var slot = inventoryManager->GetInventorySlot(InventoryType.RetainerMarket, i);
                 if (slot == null || slot->ItemId == 0)
+                    continue;
+                if (excludedItems.Contains(slot->ItemId))
                     continue;
                 if (!PassesPriceFilter(inventoryManager, i, aboveUnitPrice))
                     continue;

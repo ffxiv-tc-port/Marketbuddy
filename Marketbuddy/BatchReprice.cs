@@ -1757,6 +1757,27 @@ namespace Marketbuddy
             return rate is null or > 25 ? fallback : rate.Value;
         }
 
+        /// <summary>
+        /// 取回前的閘門（同一幀、緊接著取回）：遊戲這一刻查不到這件道具的資料列就不送，改算略過。
+        /// 不等待、不重試：由使用者自己再按一次（市場自動化紅線）。
+        /// </summary>
+        private bool LeftForItemDataNotLoaded(SlotJob job)
+        {
+            if (BatchDelist.IsItemDataLoaded(job.ItemId))
+                return false;
+            NoteItemDataNotLoaded(job, "gate");
+            return true;
+        }
+
+        private void NoteItemDataNotLoaded(SlotJob job, string via)
+        {
+            Log.Information(
+                $"{Diag} DELIST-DATA-NOT-LOADED engine=reprice via={via} item={job.ItemId} slot={job.Slot} " +
+                $"sinceBatchMs={MsSince(batchStartedAt):F0} sinceTerritoryMs={BatchDelist.MsSinceTerritoryChange:F0}");
+            Skip(job, "[Marketbuddy] ??: skipped - ??".Loc(job.Name,
+                BatchDelist.DescribeMoveError(BatchDelist.MoveErrItemDataNotLoaded, conf.DelistToRetainerInventory)));
+        }
+
         /// <param name="vendorCause">
         /// 重掛時的兩道自動下架才給；有值而且收回玩家背包時，這一件會記進「賣給商店」那一輪（見 <see cref="VendorSeller"/>）。
         /// </param>
@@ -1786,6 +1807,9 @@ namespace Marketbuddy
                     return;
                 }
 
+                if (LeftForItemDataNotLoaded(job))
+                    return;
+
                 result = inventoryManager->MoveFromRetainerMarketToRetainerInventory(
                     InventoryType.RetainerMarket, (ushort)job.Slot, quantity);
                 destinationTag = " " + "(moved to retainer inventory)".Loc();
@@ -1797,6 +1821,9 @@ namespace Marketbuddy
                     Fail(job, "your inventory is full, cannot delist".Loc());
                     return;
                 }
+
+                if (LeftForItemDataNotLoaded(job))
+                    return;
 
                 // 背包「下架前」的樣子必須在取回之前記下，取回之後東西可能已經在背包裡了。
                 vendorTracked = vendorCause != null && gui.VendorSeller?.NoteBeforeDelist(job.ItemId, job.IsHq) == true;
@@ -1811,6 +1838,12 @@ namespace Marketbuddy
             // 🔴 一定要看回傳值：不看的話僱員／玩家背包放不下時，畫面上會說下架成功，
             // 東西卻還掛在市場上。回傳值的意義整理在 BatchDelist 的常數區，
             // 那裡是唯一真值來源；這裡只要知道 0 才是成功。
+            if (BatchDelist.IsLeftListedResult(result))
+            {
+                NoteItemDataNotLoaded(job, "rc");
+                return;
+            }
+
             if (result != BatchDelist.MoveOk)
             {
                 // ⚠️ 錯誤字串必須跟著目的地走：兩支取回函式的回傳碼數值相同，但
