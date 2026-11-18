@@ -49,6 +49,8 @@ internal static class Program
     {
         Check("過期限＝放棄（即使守衛放行）", Run(elapsed: QuickListReplay.WindowMs + 1) == ReplayVerdict.Abandon);
         Check("過期限＝放棄（守衛仍擋）", Run(elapsed: QuickListReplay.WindowMs + 1, guard: false) == ReplayVerdict.Abandon);
+        Check("1.2 秒才解除仍補送", Run(elapsed: 1200) == ReplayVerdict.Fire);
+        Check("超過 1.5 秒＝放棄（即使守衛放行）", Run(elapsed: 1501) == ReplayVerdict.Abandon);
     }
 
     private static void BlockedStateAbandons()

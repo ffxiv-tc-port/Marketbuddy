@@ -23,8 +23,8 @@ namespace Marketbuddy
     /// </summary>
     internal static class QuickListReplay
     {
-        /// <summary>從被擋下那一刻起最多等這麼久。</summary>
-        internal const int WindowMs = 1000;
+        /// <summary>從被擋下那一刻起最多等這麼久；守衛的逃生口按幀數算，低幀率時 1 秒常趕不上，再久使用者多半已在做別的事。</summary>
+        internal const int WindowMs = 1500;
 
         /// <param name="blockedBy">非 null＝別的狀態擋著（出售清單關了、別的自動化在跑等），直接放棄。</param>
         /// <param name="menuOpen">同一份選單（同一個位址）這一幀還看得見。</param>
