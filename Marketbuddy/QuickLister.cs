@@ -577,9 +577,10 @@ namespace Marketbuddy
                 if (TryReadFullMarket(out var occupiedSlots, out var inFlightListings, out var marketCapacity))
                 {
                     var fullName = ResolveItemName(item, out _);
-                    ChatGui.PrintError("[Marketbuddy] ??: this retainer's market is full (?? slots) - not listed".Loc(fullName, marketCapacity));
+                    var peersText = MarketFullPeers.Describe(ReadPeerRetainers(), marketCapacity, DateTime.UtcNow);
+                    ChatGui.PrintError("[Marketbuddy] ??: this retainer's market is full (?? slots) - not listed".Loc(fullName, marketCapacity) + peersText);
                     WriteDiag("市場已滿未送出", item->ItemId, fullName,
-                        $"原因=送出前讀到這名僱員的市場已佔 {occupiedSlots}＋已送出還沒出現 {inFlightListings}/上限 {marketCapacity}，沒有選出售");
+                        $"原因=送出前讀到這名僱員的市場已佔 {occupiedSlots}＋已送出還沒出現 {inFlightListings}/上限 {marketCapacity}，沒有選出售；附帶顯示={OrUnknown(peersText.Trim())}");
                     return QuickSelectResult.MarketFull;
                 }
 
@@ -1593,6 +1594,32 @@ namespace Marketbuddy
         /// 目前這名僱員的 ID；不在僱員身上時回 0。
         /// 佇列裡的市場格索引只在**同一名僱員**身上有意義，所以每個項目都要綁著它。
         /// </summary>
+        /// <summary>
+        /// 這個角色其他可用僱員的掛單數（鈴清單順序）；當幀抄值、不留指標、不發請求。僱員資料沒載入回 null。
+        /// 本插件的紀錄只在僱員銷售紀錄開著且已讀回時採用：關著時紀錄不會跟著上架更新。
+        /// </summary>
+        private static List<PeerRetainer>? ReadPeerRetainers()
+        {
+            var retainerManager = RetainerManager.Instance();
+            if (retainerManager == null || !retainerManager->IsReady)
+                return null;
+
+            var activeId = CurrentRetainerId();
+            var useSnapshots = Configuration.GetOrLoad().RetainerSalesLogEnabled && RetainerMarketState.Loaded;
+            var peers = new List<PeerRetainer>();
+            var count = retainerManager->GetRetainerCount();
+            for (var i = 0u; i < count; i++)
+            {
+                var retainer = retainerManager->GetRetainerBySortedIndex(i);
+                if (retainer == null || retainer->RetainerId == 0 || !retainer->Available || retainer->RetainerId == activeId)
+                    continue;
+                var snapshot = useSnapshots ? RetainerMarketState.Get(retainer->RetainerId) : null;
+                peers.Add(new PeerRetainer(retainer->NameString, snapshot?.Listings.Count, snapshot?.AtUtc, retainer->MarketItemCount));
+            }
+
+            return peers;
+        }
+
         private static ulong CurrentRetainerId()
         {
             var retainerManager = RetainerManager.Instance();
