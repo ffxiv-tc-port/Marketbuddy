@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.InteropServices;
 using Dalamud.Game.Addon.Lifecycle;
 using Dalamud.Game.Addon.Lifecycle.AddonArgTypes;
 using Dalamud.Game.ClientState.GamePad;
@@ -300,6 +301,19 @@ namespace Marketbuddy
         private const int DuplicatePressWindowMs = 10000;
 
         private DeferredConfirm? deferredConfirm;
+
+        /// <summary>被選單守衛擋下、等著在同一份選單上補選一次的那一件；同時最多一件（新的擋下取代舊的）。</summary>
+        private sealed class GuardReplay
+        {
+            public required ReplaySlot Slot;
+            public required string Name;
+            public required DateTime BlockedAt;
+
+            /// <summary>使用者那一次右鍵開出的選單；只做等值比較，不解參考。</summary>
+            public required nint MenuAddress;
+        }
+
+        private GuardReplay? guardReplay;
         private InFlightListing[] gateScratch = new InFlightListing[8];
         private InFlightWatch[] watchScratch = new InFlightWatch[8];
 
@@ -503,6 +517,38 @@ namespace Marketbuddy
             if (addon == null)
                 return;
 
+            switch (SelectPutUpForSale(agent, addon, contextAddonId, inventoryType, slot, item))
+            {
+                case QuickSelectResult.GuardBlocked:
+                    QueueGuardReplay(inventoryType, slot, item, (nint)addon);
+                    return;
+                case QuickSelectResult.EntryDisabled:
+                    WriteDiag("選單出售停用", item->ItemId, ResolveItemName(item, out _), "原因=右鍵選單的出售那一項是停用的");
+                    return;
+                case QuickSelectResult.NoEntry:
+                    // No "Put up for sale" entry (item cannot be listed): do nothing.
+                    WriteDiag("選單沒有出售", item->ItemId, ResolveItemName(item, out _), "原因=右鍵選單裡沒有出售那一項");
+                    return;
+            }
+        }
+
+        private enum QuickSelectResult
+        {
+            Fired,
+            MarketFull,
+            GuardBlocked,
+            NotSent,
+            NoEntry,
+            EntryDisabled,
+        }
+
+        /// <summary>
+        /// 在呼叫端這一幀剛從遊戲拿到的選單上找「到市場出售」並選取（一般快速上架，上限價）。
+        /// 守衛擋下時什麼都沒做、回 <see cref="QuickSelectResult.GuardBlocked"/>；排不排補送由呼叫端決定。
+        /// </summary>
+        private QuickSelectResult SelectPutUpForSale(AgentInventoryContext* agent, AtkUnitBase* addon, uint contextAddonId,
+            InventoryType inventoryType, int slot, InventoryItem* item)
+        {
             var sawDisabledEntry = false;
             for (var i = 0; i < agent->ContextItemCount; i++)
             {
@@ -534,7 +580,7 @@ namespace Marketbuddy
                     ChatGui.PrintError("[Marketbuddy] ??: this retainer's market is full (?? slots) - not listed".Loc(fullName, marketCapacity));
                     WriteDiag("市場已滿未送出", item->ItemId, fullName,
                         $"原因=送出前讀到這名僱員的市場已佔 {occupiedSlots}＋已送出還沒出現 {inFlightListings}/上限 {marketCapacity}，沒有選出售");
-                    return;
+                    return QuickSelectResult.MarketFull;
                 }
 
                 // 守衛要在建立呼叫端狀態**之前**問，因為底下那發 callback 可能同步
@@ -544,14 +590,7 @@ namespace Marketbuddy
                 if (contextMenuName.Length == 0)
                     contextMenuName = "ContextMenu";
                 if (!AddonPressGuard.CanPress(contextMenuName, (nint)addon, PressKind.Terminal))
-                {
-                    // 上一次的選單還沒走完生命週期（位址還在）。這一輪就不做 ——
-                    // 刻意**不**排重試：使用者再按一次右鍵就是了。
-                    Log.Information(
-                        "QuickLister: 上一個右鍵選單還沒關乾淨，這一次的快速上架跳過（不對可能正在關閉的選單再按一次）");
-                    WriteDiag("選單守衛擋下", item->ItemId, ResolveItemName(item, out _), "原因=上一個右鍵選單還沒關乾淨");
-                    return;
-                }
+                    return QuickSelectResult.GuardBlocked;
 
                 var name = ResolveItemName(item, out var nameCandidates);
                 var pending = new PendingMenuSelect
@@ -582,7 +621,7 @@ namespace Marketbuddy
                     Log.Information(
                         "QuickLister: 守衛擋下了這一次的選單選取，本次快速上架取消（待處理項已收回）");
                     WriteDiag("選單守衛擋下", pending.ItemId, pending.Name, "原因=送出選單選取時被守衛擋下");
-                    return;
+                    return QuickSelectResult.NotSent;
                 }
 
                 if (closedByCallback)
@@ -590,7 +629,7 @@ namespace Marketbuddy
                     // 原生端已經在回到這裡之前跑完 Hide+Close 了 —— 這裡什麼都不做才是對的。
                     MarketDiag.Trace(
                         $"QuickLister: 已選取『{putUpForSaleText}』({i}) 給 {inventoryType}#{slot}；選單已由原生端關閉");
-                    return;
+                    return QuickSelectResult.Fired;
                 }
 
                 // 回 false ＝原生端走的是不關窗那條。剩下唯一沒被排除的情形是「處理常式自己把窗關掉了」——
@@ -610,19 +649,17 @@ namespace Marketbuddy
                     // 所以這一行是要使用者回報的診斷。
                     Log.Information(
                         $"QuickLister: 已選取『{putUpForSaleText}』({i}) 給 {inventoryType}#{slot}；callback 說沒關窗，但選單已經不在載入清單裡（已釋放或換了實例），不再動它");
-                    return;
+                    return QuickSelectResult.Fired;
                 }
 
                 agent->AgentInterface.Hide();
                 stillOpen->Close(true);
                 Log.Debug(
                     $"QuickLister: 已選取『{putUpForSaleText}』({i}) 給 {inventoryType}#{slot}；選單由我們自己關掉");
-                return;
+                return QuickSelectResult.Fired;
             }
 
-            // No "Put up for sale" entry (item cannot be listed): do nothing.
-            WriteDiag(sawDisabledEntry ? "選單出售停用" : "選單沒有出售", item->ItemId, ResolveItemName(item, out _),
-                sawDisabledEntry ? "原因=右鍵選單的出售那一項是停用的" : "原因=右鍵選單裡沒有出售那一項");
+            return sawDisabledEntry ? QuickSelectResult.EntryDisabled : QuickSelectResult.NoEntry;
         }
 
         /// <summary>
@@ -631,6 +668,130 @@ namespace Marketbuddy
         /// </summary>
         private static bool MenuBuiltFor(AgentInventoryContext* agent, InventoryType inventoryType, int slot)
             => agent->TargetInventoryId == inventoryType && agent->TargetInventorySlotId == slot;
+
+        private static ReplaySlot ReadReplaySlot(InventoryType inventoryType, int slot, InventoryItem* item)
+            => new((int)inventoryType, slot, item->ItemId, item->Quantity,
+                (item->Flags & InventoryItem.ItemFlags.HighQuality) != 0);
+
+        /// <summary>
+        /// 守衛擋下時記下這一格，等上一個選單的守衛紀錄解除後，在使用者這一次右鍵開出的同一份選單上補選一次出售。
+        /// 只補這一件、只補一次；判斷見 <see cref="QuickListReplay.Decide"/>。
+        /// </summary>
+        private void QueueGuardReplay(InventoryType inventoryType, int slot, InventoryItem* item, nint menuAddress)
+        {
+            var name = ResolveItemName(item, out _);
+            if (guardReplay is { } replaced)
+                DropGuardReplay(replaced, $"等待期間又擋下一件（{name}），改補新的那一件");
+            guardReplay = new GuardReplay
+            {
+                Slot = ReadReplaySlot(inventoryType, slot, item),
+                Name = name,
+                BlockedAt = DateTime.UtcNow,
+                MenuAddress = menuAddress,
+            };
+            // 清掉「上次查詢後按過」的位元：之後只算等待期間的輸入。
+            ReplayInputSeen();
+            Log.Information(
+                $"QuickLister: 上一個右鍵選單還沒關乾淨，這一次先不選；{QuickListReplay.WindowMs} ms 內守衛解除就在同一份選單上補選一次（不對可能正在關閉的選單再按一次）");
+            WriteDiag("選單守衛擋下", item->ItemId, name, $"原因=上一個右鍵選單還沒關乾淨，排隊補送（{QuickListReplay.WindowMs} ms 內）");
+        }
+
+        private void DropGuardReplay(GuardReplay replay, string reason)
+        {
+            if (guardReplay == replay)
+                guardReplay = null;
+            WriteDiag("選單守衛補送放棄", replay.Slot.ItemId, replay.Name,
+                $"原因={reason}，等了 {(DateTime.UtcNow - replay.BlockedAt).TotalMilliseconds:0} ms，沒有選出售");
+        }
+
+        /// <summary>每幀：同一份選單、同一格同一件、沒有輸入，守衛一放行就補選；任何一項不成立就放棄。</summary>
+        private void PumpGuardReplay()
+        {
+            var replay = guardReplay!;
+            var elapsed = (DateTime.UtcNow - replay.BlockedAt).TotalMilliseconds;
+            // 每幀都查，讓「按過」位元只涵蓋上一幀到這一幀。
+            var userInput = ReplayInputSeen();
+            var blockedBy = ReplayBlockedBy();
+
+            // 指標全部是這一幀向遊戲重拿的；存下來的選單位址只做等值比較。
+            var agent = AgentInventoryContext.Instance();
+            AtkUnitBase* menu = null;
+            uint contextAddonId = 0;
+            if (agent != null && agent->AgentInterface.IsAgentActive())
+            {
+                contextAddonId = agent->AgentInterface.GetAddonId();
+                var stage = AtkStage.Instance();
+                if (contextAddonId != 0 && stage != null && stage->RaptureAtkUnitManager != null)
+                    menu = stage->RaptureAtkUnitManager->GetAddonById((ushort)contextAddonId);
+            }
+
+            var menuOpen = menu != null && (nint)menu == replay.MenuAddress && menu->IsVisible;
+            var type = (InventoryType)replay.Slot.Container;
+            var inventoryManager = InventoryManager.Instance();
+            var item = inventoryManager == null ? null : inventoryManager->GetInventorySlot(type, replay.Slot.Slot);
+            ReplaySlot? current = item == null || item->ItemId == 0 ? null : ReadReplaySlot(type, replay.Slot.Slot, item);
+            var guardAllows = false;
+            if (menuOpen)
+            {
+                var menuName = AddonHelpers.ReadAddonName(menu);
+                guardAllows = AddonPressGuard.CanPress(menuName.Length == 0 ? "ContextMenu" : menuName, (nint)menu, PressKind.Terminal);
+            }
+
+            var verdict = QuickListReplay.Decide(replay.Slot, elapsed, blockedBy, userInput, menuOpen,
+                agent == null ? -1 : (int)agent->TargetInventoryId, agent == null ? -1 : agent->TargetInventorySlotId,
+                current, guardAllows, out var reason);
+            if (verdict == ReplayVerdict.Wait)
+                return;
+            if (verdict == ReplayVerdict.Abandon)
+            {
+                DropGuardReplay(replay, reason);
+                return;
+            }
+
+            guardReplay = null;
+            var result = SelectPutUpForSale(agent, menu, contextAddonId, type, replay.Slot.Slot, item);
+            Log.Information($"QuickLister: 選單守衛補送：{replay.Name}（{type}#{replay.Slot.Slot}）等了 {elapsed:0} ms，結果={result}");
+            if (result is QuickSelectResult.EntryDisabled or QuickSelectResult.NoEntry or QuickSelectResult.GuardBlocked)
+                WriteDiag("選單守衛補送放棄", replay.Slot.ItemId, replay.Name, $"原因=補送時選單結果={result}，沒有選出售");
+        }
+
+        /// <summary>和右鍵當下同一組前提；任何一項不成立就不補送（回原因），全部成立回 null。</summary>
+        private string? ReplayBlockedBy()
+        {
+            if (conf.QuickListKeyCode == 0)
+                return "快速上架已關閉";
+            if (IPCManager.IsLocked || tour.IsRunning)
+                return "別的插件鎖住了 Marketbuddy，或多僱員巡迴在跑";
+            if (AutoRetainerBridge.IsBusy)
+                return "AutoRetainer 正在跑";
+            if (BatchLister is { IsRunning: true })
+                return "批次上架在跑";
+            if (!gui.IsRetainerSellListOpen)
+                return "出售清單關了";
+            if (deferredConfirm != null)
+                return "上一件的上架視窗還在等確認";
+            if (Commons.GetUnitBase("RetainerSell") != null)
+                return "上架視窗開著";
+            var csFramework = CSFramework.Instance();
+            if (csFramework == null || csFramework->WindowInactive)
+                return "遊戲視窗不在前景";
+            if (OtherModifierHeld(conf.QuickListKeyCode))
+                return "按著其他修飾鍵";
+            return null;
+        }
+
+        /// <summary>
+        /// 滑鼠左鍵或 Esc 按著或「上次查詢後按過」，或確定鍵／手把任一鈕按著。
+        /// 使用者自己點選單時選單會在幾幀內關閉而看起來仍可見：看到輸入就放棄，不對它補選。
+        /// </summary>
+        private static bool ReplayInputSeen()
+        {
+            var mouseOrEsc = ((GetAsyncKeyState(0x01) | GetAsyncKeyState(0x1B)) & 0x8001) != 0;
+            return HeldConfirmInput(out _, out _) || mouseOrEsc;
+        }
+
+        [DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int vKey);
 
         /// <summary>Addon 表第 5480 列（「委託僱員出售物品」）讀得到，<see cref="VendorSeller"/> 才能用。</summary>
         internal bool CanVendorSell => retainerSellText.Length > 0;
@@ -663,6 +824,11 @@ namespace Marketbuddy
         {
             var released = pendingMenuSelects.Count;
             pendingMenuSelects.Clear();
+            if (guardReplay is { } replay)
+            {
+                DropGuardReplay(replay, $"急停（{reason}）");
+                released++;
+            }
             if (deferredConfirm is { } deferred)
             {
                 AbandonDeferredConfirm(deferred, reason, handOver: true);
@@ -1166,6 +1332,8 @@ namespace Marketbuddy
                 PumpDeferredConfirm();
             if (repriceQueue.Count > 0)
                 PumpRepriceQueue();
+            if (guardReplay != null)
+                PumpGuardReplay();
             UpdateSuppression();
         }
 
