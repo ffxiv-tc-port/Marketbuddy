@@ -55,6 +55,8 @@ namespace Marketbuddy
 
             var windowSize = ImGui.GetWindowSize();
             repriceWidest = Math.Max(repriceWidest, windowSize.X);
+            if (stackEdgeY == null)
+                SideColumnAnchorPanelSize = windowSize;
 
             ImGui.TextUnformatted("Relisting".Loc());
             if (ImGui.IsItemHovered())

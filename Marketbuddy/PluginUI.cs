@@ -78,6 +78,11 @@ namespace Marketbuddy
         /// </summary>
         private const float SidePanelGap = 4f;
 
+        /// <summary>出售品視窗旁那一欄貼基準點的那一塊、與僱員選單旁巡迴面板，最近一次畫出來的尺寸（換成固定位置時用）。</summary>
+        internal static Vector2 SideColumnAnchorPanelSize;
+
+        internal static Vector2 RetainerPanelSize;
+
         /// <summary>重掛面板這次畫出來以來最寬的寬度；沒畫的那一幀歸零（左側基準點只增不減用）。</summary>
         private float repriceWidest;
 

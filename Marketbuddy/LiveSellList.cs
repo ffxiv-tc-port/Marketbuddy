@@ -569,6 +569,8 @@ namespace Marketbuddy
                 return null;
             }
 
+            if (stackEdgeY == null)
+                PluginUI.SideColumnAnchorPanelSize = ImGui.GetWindowSize();
             DrawHeader();
             DrawTable();
 

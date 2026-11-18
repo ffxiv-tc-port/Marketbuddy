@@ -30,6 +30,7 @@ internal static class Program
         BottomColumnEndToEnd();
         ListHeightCap();
         SwitchingAnchorResetsOffset();
+        SwitchingToScreenKeepsTopLeft();
         TopColumnHeightCap();
         LeftWidthNeverShrinks();
         ButtonSettleGate();
@@ -251,17 +252,38 @@ internal static class Program
         var s = Size(1f);
         var user = new Vector2(-1161, 320);
         Check("換到左上：偏移重設成往左 4",
-            PanelPlacementMath.OffsetAfterSwitch(PanelAnchor.OutsideTopRight, PanelAnchor.OutsideTopLeft, user, true, NativeTopLeft, s)
+            PanelPlacementMath.OffsetAfterSwitch(PanelAnchor.OutsideTopRight, PanelAnchor.OutsideTopLeft, user, true, NativeTopLeft, s, Panel)
             == new Vector2(-4, 0), "");
         Check("換到右下：偏移重設成往右 4",
-            PanelPlacementMath.OffsetAfterSwitch(PanelAnchor.OutsideTopRight, PanelAnchor.OutsideBottomRight, user, true, NativeTopLeft, s)
+            PanelPlacementMath.OffsetAfterSwitch(PanelAnchor.OutsideTopRight, PanelAnchor.OutsideBottomRight, user, true, NativeTopLeft, s, Panel)
             == new Vector2(4, 0), "");
-        var keep = PanelPlacementMath.OffsetAfterSwitch(PanelAnchor.OutsideTopRight, PanelAnchor.Screen, user, true, NativeTopLeft, s);
+        var keep = PanelPlacementMath.OffsetAfterSwitch(PanelAnchor.OutsideTopRight, PanelAnchor.Screen, user, true, NativeTopLeft, s, Panel);
         Check("換到固定位置（視窗開著）：從原本那一點開始",
             keep == Legacy(NativeTopLeft, s, user), $"keep={keep}");
         Check("換到固定位置（視窗沒開）：預設 100,100",
-            PanelPlacementMath.OffsetAfterSwitch(PanelAnchor.OutsideTopRight, PanelAnchor.Screen, user, false, NativeTopLeft, s)
+            PanelPlacementMath.OffsetAfterSwitch(PanelAnchor.OutsideTopRight, PanelAnchor.Screen, user, false, NativeTopLeft, s, Panel)
             == new Vector2(100, 100), "");
+    }
+
+    private static readonly Vector2 Panel = new(320, 180);
+
+    // 從任何基準點換到固定位置：切換那一幀前後，貼基準點那一塊的左上角不動。
+    private static void SwitchingToScreenKeepsTopLeft()
+    {
+        var s = Size(1f);
+        foreach (var from in new[] { PanelAnchor.OutsideTopRight, PanelAnchor.OutsideBottomRight, PanelAnchor.OutsideTopLeft, PanelAnchor.OutsideBottomLeft })
+        {
+            var offset = PanelPlacementMath.DefaultOffset(from);
+            var before = WindowTopLeft(PanelPlacementMath.Compute(from, NativeTopLeft, s, offset, Vector2.Zero), Panel);
+            var newOffset = PanelPlacementMath.OffsetAfterSwitch(from, PanelAnchor.Screen, offset, true, NativeTopLeft, s, Panel);
+            var after = WindowTopLeft(PanelPlacementMath.Compute(PanelAnchor.Screen, NativeTopLeft, s, newOffset, Vector2.Zero), Panel);
+            Check($"換到固定位置：{from} 左上角不動", before == after, $"before={before} after={after}");
+        }
+
+        // 負對照：改版前不扣樞紐×尺寸（＝尺寸給 0），從左下換過去左上角會跳。
+        var bl = PanelPlacementMath.Compute(PanelAnchor.OutsideBottomLeft, NativeTopLeft, s, new Vector2(-4, 0), Vector2.Zero);
+        var oldOffset = PanelPlacementMath.OffsetAfterSwitch(PanelAnchor.OutsideBottomLeft, PanelAnchor.Screen, new Vector2(-4, 0), true, NativeTopLeft, s, Vector2.Zero);
+        Check("負對照：舊公式從左下換過去會跳", WindowTopLeft(bl, Panel) != oldOffset, $"old={oldOffset}");
     }
 
     private static void Check(string name, bool ok, string detail)

@@ -39,6 +39,7 @@ namespace Marketbuddy
                 return;
             }
 
+            RetainerPanelSize = ImGui.GetWindowSize();
             ImGui.TextUnformatted("All retainers".Loc());
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("Show or hide these controls in /mbuddy".Loc());

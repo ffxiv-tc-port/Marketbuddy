@@ -72,7 +72,8 @@ namespace Marketbuddy
             if (!retainerPanelOn) ImGui.BeginDisabled();
             var retainerListOpen = marketbuddy.MarketGuiEventHandler.AddonRetainerList_Frame(out var retTopLeft, out var retSize);
             if (DrawAnchorOptions("##mbretainerpanel", "All-retainers panel anchor".Loc(),
-                    ref conf.RetainerPanelAnchor, ref conf.RetainerPanelOffset, retainerListOpen, retTopLeft, retSize))
+                    ref conf.RetainerPanelAnchor, ref conf.RetainerPanelOffset, retainerListOpen, retTopLeft, retSize,
+                    RetainerPanelSize))
                 conf.Save();
             if (!retainerPanelOn) ImGui.EndDisabled();
             if (!retainerPanelOn)
@@ -161,7 +162,7 @@ namespace Marketbuddy
             Vector2 nativeSize)
         {
             if (DrawAnchorOptions("##mbsidecolumn", "Side panel anchor".Loc(), ref conf.LiveSellListAnchor,
-                    ref conf.LiveSellListOffset, nativeOpen, nativeTopLeft, nativeSize,
+                    ref conf.LiveSellListOffset, nativeOpen, nativeTopLeft, nativeSize, SideColumnAnchorPanelSize,
                     "Moves both side panels at once: the relisting controls sit right at the anchor point (at the bottom when the anchor is a bottom edge) and the live listing table is stacked directly against them."
                         .Loc()))
                 conf.Save();
@@ -169,8 +170,9 @@ namespace Marketbuddy
 
         /// <summary>基準點下拉選單＋偏移；回傳 true＝值變了、呼叫端要存檔。</summary>
         /// <param name="nativeOpen">原生視窗這一幀開著（<paramref name="nativeTopLeft"/>／<paramref name="nativeSize"/> 才有意義）。</param>
+        /// <param name="panelSize">貼基準點那一塊面板最近一次量到的尺寸。</param>
         private static bool DrawAnchorOptions(string id, string label, ref PanelAnchor anchor, ref Vector2 offset,
-            bool nativeOpen, Vector2 nativeTopLeft, Vector2 nativeSize, string? more = null)
+            bool nativeOpen, Vector2 nativeTopLeft, Vector2 nativeSize, Vector2 panelSize, string? more = null)
         {
             var changed = false;
             var current = PanelPlacementMath.Normalize(anchor);
@@ -185,7 +187,7 @@ namespace Marketbuddy
                         continue;
                     var next = (PanelAnchor)i;
                     offset = PanelPlacementMath.OffsetAfterSwitch(current, next, offset, nativeOpen, nativeTopLeft,
-                        nativeSize);
+                        nativeSize, panelSize);
                     anchor = next;
                     changed = true;
                 }

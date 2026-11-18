@@ -99,14 +99,16 @@ namespace Marketbuddy
 
         /// <summary>
         /// 使用者換基準點之後的偏移：舊偏移是對舊基準點量的，沿用會把面板丟到沒人指定過的位置，所以換成預設間隙；
-        /// 換成固定位置且原生視窗開著時，從舊基準點這一幀算出的那一點開始（樞紐不在左上時是近似）。
+        /// 換成固定位置且原生視窗開著時，貼基準點那一塊面板的左上角不動（固定位置的樞紐是左上）。
         /// </summary>
+        /// <param name="anchorPanelSize">貼基準點那一塊上一幀量到的尺寸；量不到給 0（樞紐不在左上時會差一個寬／高）。</param>
         public static Vector2 OffsetAfterSwitch(PanelAnchor from, PanelAnchor to, Vector2 offset, bool nativeOpen,
-            Vector2 nativeTopLeft, Vector2 nativeSize)
+            Vector2 nativeTopLeft, Vector2 nativeSize, Vector2 anchorPanelSize)
         {
             if (Normalize(to) != PanelAnchor.Screen || !nativeOpen)
                 return DefaultOffset(to);
-            return Compute(from, nativeTopLeft, nativeSize, offset, Vector2.Zero).Position;
+            var old = Compute(from, nativeTopLeft, nativeSize, offset, Vector2.Zero);
+            return old.Position - old.Pivot * anchorPanelSize;
         }
 
         /// <summary>
