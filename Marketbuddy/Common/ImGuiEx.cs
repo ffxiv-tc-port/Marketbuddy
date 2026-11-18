@@ -33,6 +33,24 @@ public static class ImGuiEx
         return false;
     }
 
+    private static readonly ButtonSettle MarketActionSettle = new();
+
+    /// <summary>
+    /// 會觸發市場動作（上架、重掛、下架、賣商店，含兩段式的武裝與確認）的按鈕：
+    /// 位置最近 <see cref="ButtonSettle.SettleMs"/> 內變過或剛出現就停用、不接受點擊。純防呆，不改任何觸發條件。
+    /// <paramref name="key"/> 是固定的追蹤鍵，按鈕文字（倒數秒數等）變了不算移位。停止／取消類按鈕刻意不走這裡：面板一直在動時也要按得到。
+    /// </summary>
+    internal static bool MarketActionButton(string label, string key)
+    {
+        var settled = MarketActionSettle.Observe(key, ImGui.GetCursorScreenPos(), DateTime.UtcNow);
+        if (!settled)
+            ImGui.BeginDisabled();
+        var clicked = ImGui.Button(label);
+        if (!settled)
+            ImGui.EndDisabled();
+        return clicked && settled;
+    }
+
     /// <summary>不給大小的 <c>ImGui.Button</c> 會畫多寬。</summary>
     internal static float ButtonWidth(string label)
         => ImGui.CalcTextSize(label, true).X + (ImGui.GetStyle().FramePadding.X * 2);

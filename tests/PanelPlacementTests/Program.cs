@@ -32,6 +32,7 @@ internal static class Program
         SwitchingAnchorResetsOffset();
         TopColumnHeightCap();
         LeftWidthNeverShrinks();
+        ButtonSettleGate();
 
         Console.WriteLine($"PANELPLACEMENT_DONE pass={passes} fail={failures}");
         return failures == 0 ? 0 : 1;
@@ -216,6 +217,22 @@ internal static class Program
         }
 
         Check("左側：內容變窄時左緣不回縮", lefts[2] == lefts[1] && lefts[1] < lefts[0], string.Join(",", lefts));
+    }
+
+    // 市場動作按鈕：剛出現或剛移位 300 ms 內不接受點擊。
+    private static void ButtonSettleGate()
+    {
+        var settle = new ButtonSettle();
+        var t0 = new DateTime(2026, 11, 19, 12, 0, 0, DateTimeKind.Utc);
+        var p = new Vector2(100, 200);
+        Check("按鈕：剛出現不接受", !settle.Observe("a", p, t0), "");
+        Check("按鈕：299 ms 仍不接受", !settle.Observe("a", p, t0.AddMilliseconds(299)), "");
+        Check("按鈕：300 ms 接受", settle.Observe("a", p, t0.AddMilliseconds(300)), "");
+        Check("按鈕：次像素抖動不算移位", settle.Observe("a", p + new Vector2(0.3f, -0.4f), t0.AddMilliseconds(316)), "");
+        Check("按鈕：移位後不接受", !settle.Observe("a", p + new Vector2(0, 20), t0.AddMilliseconds(333)), "");
+        Check("按鈕：移位後 300 ms 接受", settle.Observe("a", p + new Vector2(0, 20), t0.AddMilliseconds(633)), "");
+        Check("按鈕：隔太久沒畫再出現＝剛出現", !settle.Observe("a", p + new Vector2(0, 20), t0.AddMilliseconds(1000)), "");
+        Check("按鈕：各自的鍵互不影響", !settle.Observe("b", p, t0.AddMilliseconds(1000)), "");
     }
 
     private static void ListHeightCap()

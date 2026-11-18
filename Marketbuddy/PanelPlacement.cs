@@ -125,4 +125,29 @@ namespace Marketbuddy
                 _ => new Vector2(Gap, 0f),
             };
     }
+
+    /// <summary>
+    /// 市場動作按鈕的防呆：同一顆按鈕的畫面位置最近 <see cref="SettleMs"/> 內變過（或剛出現）就不接受點擊，
+    /// 免得面板移位讓別的按鈕剛好滑到游標底下。純防呆：只會讓點擊變少，不產生任何動作。只在 UI 執行緒用。
+    /// </summary>
+    internal sealed class ButtonSettle
+    {
+        public const double SettleMs = 300;
+
+        /// <summary>位置差在這以內當成沒動（次像素的浮點抖動）。</summary>
+        private const float Tolerance = 0.5f;
+
+        private readonly System.Collections.Generic.Dictionary<string, (Vector2 Pos, System.DateTime MovedAt, System.DateTime SeenAt)> entries = new();
+
+        /// <summary>記下這一幀的位置；回 true＝已經靜止夠久，可以接受點擊。</summary>
+        public bool Observe(string key, Vector2 pos, System.DateTime now)
+        {
+            var movedAt = now;
+            if (entries.TryGetValue(key, out var e) && (now - e.SeenAt).TotalMilliseconds <= SettleMs &&
+                System.Math.Abs(e.Pos.X - pos.X) <= Tolerance && System.Math.Abs(e.Pos.Y - pos.Y) <= Tolerance)
+                movedAt = e.MovedAt;
+            entries[key] = (pos, movedAt, now);
+            return (now - movedAt).TotalMilliseconds >= SettleMs;
+        }
+    }
 }

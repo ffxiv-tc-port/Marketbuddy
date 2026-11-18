@@ -163,7 +163,7 @@ namespace Marketbuddy
             var label = UndercutIsZero
                 ? "Relist this retainer".Loc()
                 : DrawText.Loc("Relist this retainer (lowest -??)", GetUndercutText());
-            if (ImGui.Button(DrawText.Concat(label, "##mbbatchstart")))
+            if (MarketActionButton(DrawText.Concat(label, "##mbbatchstart"), "mbbatchstart"))
                 engine.Start();
             if (disabled)
             {
@@ -265,8 +265,8 @@ namespace Marketbuddy
                 ImGui.PushStyleColor(ImGuiCol.Button, ImGuiColors.DalamudRed);
                 ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ImGuiColors.DalamudRed);
                 ImGui.PushStyleColor(ImGuiCol.ButtonActive, ImGuiColors.DalamudRed);
-                if (ImGui.Button("Confirm: take those ?? off the market (??)".Loc(capped.Count, left) +
-                                 "##mbcapdeliststart"))
+                if (MarketActionButton("Confirm: take those ?? off the market (??)".Loc(capped.Count, left) +
+                                 "##mbcapdeliststart", "mbcapdeliststart"))
                 {
                     capDelistArmedUntil = DateTime.MinValue;
                     engine.StartDelistNeedsPricing();
@@ -280,7 +280,7 @@ namespace Marketbuddy
             }
             else
             {
-                if (ImGui.Button(DrawText.Concat("Delist the ones with no market data".Loc(), "##mbcapdelistarm")))
+                if (MarketActionButton(DrawText.Concat("Delist the ones with no market data".Loc(), "##mbcapdelistarm"), "mbcapdelistarm"))
                     capDelistArmedUntil = DateTime.UtcNow + DelistArmWindow;
                 if (!disabled && ImGui.IsItemHovered())
                     ImGui.SetTooltip((conf.DelistToRetainerInventory
@@ -351,9 +351,9 @@ namespace Marketbuddy
                 ImGui.PushStyleColor(ImGuiCol.Button, ImGuiColors.DalamudRed);
                 ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ImGuiColors.DalamudRed);
                 ImGui.PushStyleColor(ImGuiCol.ButtonActive, ImGuiColors.DalamudRed);
-                if (ImGui.Button((DelistPriceFilterActive
+                if (MarketActionButton((DelistPriceFilterActive
                         ? "Confirm: take the filtered listings off the market (??)"
-                        : "Confirm: take this retainer's listings off the market (??)").Loc(left) + "##mbselldeliststart"))
+                        : "Confirm: take this retainer's listings off the market (??)").Loc(left) + "##mbselldeliststart", "mbselldeliststart"))
                 {
                     sellListDelistArmedUntil = DateTime.MinValue;
                     engine.Start();
@@ -367,7 +367,7 @@ namespace Marketbuddy
             }
             else
             {
-                if (ImGui.Button(DrawText.Concat("Delist this retainer".Loc(), "##mbselldelistarm")))
+                if (MarketActionButton(DrawText.Concat("Delist this retainer".Loc(), "##mbselldelistarm"), "mbselldelistarm"))
                     sellListDelistArmedUntil = DateTime.UtcNow + DelistArmWindow;
                 if (!disabled && ImGui.IsItemHovered())
                     ImGui.SetTooltip((conf.DelistToRetainerInventory

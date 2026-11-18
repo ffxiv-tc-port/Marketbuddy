@@ -86,7 +86,7 @@ namespace Marketbuddy
             var disabled = !canStart && !AutoRetainerBridge.IsBusy;
             if (disabled)
                 ImGui.BeginDisabled();
-            if (ImGui.Button(startLabel.Get(stacks, static n => "List ?? ticked stack(s)".Loc(n) + "##mbbatchliststart")))
+            if (ImGuiEx.MarketActionButton(startLabel.Get(stacks, static n => "List ?? ticked stack(s)".Loc(n) + "##mbbatchliststart"), "mbbatchliststart"))
                 lister.Start(lister.TickedPicks(), lister.CandidateSource, false);
             if (disabled)
             {

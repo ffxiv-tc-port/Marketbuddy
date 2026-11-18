@@ -140,9 +140,9 @@ namespace Marketbuddy
                 ImGui.PushStyleColor(ImGuiCol.Button, ImGuiColors.DalamudRed);
                 ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ImGuiColors.DalamudRed);
                 ImGui.PushStyleColor(ImGuiCol.ButtonActive, ImGuiColors.DalamudRed);
-                if (ImGui.Button(confirmLabel.Get((stacks, gilText, left), static k =>
+                if (ImGuiEx.MarketActionButton(confirmLabel.Get((stacks, gilText, left), static k =>
                         "Confirm: sell to the shop (?? stack(s), about ?? gil) (??)".Loc(k.Stacks, k.Gil, k.Left) +
-                        "##mbvendorsellstart")))
+                        "##mbvendorsellstart"), "mbvendorsellstart"))
                 {
                     armedUntil = DateTime.MinValue;
                     seller.Start();
@@ -156,8 +156,8 @@ namespace Marketbuddy
             }
             else
             {
-                if (ImGui.Button(armLabel.Get((stacks, gilText), static k =>
-                        "Sell to the shop (?? stack(s), about ?? gil)".Loc(k.Stacks, k.Gil) + "##mbvendorsellarm")))
+                if (ImGuiEx.MarketActionButton(armLabel.Get((stacks, gilText), static k =>
+                        "Sell to the shop (?? stack(s), about ?? gil)".Loc(k.Stacks, k.Gil) + "##mbvendorsellarm"), "mbvendorsellarm"))
                     armedUntil = DateTime.UtcNow + ArmWindow;
                 if (!disabled && ImGui.IsItemHovered())
                     ImGui.SetTooltip(
