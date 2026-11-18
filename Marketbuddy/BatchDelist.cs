@@ -94,6 +94,25 @@ namespace Marketbuddy
         /// <summary>這個回傳碼代表「這件沒有動、仍在市場上」：照略過處理，不算失敗。</summary>
         internal static bool IsLeftListedResult(int result) => result == MoveErrItemDataNotLoaded;
 
+        /// <summary>取回當場被擋（非 0、非 6）時這一輪怎麼走；零值是保守的「只跳過同款」。</summary>
+        internal enum MoveRefusal
+        {
+            SkipThisItem = 0,
+            StopForSpace,
+            StopForState,
+        }
+
+        /// <summary>
+        /// 0x19：目的地滿了，之後每件都會撞 ⇒ 整批停。0xA：<c>Conditions.HasPermission(0x88)</c> 不過，
+        /// 只看角色狀態、與道具無關 ⇒ 之後每件都會撞，整批停。其餘（0x1C 等）只關這一件 ⇒ 排除同款繼續。
+        /// </summary>
+        internal static MoveRefusal ClassifyMoveRefusal(int result) => result switch
+        {
+            MoveErrNoSpace => MoveRefusal.StopForSpace,
+            MoveErrNotAllowedNow => MoveRefusal.StopForState,
+            _ => MoveRefusal.SkipThisItem,
+        };
+
         /// <summary>取回函式查資料列前做的同一種 id 還原：HQ（+1,000,000）與收藏品（+500,000）的位移拿掉。</summary>
         internal static uint ToBaseItemId(uint itemId) => itemId switch
         {
@@ -158,10 +177,13 @@ namespace Marketbuddy
         private bool suppressionHeld;
 
         /// <summary>
-        /// 這一輪因資料還沒載入而略過的道具；之後找格子時跳過它們。
+        /// 這一輪已經被擋過一次的道具（資料未載入、或取回被擋）；之後找格子時跳過它們。
         /// 🔑 沒有這份的話，「每次都找第一個有東西的格子」會讓後面每個 job 都撞同一件＝變相自動重試。
         /// </summary>
-        private readonly HashSet<uint> leftForDataNotLoaded = new();
+        private readonly HashSet<uint> skipItemsThisRun = new();
+
+        /// <summary>這一輪因道具資料未載入而略過的件數；不併進 <see cref="SkippedCount"/>（那個專指單價門檻）。</summary>
+        internal int DataNotLoadedCount { get; private set; }
 
         /// <summary>
         /// 這一輪的目的地：true = 僱員自己的物品欄，false = 玩家背包。
@@ -348,7 +370,8 @@ namespace Marketbuddy
             CurrentItemName = string.Empty;
             lastMove = DateTime.MinValue;
             startedAt = DateTime.UtcNow;
-            leftForDataNotLoaded.Clear();
+            skipItemsThisRun.Clear();
+            DataNotLoadedCount = 0;
 
             // 🔑 目的地在這裡定案，整輪不再改（理由見 toRetainerInventory 的說明）。
             toRetainerInventory = conf.DelistToRetainerInventory;
@@ -448,7 +471,7 @@ namespace Marketbuddy
                     if (inventoryManager == null)
                         return TickTaskResult.Continue; // 看門狗兜底
 
-                    var slot = FindFirstListedSlot(inventoryManager, aboveUnitPrice, leftForDataNotLoaded, out var slotIndex);
+                    var slot = FindFirstListedSlot(inventoryManager, aboveUnitPrice, skipItemsThisRun, out var slotIndex);
                     if (slot == null)
                     {
                         // 已經沒有**該下架**的掛單了：比開始時預期的少（別人買走、或本來就估多了；
@@ -487,18 +510,6 @@ namespace Marketbuddy
                         $"[Marketbuddy] BatchDelist: slot {slotIndex} ({job.Name}) qty {quantity} -> " +
                         $"{(toRetainerInventory ? "retainer inventory" : "player inventory")}, move returned {result}");
 
-                    if (result == MoveErrNoSpace)
-                    {
-                        // 🔑 目的地滿了**不是失敗**，是這個功能預期中的正常結束
-                        // （收回背包時尤其如此：140 格裝不下最多 180 件，跑不完是常態）。
-                        // 刻意**不**走 Fail()：那一件根本沒被動到，還好好掛在市場上，
-                        // 把它算成「失敗」會讓使用者以為東西出事了。
-                        // 整輪停在這裡，剩下的掛單原封不動留著等下一次。
-                        StoppedForSpace = true;
-                        queue.Abort(DestinationFullReason(toRetainerInventory));
-                        return TickTaskResult.Continue; // Abort 已經清空佇列
-                    }
-
                     if (IsLeftListedResult(result))
                     {
                         LeaveForDataNotLoaded(job, "rc");
@@ -507,12 +518,31 @@ namespace Marketbuddy
 
                     if (result != MoveOk)
                     {
-                        // 🔴 送出被遊戲當場擋下來，而且不是空間問題。
-                        // 這是「有明確原因的失敗」，絕對不能當成正常結束帶過去。
-                        // 只影響這一件，記成失敗之後繼續處理下一件。
-                        // ⚠️ 目的地要傳進去：0x19／0x1C 兩支的主詞不同（見常數區）。
-                        Fail(job, DescribeMoveError(result, toRetainerInventory));
-                        return TickTaskResult.Done;
+                        switch (ClassifyMoveRefusal(result))
+                        {
+                            case MoveRefusal.StopForSpace:
+                                // 🔑 目的地滿了**不是失敗**，是這個功能預期中的正常結束
+                                // （收回背包時尤其如此：140 格裝不下最多 180 件，跑不完是常態）。
+                                // 刻意**不**走 Fail()：那一件根本沒被動到，還好好掛在市場上，
+                                // 把它算成「失敗」會讓使用者以為東西出事了。
+                                // 整輪停在這裡，剩下的掛單原封不動留著等下一次。
+                                StoppedForSpace = true;
+                                queue.Abort(DestinationFullReason(toRetainerInventory));
+                                return TickTaskResult.Continue; // Abort 已經清空佇列
+
+                            case MoveRefusal.StopForState:
+                                // 刻意不自動等狀態解除再續跑（市場自動化紅線）：停下、講清楚，由使用者再按一次。
+                                Fail(job, DescribeMoveError(result, toRetainerInventory));
+                                queue.Abort("your character's current state does not allow this right now (the game usually shows why) - every remaining item would be refused the same way, so the batch stopped here; they are still listed".Loc());
+                                return TickTaskResult.Continue;
+
+                            default:
+                                // 🔴 有明確原因的失敗，只影響這件：記成失敗、這一輪跳過同款，繼續下一件。
+                                // ⚠️ 目的地要傳進去：0x19／0x1C 兩支的主詞不同（見常數區）。
+                                skipItemsThisRun.Add(job.ItemId);
+                                Fail(job, DescribeMoveError(result, toRetainerInventory));
+                                return TickTaskResult.Done;
+                        }
                     }
 
                     job.FiredAt = now;
@@ -574,13 +604,22 @@ namespace Marketbuddy
         /// </summary>
         private void LeaveForDataNotLoaded(DelistJob job, string via)
         {
-            leftForDataNotLoaded.Add(job.ItemId);
+            skipItemsThisRun.Add(job.ItemId);
+            DataNotLoadedCount++;
             ProcessedSlots++;
             Log.Information(
                 $"[MBDIAG] DELIST-DATA-NOT-LOADED engine=delist via={via} item={job.ItemId} slot={job.Slot} " +
                 $"sinceBatchMs={(DateTime.UtcNow - startedAt).TotalMilliseconds:F0} sinceTerritoryMs={MsSinceTerritoryChange:F0}");
             ChatGui.Print("[Marketbuddy] ??: skipped - ??".Loc(job.Name,
                 DescribeMoveError(MoveErrItemDataNotLoaded, toRetainerInventory)));
+        }
+
+        /// <summary>收工／停下時補一行「資料未載入略過幾件」；0 件不印。</summary>
+        private void PrintDataNotLoadedSummary()
+        {
+            if (DataNotLoadedCount > 0)
+                ChatGui.Print("[Marketbuddy] ?? listing(s) skipped because the game had not loaded the item data yet - still listed; wait a few seconds and run it again."
+                    .Loc(DataNotLoadedCount));
         }
 
         /// <summary>
@@ -778,6 +817,7 @@ namespace Marketbuddy
                 }
             }
 
+            PrintDataNotLoadedSummary();
             BatchAborted?.Invoke(reason);
         }
 
@@ -803,6 +843,7 @@ namespace Marketbuddy
             if (SkippedCount > 0)
                 ChatGui.Print("[Marketbuddy] ?? listing(s) kept: unit price not above ?? gil."
                     .Loc(SkippedCount, aboveUnitPrice.ToString("N0")));
+            PrintDataNotLoadedSummary();
         }
     }
 }
