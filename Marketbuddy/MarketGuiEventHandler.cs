@@ -91,9 +91,7 @@ namespace Marketbuddy
                 addon->UldManager.LoadedState != AtkLoadState.Loaded)
                 return false;
 
-            var scale = addon->Scale;
-            if (scale <= 0f || float.IsNaN(scale))
-                scale = 1f;
+            var scale = PanelPlacementMath.SafeScale(addon->Scale);
 
             topLeft = new Vector2(addon->X, addon->Y);
             size = new Vector2(addon->RootNode->Width * scale, addon->RootNode->Height * scale);
@@ -233,9 +231,7 @@ namespace Marketbuddy
                 addon->UldManager.LoadedState != AtkLoadState.Loaded)
                 return false;
 
-            var scale = addon->Scale;
-            if (scale <= 0f || float.IsNaN(scale))
-                scale = 1f;
+            var scale = PanelPlacementMath.SafeScale(addon->Scale);
 
             topLeft = new Vector2(addon->X, addon->Y);
             size = new Vector2(addon->RootNode->Width * scale, addon->RootNode->Height * scale);

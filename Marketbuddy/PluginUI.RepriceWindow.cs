@@ -15,12 +15,12 @@ namespace Marketbuddy
     {
         /// <summary>
         /// 重掛面板：獨立視窗，形式比照 <see cref="LiveSellList"/>，與即時掛單面板同一欄（重掛在上）。
-        /// 兩者共用 <see cref="Configuration.LiveSellListOffset"/> 當作整欄的位移，
-        /// 所以拖滑桿是兩塊一起動；重掛面板高度變化時，下面那塊是照**量到的下緣**
-        /// 重新定位的，不會重疊。
+        /// 兩者共用 <see cref="Configuration.LiveSellListAnchor"/> 與 <see cref="Configuration.LiveSellListOffset"/>，
+        /// 所以調位置是兩塊一起動；另一塊高度變化時，後畫的那塊照**量到的外緣**重新定位，不會重疊。
         /// </summary>
-        /// <returns>面板下緣的螢幕 Y 座標；面板這一幀沒有畫出來時回傳 null。</returns>
-        private float? DrawRepriceWindow()
+        /// <param name="stackEdgeY">先畫的那一塊這一幀的外緣 Y；null＝直接貼基準點。</param>
+        /// <returns>面板外緣的螢幕 Y 座標（往下長＝下緣、往上長＝上緣）；這一幀沒畫出來時回傳 null。</returns>
+        private float? DrawRepriceWindow(float? stackEdgeY)
         {
             var showStack = conf.AdjustMaxStackSizeInSellList;
             var showBatch = conf.BatchRepriceEnabled;
@@ -32,10 +32,10 @@ namespace Marketbuddy
                 !marketbuddy.MarketGuiEventHandler.AddonRetainerSellList_Frame(out var topLeft, out var size))
                 return null;
 
-            // 貼在原生視窗的**右上角**——這一欄的最上面。即時掛單面板接在下面。
-            ImGui.SetNextWindowPos(new Vector2(
-                topLeft.X + size.X + conf.LiveSellListOffset.X,
-                topLeft.Y + conf.LiveSellListOffset.Y));
+            var column = PanelPlacementMath.Compute(conf.LiveSellListAnchor, topLeft, size,
+                conf.LiveSellListOffset, ImGuiHelpers.MainViewport.Pos);
+            var placement = PanelPlacementMath.Stack(column, stackEdgeY);
+            ImGui.SetNextWindowPos(placement.Position, ImGuiCond.Always, placement.Pivot);
 
             if (!ImGui.Begin("Marketbuddy_reprice",
                     ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove |
@@ -76,9 +76,9 @@ namespace Marketbuddy
             if (showVendorSell)
                 vendorSellPanel!.Draw();
 
-            var bottom = ImGui.GetWindowPos().Y + ImGui.GetWindowSize().Y;
+            var edge = PanelPlacementMath.OuterEdgeY(column, ImGui.GetWindowPos(), ImGui.GetWindowSize());
             ImGui.End();
-            return bottom;
+            return edge;
         }
 
         /// <summary>

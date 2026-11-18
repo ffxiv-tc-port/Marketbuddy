@@ -94,11 +94,13 @@ namespace Marketbuddy
         {
             DrawSettingsWindow();
             DrawSurveyWindow();
-            // 順序即排版：重掛面板先畫，畫完把它的下緣交給即時掛單面板當作起點。
-            // 兩者在同一個 ImGui frame 內先後執行，所以這個值永遠是「這一幀的」，不會慢一拍。
-            var repriceBottom = DrawRepriceWindow();
+            // 順序即排版：先畫貼基準點的那一塊，畫完把它的外緣交給另一塊當起點（同一個 ImGui frame，不慢一拍）。
+            // 重掛面板永遠在即時掛單上面：往下長時重掛先畫；基準點在下緣（往上長）時即時掛單先畫。
+            if (PanelPlacementMath.GrowsUp(conf.LiveSellListAnchor))
+                DrawRepriceWindow(marketbuddy.LiveSellList.Draw());
+            else
+                marketbuddy.LiveSellList.Draw(DrawRepriceWindow(null));
             DrawRetainerListOverlay();
-            marketbuddy.LiveSellList.Draw(repriceBottom);
             // 買方那一側的面板貼在市場板搜尋結果視窗旁，與上面那一欄（僱員出售品視窗旁）
             // 位置互不相干，所以不必參與那個堆疊。
             marketbuddy.MarketBuyTally.Draw();

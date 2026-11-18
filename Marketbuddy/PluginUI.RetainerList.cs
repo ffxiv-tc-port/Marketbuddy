@@ -26,9 +26,9 @@ namespace Marketbuddy
 
             var tour = marketbuddy.MultiTour;
 
-            ImGui.SetNextWindowPos(new Vector2(
-                topLeft.X + size.X + conf.RetainerPanelOffset.X,
-                topLeft.Y + conf.RetainerPanelOffset.Y));
+            var placement = PanelPlacementMath.Compute(conf.RetainerPanelAnchor, topLeft, size,
+                conf.RetainerPanelOffset, ImGuiHelpers.MainViewport.Pos);
+            ImGui.SetNextWindowPos(placement.Position, ImGuiCond.Always, placement.Pivot);
 
             if (!ImGui.Begin("Marketbuddy_retainerlist",
                     ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove |

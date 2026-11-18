@@ -4,6 +4,7 @@ using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.Text;
 using Dalamud.Interface.Colors;
+using Dalamud.Interface.Utility;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.UI.Info;
 using FFXIVClientStructs.FFXIV.Component.GUI;
@@ -391,7 +392,8 @@ namespace Marketbuddy
             if (!conf.MarketBuyTallyOverlay || !haveAnchor)
                 return;
 
-            ImGui.SetNextWindowPos(anchor);
+            // 原生視窗座標是遊戲畫面座標；多螢幕視窗化時 ImGui 用桌面座標，差主視窗位置。
+            ImGui.SetNextWindowPos(anchor + ImGuiHelpers.MainViewport.Pos);
             ImGui.SetNextWindowSizeConstraints(
                 new Vector2(240, 60),
                 new Vector2(float.MaxValue, Math.Max(220f, nativeHeight)));

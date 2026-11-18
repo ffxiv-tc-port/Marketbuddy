@@ -146,9 +146,30 @@ namespace Marketbuddy
         public bool LiveSellListOverlay = false;
 
         /// <summary>
-        /// **整欄側邊面板**相對於出售品視窗「右上角」的位移。
+        /// **整欄側邊面板**相對於 <see cref="LiveSellListAnchor"/> 那個基準點的位移
+        /// （基準點是 <see cref="PanelAnchor.Screen"/> 時就是畫面座標）。
         /// </summary>
         public Vector2 LiveSellListOffset = new Vector2(4, 0);
+
+        /// <summary>整欄側邊面板（重掛面板＋即時掛單）的基準點。缺鍵＝右側外緣上緣對齊＝舊行為。</summary>
+        public PanelAnchor LiveSellListAnchor = PanelAnchor.OutsideTopRight;
+
+        /// <summary>即時掛單面板各欄／各項資訊的顯示開關。全部預設開＝舊行為（舊版這些一律畫）。</summary>
+        public bool LiveSellListShowRetainerName = true;
+        public bool LiveSellListShowQuantity = true;
+        public bool LiveSellListShowUnitPrice = true;
+        public bool LiveSellListShowTotal = true;
+
+        /// <summary>
+        /// 市場行情四欄各自的開關；只在 <see cref="LiveSellListMarketColumns"/> 開著時作用（那個是總開關）。
+        /// </summary>
+        public bool LiveSellListShowLowestWorld = true;
+        public bool LiveSellListShowLowestDc = true;
+        public bool LiveSellListShowLastSale = true;
+        public bool LiveSellListShowListedFor = true;
+
+        /// <summary>「重掛後」那一欄；只在 <see cref="RelistUseLastSoldPrice"/> 開著時有內容可畫。</summary>
+        public bool LiveSellListShowRelistColumn = true;
 
         /// <summary>
         /// ⚠️ **已停用，保留只為了不動到既有設定檔。** 位置改由 <see cref="LiveSellListOffset"/> 決定，改這個欄位不會有任何效果。
@@ -158,11 +179,14 @@ namespace Marketbuddy
         public Vector2 RepriceWindowOffset = new Vector2(0, 4);
 
         /// <summary>
-        /// 僱員選單旁那塊「巡迴」面板相對於僱員選單「右上角」的位移。
+        /// 僱員選單旁那塊「巡迴」面板相對於 <see cref="RetainerPanelAnchor"/> 那個基準點的位移。
         /// 版面形式與出售品視窗旁那一欄相同（見 <see cref="LiveSellListOffset"/>），
         /// 但兩個視窗會同時開著、位置互不相干，所以位移分開存。
         /// </summary>
         public Vector2 RetainerPanelOffset = new Vector2(4, 0);
+
+        /// <summary>「巡迴」面板的基準點（相對於僱員選單）。缺鍵＝右側外緣上緣對齊＝舊行為。</summary>
+        public PanelAnchor RetainerPanelAnchor = PanelAnchor.OutsideTopRight;
 
         /// <summary>
         /// 多角色重掛：與 AutoRetainer 的多開模式協作，在 AR 每處理完一個角色、

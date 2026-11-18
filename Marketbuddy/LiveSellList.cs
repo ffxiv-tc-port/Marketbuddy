@@ -4,6 +4,7 @@ using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.Text;
 using Dalamud.Interface.Colors;
+using Dalamud.Interface.Utility;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Component.GUI;
@@ -149,8 +150,8 @@ namespace Marketbuddy
         // draw path calls a game function or dereferences a game pointer other than the
         // addon's own plain position/size fields.
         private readonly List<Row> rows = [];
-        private Vector2 anchor;
-        private float nativeHeight;
+        private Vector2 nativeTopLeft;
+        private Vector2 nativeSize;
         private bool haveAnchor;
         private bool containerReady;
         private ulong snapshotRetainerId;
@@ -234,14 +235,10 @@ namespace Marketbuddy
             // Geometry from plain modelled fields only - deliberately NOT GetScaledWidth()/
             // GetScaledHeight(), which are signature-resolved native calls we cannot verify
             // offline on the Taiwan client.
-            var scale = addon->Scale;
-            if (scale <= 0f || float.IsNaN(scale))
-                scale = 1f;
-
-            anchor = new Vector2(
-                addon->X + addon->RootNode->Width * scale + conf.LiveSellListOffset.X,
-                addon->Y + conf.LiveSellListOffset.Y);
-            nativeHeight = addon->RootNode->Height * scale;
+            // 只存這一幀量到的矩形（純數值）；基準點與偏移在 Draw 裡套，設定一改下一幀就生效。
+            var scale = PanelPlacementMath.SafeScale(addon->Scale);
+            nativeTopLeft = new Vector2(addon->X, addon->Y);
+            nativeSize = new Vector2(addon->RootNode->Width * scale, addon->RootNode->Height * scale);
             haveAnchor = true;
 
             RebuildRows();
@@ -542,30 +539,26 @@ namespace Marketbuddy
         }
 
         /// <summary>
-        /// 這個面板貼在原生出售品視窗的右邊，而重掛面板（同一欄、在它上面）高度是會變的，
-        /// 所以起點不能寫死：<paramref name="stackUnderY"/> 是重掛面板**這一幀量到的下緣**，
-        /// 由 <see cref="PluginUI.Draw"/> 在畫完它之後立刻傳進來。傳 null 代表重掛面板
-        /// 這一幀沒出現，此時退回原本的「貼齊原生視窗右上角」。
+        /// 這個面板與重掛面板是同一欄，位置由 <see cref="Configuration.LiveSellListAnchor"/>
+        /// 決定、每幀依原生視窗這一幀的矩形重算。重掛面板的高度會變，所以疊放的起點不能寫死：
+        /// <paramref name="stackEdgeY"/> 是先畫的那一塊**這一幀量到的外緣**（往下長＝下緣、往上長＝上緣），
+        /// null＝那一塊這一幀沒畫，直接貼基準點。
         /// </summary>
-        /// <param name="stackUnderY">重掛面板下緣的螢幕 Y 座標，或 null。</param>
-        public void Draw(float? stackUnderY = null)
+        /// <returns>這一塊的外緣 Y（給後畫的那一塊接）；這一幀沒畫出來時回傳 null。</returns>
+        public float? Draw(float? stackEdgeY = null)
         {
             if (!conf.LiveSellListOverlay || !haveAnchor)
-                return;
+                return null;
 
-            const float stackGap = 4f;
-            var position = anchor;
-            if (stackUnderY is { } top)
-                position.Y = top + stackGap;
+            var column = PanelPlacementMath.Compute(conf.LiveSellListAnchor, nativeTopLeft, nativeSize,
+                conf.LiveSellListOffset, ImGuiHelpers.MainViewport.Pos);
+            var placement = PanelPlacementMath.Stack(column, stackEdgeY);
 
-            // 高度上限扣掉被上面那塊吃掉的垂直空間，這樣整欄加起來還是大致貼齊原生視窗；
-            // 200 px 的地板保留不動，否則重掛面板很高時這裡會被壓到看不見東西。
-            var availableHeight = nativeHeight - (position.Y - anchor.Y);
-
-            ImGui.SetNextWindowPos(position);
+            // 高度上限扣掉同一欄被另一塊吃掉的垂直空間；200 px 地板，否則重掛面板很高時這裡會被壓到看不見。
+            ImGui.SetNextWindowPos(placement.Position, ImGuiCond.Always, placement.Pivot);
             ImGui.SetNextWindowSizeConstraints(
                 new Vector2(220, 80),
-                new Vector2(float.MaxValue, Math.Max(200f, availableHeight)));
+                new Vector2(float.MaxValue, PanelPlacementMath.ListMaxHeight(nativeSize.Y, column, placement, 200f)));
 
             if (!ImGui.Begin("Marketbuddy_livesellist",
                     ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove |
@@ -573,13 +566,15 @@ namespace Marketbuddy
                     ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoSavedSettings))
             {
                 ImGui.End();
-                return;
+                return null;
             }
 
             DrawHeader();
             DrawTable();
 
+            var edge = PanelPlacementMath.OuterEdgeY(column, ImGui.GetWindowPos(), ImGui.GetWindowSize());
             ImGui.End();
+            return edge;
         }
 
         private void DrawHeader()
@@ -589,11 +584,26 @@ namespace Marketbuddy
             ImGui.TextUnformatted("Live listings".Loc());
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("Re-read every frame - always shows the current prices".Loc());
-            if (retainerLabel.Length > 0)
+            if (retainerLabel.Length > 0 && conf.LiveSellListShowRetainerName)
             {
                 ImGui.SameLine();
                 ImGui.TextColored(ImGuiColors.DalamudOrange, retainerLabel);
             }
+
+            // 與 /mbuddy「面板」分頁同一份選項（同一個方法畫），在這裡開是為了邊看邊調。
+            ImGui.SameLine();
+            if (ImGui.SmallButton(DrawText.Concat("Options".Loc(), "##mblivesellistopts")))
+                ImGui.OpenPopup("##mblivesellistoptspopup");
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Choose which columns are shown and where this panel sits".Loc());
+            if (ImGui.BeginPopup("##mblivesellistoptspopup"))
+            {
+                PluginUI.DrawLiveSellListDisplayOptions(conf);
+                ImGui.Separator();
+                PluginUI.DrawSideColumnPositionOptions(conf, true, nativeTopLeft, nativeSize);
+                ImGui.EndPopup();
+            }
+
             ImGui.SameLine();
             if (ImGui.SmallButton("x##mblivesellistclose"))
             {
@@ -631,26 +641,40 @@ namespace Marketbuddy
                 : (short)-1;
 
             // 「重掛後的金額」只有在那個定價方式開著時才有意義，關著時不占版面。
-            var showRelist = conf.RelistUseLastSoldPrice;
+            // 道具名那一欄永遠畫：它是這一列「是哪一件」的唯一依據。
+            var showRelist = conf.RelistUseLastSoldPrice && conf.LiveSellListShowRelistColumn;
             var showMarket = conf.LiveSellListMarketColumns;
+            var showQty = conf.LiveSellListShowQuantity;
+            var showUnit = conf.LiveSellListShowUnitPrice;
+            var showTotal = conf.LiveSellListShowTotal;
+            var showLowWorld = showMarket && conf.LiveSellListShowLowestWorld;
+            var showLowDc = showMarket && conf.LiveSellListShowLowestDc;
+            var showLastSale = showMarket && conf.LiveSellListShowLastSale;
+            var showAge = showMarket && conf.LiveSellListShowListedFor;
             var showHistory = conf.LiveSellListSalesHistoryColumn;
-            var columns = 4 + (showRelist ? 1 : 0) + (showMarket ? 4 : 0) + (showHistory ? 1 : 0);
+            var columns = 1 + (showQty ? 1 : 0) + (showUnit ? 1 : 0) + (showTotal ? 1 : 0) +
+                          (showLowWorld ? 1 : 0) + (showLowDc ? 1 : 0) + (showLastSale ? 1 : 0) + (showAge ? 1 : 0) +
+                          (showHistory ? 1 : 0) + (showRelist ? 1 : 0);
 
             if (!ImGui.BeginTable("##mblivesellisttable", columns,
                     ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerH))
                 return;
 
             ImGui.TableSetupColumn("Item".Loc(), ImGuiTableColumnFlags.WidthStretch);
-            ImGui.TableSetupColumn("Qty".Loc());
-            ImGui.TableSetupColumn("Unit price".Loc());
-            ImGui.TableSetupColumn("Total".Loc());
-            if (showMarket)
-            {
+            if (showQty)
+                ImGui.TableSetupColumn("Qty".Loc());
+            if (showUnit)
+                ImGui.TableSetupColumn("Unit price".Loc());
+            if (showTotal)
+                ImGui.TableSetupColumn("Total".Loc());
+            if (showLowWorld)
                 ImGui.TableSetupColumn("Lowest here".Loc());
+            if (showLowDc)
                 ImGui.TableSetupColumn("Lowest on DC".Loc());
+            if (showLastSale)
                 ImGui.TableSetupColumn("Last sale".Loc());
+            if (showAge)
                 ImGui.TableSetupColumn("Listed for".Loc());
-            }
 
             // 刻意緊接在「已掛售多久」後面：「掛了 12 天／賣出 0 次」要一起讀才有意義。
             if (showHistory)
@@ -687,42 +711,60 @@ namespace Marketbuddy
                     ImGui.TextUnformatted(row.Name);
                 }
 
-                ImGui.TableNextColumn();
-                ImGui.TextUnformatted(DrawText.N0(row.Quantity));
-
-                ImGui.TableNextColumn();
-                var changed = changesApply &&
-                              changes.TryGetValue(row.Slot, out var change) &&
-                              change.NewPrice == row.UnitPrice &&
-                              DateTime.UtcNow - change.At <= ChangeHighlightFor;
-                if (changed)
+                if (showQty)
                 {
-                    ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.HealerGreen);
-                    ImGui.TextUnformatted(DrawText.N0(row.UnitPrice));
-                    ImGui.PopStyleColor();
-                    if (ImGui.IsItemHovered())
-                        ImGui.SetTooltip("Repriced by Marketbuddy: ?? → ??".Loc(
-                            changes[row.Slot].OldPrice.ToString("N0"), row.UnitPrice.ToString("N0")));
-                }
-                else
-                {
-                    ImGui.TextUnformatted(DrawText.N0(row.UnitPrice));
+                    ImGui.TableNextColumn();
+                    ImGui.TextUnformatted(DrawText.N0(row.Quantity));
                 }
 
-                ImGui.TableNextColumn();
-                ImGui.TextUnformatted(DrawText.N0((long)row.UnitPrice * row.Quantity));
+                if (showUnit)
+                {
+                    ImGui.TableNextColumn();
+                    var changed = changesApply &&
+                                  changes.TryGetValue(row.Slot, out var change) &&
+                                  change.NewPrice == row.UnitPrice &&
+                                  DateTime.UtcNow - change.At <= ChangeHighlightFor;
+                    if (changed)
+                    {
+                        ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.HealerGreen);
+                        ImGui.TextUnformatted(DrawText.N0(row.UnitPrice));
+                        ImGui.PopStyleColor();
+                        if (ImGui.IsItemHovered())
+                            ImGui.SetTooltip("Repriced by Marketbuddy: ?? → ??".Loc(
+                                changes[row.Slot].OldPrice.ToString("N0"), row.UnitPrice.ToString("N0")));
+                    }
+                    else
+                    {
+                        ImGui.TextUnformatted(DrawText.N0(row.UnitPrice));
+                    }
+                }
 
-                if (showMarket)
+                if (showTotal)
+                {
+                    ImGui.TableNextColumn();
+                    ImGui.TextUnformatted(DrawText.N0((long)row.UnitPrice * row.Quantity));
+                }
+
+                if (showLowWorld)
                 {
                     ImGui.TableNextColumn();
                     DrawMinPriceCell(row, row.MinWorld, forDatacentre: false);
+                }
 
+                if (showLowDc)
+                {
                     ImGui.TableNextColumn();
                     DrawMinPriceCell(row, row.MinDc, forDatacentre: true);
+                }
 
+                if (showLastSale)
+                {
                     ImGui.TableNextColumn();
                     DrawLastSaleCell(row);
+                }
 
+                if (showAge)
+                {
                     ImGui.TableNextColumn();
                     DrawAgeCell(row);
                 }
