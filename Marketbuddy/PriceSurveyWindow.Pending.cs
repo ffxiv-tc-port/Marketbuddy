@@ -376,6 +376,16 @@ namespace Marketbuddy
                             "The next seller along is asking ?? gil, so the cheapest listing looks like somebody dropped a zero. This test compares one seller against another, so a market-wide crash never lands here - only a single odd listing does."
                                 .Loc(world));
                     return;
+                case "anomaly-hist":
+                case "anomaly-hist-high":
+                    ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudOrange);
+                    ImGui.TextUnformatted(DrawText.Loc("far from the sale median ??  ??", world, age));
+                    ImGui.PopStyleColor();
+                    if (TooltipHovered())
+                        Tooltip(
+                            "Recent sales of this item on your data centre have a median of ?? gil, and this price is the anomaly multiplier (or more) away from it with nothing seen right now backing it up - typically a price used to move gil between characters. It was not followed."
+                                .Loc(world));
+                    return;
                 case "anomaly-own":
                     ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudOrange);
                     ImGui.TextUnformatted(DrawText.Loc("looks mistyped  vs your ??  ??", world, age));

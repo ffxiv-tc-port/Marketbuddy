@@ -319,8 +319,7 @@ namespace Marketbuddy
 
             var homeWorldId = PlayerState.ContentId == 0 ? 0u : PlayerState.HomeWorld.RowId;
             var undercutRule = conf.UndercutRuleSnapshot();
-            var anomalyRule = new RelistPricing.AnomalyRule(
-                conf.AnomalyGuardEnabled, conf.AnomalyGuardMinNormalPrice, conf.AnomalyGuardRatio);
+            var anomalyRule = conf.AnomalyRuleSnapshot();
 
             // 「賣出/下架」那一欄的資料基礎。🔑 這幾個判斷的唯一目的是讓
             // 「我們沒看過」與「看過但沒賣掉」在畫面上分得出來——兩者長得一模一樣，
@@ -401,6 +400,7 @@ namespace Marketbuddy
                 {
                     var listedPrice = RetainerMarketPrice.TryGet(inventoryManager, i, out var listedRaw) ? (long)listedRaw : -1L;
                     long competitor = -1;
+                    long boardWitness = -1;
                     long peerBaseline = -1;
                     var listingSource = string.Empty;
                     var listingAt = DateTime.MinValue;
@@ -413,6 +413,7 @@ namespace Marketbuddy
                         competitor = RelistPricing.LowestCompetitor(
                             cachedListings, isHq, conf.BatchCompareHqOnly, ownRetainers,
                             out peerBaseline, out var ownIsLowest, out _);
+                        boardWitness = competitor;
                         if (ownIsLowest)
                         {
                             // 與引擎同一條規則：自家掛單已經是最低時板上不提供目標價。
@@ -432,18 +433,26 @@ namespace Marketbuddy
                                  out var surveyLowest, out var surveyAt))
                     {
                         competitor = surveyLowest;
+                        boardWitness = surveyLowest;
                         listingSource = PriceSourceTag.Survey;
                         listingAt = surveyAt;
                     }
 
+                    var now = DateTime.UtcNow;
+                    var saleWitness = hasSold && !RelistPricing.IsSaleStale(
+                        sold.SoldAtUtc, now, conf.RelistLastSoldMaxAgeDays)
+                        ? sold.UnitPrice
+                        : -1L;
                     var listingCandidate = RelistPricing.FromListing(
                         competitor, peerBaseline, listedPrice, listingSource, listingAt,
-                        undercutRule, anomalyRule);
+                        undercutRule, anomalyRule,
+                        LastSoldPriceSource.SaleMedianOrUnknown(slot->ItemId, isHq), saleWitness);
                     var saleCandidate = hasSold
                         ? RelistPricing.FromSale(
                             sold.UnitPrice, sold.SoldAtUtc,
                             minWorld is { } salePeer ? salePeer.UnitPrice : -1L,
-                            listedPrice, DateTime.UtcNow, conf.RelistLastSoldMaxAgeDays, anomalyRule)
+                            listedPrice, now, conf.RelistLastSoldMaxAgeDays, anomalyRule,
+                            LastSoldPriceSource.SaleMedianOrUnknown(slot->ItemId, sold.Hq), boardWitness)
                         : PriceCandidate.None;
 
                     var decision = RelistPricing.Decide(listingCandidate, saleCandidate);

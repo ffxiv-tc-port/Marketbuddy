@@ -239,9 +239,7 @@ namespace Marketbuddy
             int UndercutAmount,
             int UndercutRoundTo,
             int MinPrice,
-            bool AnomalyEnabled,
-            int AnomalyMinNormalPrice,
-            int AnomalyRatio,
+            RelistPricing.AnomalyRule Anomaly,
             string? CsvPath,
             IReadOnlySet<uint> ExcludedWorlds,
             bool UseLastSold,
@@ -328,9 +326,7 @@ namespace Marketbuddy
                 conf.BatchMinPrice,
                 // 🔴 拍成快照帶走：這一段之後會跑到執行緒池上，
                 //    而設定物件是繪製執行緒在改的。
-                conf.AnomalyGuardEnabled,
-                conf.AnomalyGuardMinNormalPrice,
-                conf.AnomalyGuardRatio,
+                conf.AnomalyRuleSnapshot(),
                 PriceSurveyItemSource.InventoryToolsCsvPath(),
                 // 🔴 排除清單是一個裸 List，繪製執行緒（勾選框）會改它。
                 //    這裡是 framework 執行緒，當場拍一份快照帶走，
@@ -406,7 +402,8 @@ namespace Marketbuddy
             long ListingReference, long ListingPeer, string ListingSource, string ListingWorld,
             DateTime ListingAt,
             long SaleReference, long SalePeer, string SaleWorld, DateTime SaleAt,
-            long OtherReference, string OtherSource, string OtherWorld, DateTime OtherAt);
+            long OtherReference, string OtherSource, string OtherWorld, DateTime OtherAt,
+            long ListingMedian, long SaleMedian);
 
         /// <summary>
         /// 巡檢記錄裡有資料、但被排除清單擋下來的那些世界的名字（已排序）。
@@ -578,6 +575,7 @@ namespace Marketbuddy
             // S：資料中心最近一次實際成交。⚠️ 只讀快取，絕不在這裡發 HTTP 查詢。
             long saleRef = -1;
             long salePeer = -1;
+            long saleMedian = -1;
             var saleWorld = string.Empty;
             var saleAt = DateTime.MinValue;
             if (request.UseLastSold
@@ -586,6 +584,7 @@ namespace Marketbuddy
                 saleRef = sold.UnitPrice;
                 saleAt = sold.SoldAtUtc;
                 saleWorld = sold.World;
+                saleMedian = LastSoldPriceSource.SaleMedianOrUnknown(itemId, sold.Hq);
                 // 異常低價保護在成交價這一側的同業基準＝本世界目前最低掛售價，
                 // 與重掛引擎用的是同一個來源（理由見 BatchReprice.TickSaleCandidate）。
                 salePeer = LastSoldPriceSource.TryGetMinPrices(itemId, hq, out var minWorld, out _)
@@ -650,7 +649,8 @@ namespace Marketbuddy
                 best >= 0 ? best : -1,
                 otherSource,
                 best >= 0 ? bestWorld : excludedWorld,
-                best >= 0 ? bestAt : excludedAt);
+                best >= 0 ? bestAt : excludedAt,
+                LastSoldPriceSource.SaleMedianOrUnknown(itemId, hq), saleMedian);
         }
 
         /// <summary>
@@ -669,15 +669,20 @@ namespace Marketbuddy
             var undercut = new RelistPricing.UndercutRule(
                 request.UsePercent, request.UndercutPercent, request.UndercutAmount,
                 request.UndercutRoundTo, request.MinPrice);
-            var anomalyRule = new RelistPricing.AnomalyRule(
-                request.AnomalyEnabled, request.AnomalyMinNormalPrice, request.AnomalyRatio);
+            var anomalyRule = request.Anomaly;
+            var now = DateTime.UtcNow;
+            var saleWitness = observed.SaleReference > 0 &&
+                              !RelistPricing.IsSaleStale(observed.SaleAt, now, request.MaxSaleAgeDays)
+                ? observed.SaleReference
+                : -1;
 
             var listing = RelistPricing.FromListing(
                 observed.ListingReference, observed.ListingPeer, currentPrice,
-                observed.ListingSource, observed.ListingAt, undercut, anomalyRule);
+                observed.ListingSource, observed.ListingAt, undercut, anomalyRule,
+                observed.ListingMedian, saleWitness);
             var sale = RelistPricing.FromSale(
                 observed.SaleReference, observed.SaleAt, observed.SalePeer, currentPrice,
-                DateTime.UtcNow, request.MaxSaleAgeDays, anomalyRule);
+                now, request.MaxSaleAgeDays, anomalyRule, observed.SaleMedian, observed.ListingReference);
 
             var decision = RelistPricing.Decide(listing, sale);
             switch (decision.Outcome)

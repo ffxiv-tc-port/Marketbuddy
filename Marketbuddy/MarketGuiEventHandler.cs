@@ -524,6 +524,7 @@ namespace Marketbuddy
             var ownRetainers = OwnRetainerIds();
             long lowest = -1;
             ulong lowestRetainerId = 0;
+            var lowestHq = false;
             foreach (var listing in listings)
             {
                 if (ownRetainers.Contains(listing.RetainerId))
@@ -532,16 +533,24 @@ namespace Marketbuddy
                     continue;
                 lowest = listing.Price;
                 lowestRetainerId = listing.RetainerId;
+                lowestHq = listing.IsHq;
             }
 
             if (lowest < 0 || pickedUnitPrice > lowest)
                 return false;
 
-            var anomaly = PriceAnomalyGuard.Evaluate(lowest,
-                PriceAnomalyGuard.PeerBaseline(listings, lowestRetainerId, ownRetainers),
+            var peer = PriceAnomalyGuard.PeerBaseline(listings, lowestRetainerId, ownRetainers);
+            var saleWitness = conf.RelistUseLastSoldPrice
+                              && LastSoldPriceSource.TryGet(itemId, lowestHq, conf.RelistLastSoldIgnoreQuality, out var sold)
+                              && !RelistPricing.IsSaleStale(sold.SoldAtUtc, DateTime.UtcNow, conf.RelistLastSoldMaxAgeDays)
+                ? sold.UnitPrice
+                : -1L;
+            var anomaly = PriceAnomalyGuard.Evaluate(lowest, peer,
                 // 🔴 -1＝「我現在賣多少」不知道，所以自家現價那條退路整個不走。
-                -1L, conf);
-            if (!anomaly.IsAnomalous)
+                -1L, conf.AnomalyRuleSnapshot(), LastSoldPriceSource.SaleMedianOrUnknown(itemId, lowestHq),
+                [peer, saleWitness], [saleWitness]);
+            // 偏高不擋：手動點了一個偏高的最低價不會賤賣任何東西。
+            if (!anomaly.IsAnomalous || anomaly.Baseline == AnomalyBaseline.HistoryHigh)
                 return false;
 
             Log.Information(

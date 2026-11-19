@@ -26,6 +26,12 @@ namespace Marketbuddy
         /// ⚠️ 這一種分不出「別人打錯字」與「我自己開得太貴」，是誤判率最高的一種。
         /// </summary>
         Own = 2,
+
+        /// <summary>比近期成交中位數低太多倍，而且沒有任何現況觀測佐證（見 <see cref="HistoryOutlier"/>）。</summary>
+        History = 3,
+
+        /// <summary>比近期成交中位數高太多倍，而且沒有佐證（例：轉錢用的天價掛單或成交）。</summary>
+        HistoryHigh = 4,
     }
 
     /// <summary>一次異常低價判定的完整結果（含「為什麼」），UI 與 log 都直接用它。</summary>
@@ -39,8 +45,13 @@ namespace Marketbuddy
 
         public bool IsAnomalous => Baseline != AnomalyBaseline.None;
 
-        /// <summary>正常價是參考價的幾倍；算不出來時 -1（＝不知道，不是 0）。</summary>
-        public double Ratio => Reference > 0 && NormalPrice > 0 ? (double)NormalPrice / Reference : -1d;
+        /// <summary>差了幾倍（偏高那一種是參考價÷正常價，其餘是正常價÷參考價）；算不出來時 -1（＝不知道，不是 0）。</summary>
+        public double Ratio => Reference > 0 && NormalPrice > 0
+            ? Baseline == AnomalyBaseline.HistoryHigh ? (double)Reference / NormalPrice : (double)NormalPrice / Reference
+            : -1d;
+
+        /// <summary>判準是近期成交中位數（兩個方向都算）。</summary>
+        public bool IsHistory => Baseline is AnomalyBaseline.History or AnomalyBaseline.HistoryHigh;
 
         /// <summary>給畫面與聊天訊息用的倍數字串；不知道時是 <c>?</c>。</summary>
         public string RatioText
@@ -57,6 +68,8 @@ namespace Marketbuddy
         {
             AnomalyBaseline.Peer => "anomaly-peer",
             AnomalyBaseline.Own => "anomaly-own",
+            AnomalyBaseline.History => "anomaly-hist",
+            AnomalyBaseline.HistoryHigh => "anomaly-hist-high",
             _ => string.Empty,
         };
     }
@@ -114,6 +127,38 @@ namespace Marketbuddy
             }
 
             return best;
+        }
+
+        /// <summary>
+        /// 先看近期成交中位數，<b>有中位數時它就是唯一判準</b>（兩個方向都判）；沒有時照舊走
+        /// <see cref="Evaluate(long,long,long,bool,int,int)"/>。
+        /// </summary>
+        /// <remarks>
+        /// 🔑 中位數優先而不是兩套都跑：同業基準在板上被一筆天價掛單佔住時會把正常的成交判成「打錯的低價」，
+        /// 兩套並存等於讓那個誤判繼續擋住正常價。
+        /// </remarks>
+        internal static PriceAnomaly Evaluate(long reference, long peerBaseline, long ownPrice,
+            RelistPricing.AnomalyRule rule, long historyMedian,
+            ReadOnlySpan<long> lowWitnesses, ReadOnlySpan<long> highWitnesses)
+        {
+            if (!rule.Enabled)
+                return PriceAnomaly.Clear;
+
+            if (rule.UseHistory)
+            {
+                switch (HistoryOutlier.Judge(reference, historyMedian, rule.Ratio, rule.HistoryMinMedian,
+                            lowWitnesses, highWitnesses))
+                {
+                    case HistoryVerdict.Normal:
+                        return PriceAnomaly.Clear;
+                    case HistoryVerdict.Low:
+                        return new PriceAnomaly(AnomalyBaseline.History, reference, historyMedian);
+                    case HistoryVerdict.High:
+                        return new PriceAnomaly(AnomalyBaseline.HistoryHigh, reference, historyMedian);
+                }
+            }
+
+            return Evaluate(reference, peerBaseline, ownPrice, rule.Enabled, rule.MinNormalPrice, rule.Ratio);
         }
 
         /// <summary>設定物件版的 <see cref="Evaluate(long,long,long,bool,int,int)"/>。</summary>

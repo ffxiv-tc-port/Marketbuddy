@@ -145,8 +145,21 @@ namespace Marketbuddy
             /// </summary>
             public int ExclusionRevision;
 
+            /// <summary>近期成交中位數（依品質分開，扣掉排除清單上的世界）；-1＝沒有或筆數不足。</summary>
+            public long MedianNq = -1;
+
+            public long MedianHq = -1;
+
+            /// <summary>中位數是用幾筆成交算的（只給 log）。</summary>
+            public int MedianNqCount;
+
+            public int MedianHqCount;
+
             public DateTime StampUtc;
         }
+
+        /// <summary>一件道具的近期成交中位數（依品質分開）。</summary>
+        private readonly record struct SaleMedians(long Nq, int NqCount, long Hq, int HqCount);
 
         /// <summary>
         /// 排除清單的一份不可變快照。
@@ -214,6 +227,23 @@ namespace Marketbuddy
         /// <summary>快取屬於哪個世界（換世界＝整份丟掉，資料中心可能不同）。</summary>
         private static uint cacheWorldId;
 
+        /// <summary>
+        /// 這一輪要不要順便查近期成交中位數（<see cref="Request"/> 在 framework 執行緒上照設定寫入）。
+        /// 📌 開關一變就整份快取作廢：留著的答案沒有中位數，等 TTL 到期才補會讓開關看起來沒作用。
+        /// </summary>
+        private static volatile bool wantMedians;
+
+        /// <summary>每件道具最多取幾筆成交算中位數（Universalis 由新到舊回傳）。</summary>
+        private const int MedianEntriesPerItem = 200;
+
+        /// <summary>
+        /// 中位數那一次 GET 的時間上限（含重試）。🔴 它排在最近成交價查詢前面，而重掛每一格最多只等 25 秒
+        /// 最近成交價——慢的中位數不能把那一條也拖成逾時。
+        /// </summary>
+        private const int MedianTimeoutSeconds = 8;
+
+        private static int medianFailureLogged;
+
         /// <summary>單一飛行閘：0＝沒有 pump 在跑。</summary>
         private static int pumping;
 
@@ -251,6 +281,9 @@ namespace Marketbuddy
 
         private static uint[]? dcWorlds;
 
+        /// <summary>Universalis 對這個資料中心的稱呼（歷史端點要用它）；空＝還沒問到。</summary>
+        private static volatile string dcName = string.Empty;
+
         private static uint dcWorldsForWorld;
 
         private static DateTime dcWorldsExpiryUtc = DateTime.MinValue;
@@ -277,6 +310,7 @@ namespace Marketbuddy
             Volatile.Write(ref failureLogged, 0);
             Volatile.Write(ref overviewFailureLogged, 0);
             Volatile.Write(ref successLogged, 0);
+            Volatile.Write(ref medianFailureLogged, 0);
         }
 
         internal static void Shutdown()
@@ -478,6 +512,41 @@ namespace Marketbuddy
         /// 那個選項的用途是找「最近賣出價」，而拿自己的優質品去跟普通品的最低價比是錯的比較。
         /// 📌 <b>這兩個值刻意不套世界排除清單</b>，而且也不受清單版號影響。
         /// </summary>
+        /// <summary>
+        /// 這件道具近 <see cref="HistoryOutlier.WindowDays"/> 天的資料中心成交中位數（照這個品質、扣掉排除清單上的世界）。
+        /// 🔴 筆數不足 <see cref="HistoryOutlier.MinEntries"/> 或沒查到一律回 false，<b>不回 0</b>。
+        /// </summary>
+        internal static bool TryGetSaleMedian(uint itemId, bool hq, out long median, out int count)
+        {
+            median = -1;
+            count = 0;
+            if (!Cache.TryGetValue(itemId, out var item) || item.State != LastSoldState.Ready ||
+                item.ExclusionRevision != exclusion.Revision)
+                return false;
+
+            median = hq ? item.MedianHq : item.MedianNq;
+            count = hq ? item.MedianHqCount : item.MedianNqCount;
+            return median > 0;
+        }
+
+        /// <summary>同 <see cref="TryGetSaleMedian"/>，查不到回 -1。</summary>
+        internal static long SaleMedianOrUnknown(uint itemId, bool hq)
+            => TryGetSaleMedian(itemId, hq, out var median, out _) ? median : -1;
+
+        /// <summary>🔴 只從 framework 執行緒呼叫（讀設定）。</summary>
+        private static bool WantMedians()
+        {
+            try
+            {
+                var conf = Configuration.GetOrLoad();
+                return conf.AnomalyGuardEnabled && conf.AnomalyGuardUseSaleHistory;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         internal static bool TryGetMinPrices(uint itemId, bool hq,
             out MarketPricePoint? world, out MarketPricePoint? datacenter)
         {
@@ -521,8 +590,10 @@ namespace Marketbuddy
             EnsureWorldNames();
             var snapshot = SyncExclusions();
 
-            if (worldId != cacheWorldId)
+            var medians = WantMedians();
+            if (worldId != cacheWorldId || medians != wantMedians)
             {
+                wantMedians = medians;
                 // 換世界＝可能換了資料中心，整份丟掉重來。
                 Cache.Clear();
                 lock (Gate)
@@ -694,6 +765,10 @@ namespace Marketbuddy
 
             try
             {
+                var medians = wantMedians
+                    ? await FetchSaleMediansAsync(client, worldId, batch, ex, token).ConfigureAwait(false)
+                    : null;
+
                 var url = "https://universalis.app/api/v2/aggregated/" + worldId + "/" +
                           string.Join(",", batch);
                 using var response = await SendWithRetryAsync(client, url, token).ConfigureAwait(false);
@@ -728,14 +803,14 @@ namespace Marketbuddy
                 }
                 else
                 {
-                    await ParseAggregatedAsync(response, batch, unresolved, worldId, ex, token)
+                    await ParseAggregatedAsync(response, batch, unresolved, worldId, ex, medians, token)
                         .ConfigureAwait(false);
                 }
 
                 HashSet<uint> recovered;
                 try
                 {
-                    recovered = await ResolveWithOverviewAsync(worldId, unresolved, ex, token)
+                    recovered = await ResolveWithOverviewAsync(worldId, unresolved, ex, medians, token)
                         .ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
@@ -786,7 +861,7 @@ namespace Marketbuddy
         /// </summary>
         private static async Task ParseAggregatedAsync(
             HttpResponseMessage response, List<uint> batch, HashSet<uint> unresolved,
-            uint worldId, ExclusionSnapshot ex, CancellationToken token)
+            uint worldId, ExclusionSnapshot ex, Dictionary<uint, SaleMedians>? medians, CancellationToken token)
         {
             await using var stream = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
             var json = await JsonSerializer
@@ -822,7 +897,7 @@ namespace Marketbuddy
                                minDcNq != null || minDcHq != null ||
                                nqExcluded || hqExcluded;
 
-                Cache[result.itemId] = new ItemEntry
+                Cache[result.itemId] = WithMedians(new ItemEntry
                 {
                     State = anything ? LastSoldState.Ready : LastSoldState.NoData,
                     Nq = nq,
@@ -835,7 +910,7 @@ namespace Marketbuddy
                     ExcludedHq = hqExcluded,
                     ExclusionRevision = ex.Revision,
                     StampUtc = now,
-                };
+                }, result.itemId, medians);
                 handled.Add(result.itemId);
             }
 
@@ -929,7 +1004,7 @@ namespace Marketbuddy
         /// </summary>
         private static async Task<HashSet<uint>> ResolveWithOverviewAsync(
             uint worldId, IReadOnlyCollection<uint> itemIds, ExclusionSnapshot ex,
-            CancellationToken token)
+            Dictionary<uint, SaleMedians>? medians, CancellationToken token)
         {
             var recovered = new HashSet<uint>();
             if (itemIds.Count == 0)
@@ -971,7 +1046,7 @@ namespace Marketbuddy
                 {
                     if (entry == null)
                         continue;
-                    Cache[itemId] = entry;
+                    Cache[itemId] = WithMedians(entry, itemId, medians);
                     recovered.Add(itemId);
                 }
             }
@@ -1035,12 +1110,12 @@ namespace Marketbuddy
                     .DeserializeAsync<List<DataCenterDto>>(stream, JsonOptions, token)
                     .ConfigureAwait(false);
 
-                var worlds = centers?
-                    .FirstOrDefault(c => c.worlds != null && c.worlds.Contains(worldId))?
-                    .worlds?.ToArray() ?? [];
+                var center = centers?.FirstOrDefault(c => c.worlds != null && c.worlds.Contains(worldId));
+                var worlds = center?.worlds?.ToArray() ?? [];
                 if (worlds.Length == 0)
                     return [];
 
+                dcName = center?.name ?? string.Empty;
                 dcWorlds = worlds;
                 dcWorldsForWorld = worldId;
                 dcWorldsExpiryUtc = DateTime.UtcNow.AddHours(DataCentersCacheHours);
@@ -1206,6 +1281,106 @@ namespace Marketbuddy
                 $"其中 {asked - unresolved} 件由 aggregated 端點直接回答、" +
                 $"{recovered} 件靠 v3 端點補查補回、{unresolved - recovered} 件確實沒有資料。" +
                 "成功之後不再重複回報，只有失敗才會再寫一行。");
+        }
+
+        private static ItemEntry WithMedians(ItemEntry entry, uint itemId, Dictionary<uint, SaleMedians>? medians)
+        {
+            if (medians != null && medians.TryGetValue(itemId, out var m))
+            {
+                entry.MedianNq = m.Nq;
+                entry.MedianNqCount = m.NqCount;
+                entry.MedianHq = m.Hq;
+                entry.MedianHqCount = m.HqCount;
+            }
+
+            return entry;
+        }
+
+        /// <summary>
+        /// 一次 GET 問完這一批的近期成交（資料中心範圍；問不到資料中心名稱時退回本世界），算出每件、每個品質的中位數。
+        /// 🔴 不擲例外（取消除外）：失敗只代表這一批沒有中位數，異常價保護照舊走同業那一套。
+        /// </summary>
+        private static async Task<Dictionary<uint, SaleMedians>?> FetchSaleMediansAsync(
+            HttpClient client, uint worldId, List<uint> batch, ExclusionSnapshot ex, CancellationToken outer)
+        {
+            using var budget = CancellationTokenSource.CreateLinkedTokenSource(outer);
+            budget.CancelAfter(TimeSpan.FromSeconds(MedianTimeoutSeconds));
+            var token = budget.Token;
+            try
+            {
+                await GetDataCenterWorldsAsync(client, worldId, token).ConfigureAwait(false);
+                var name = dcWorldsForWorld == worldId ? dcName : string.Empty;
+                var scope = name.Length > 0 ? Uri.EscapeDataString(name) : worldId.ToString();
+                var url = "https://universalis.app/api/v2/history/" + scope + "/" + string.Join(",", batch) +
+                          "?entriesWithin=" + HistoryOutlier.WindowDays * 86400 +
+                          "&entriesToReturn=" + MedianEntriesPerItem;
+                using var response = await SendWithRetryAsync(client, url, token).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    NoteMedianFailure($"HTTP {(int)response.StatusCode}");
+                    return null;
+                }
+
+                await using var stream = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
+                var json = await JsonSerializer.DeserializeAsync<HistoryDto>(stream, JsonOptions, token)
+                    .ConfigureAwait(false);
+                if (json == null)
+                    return null;
+
+                var cutoff = DateTime.UtcNow.AddDays(-HistoryOutlier.WindowDays);
+                var result = new Dictionary<uint, SaleMedians>();
+                if (json.items != null)
+                {
+                    foreach (var (key, item) in json.items)
+                    {
+                        if (uint.TryParse(key, out var itemId))
+                            result[itemId] = MediansOf(item.entries, ex, cutoff);
+                    }
+                }
+                else if (json.itemID != 0)
+                {
+                    result[json.itemID] = MediansOf(json.entries, ex, cutoff);
+                }
+
+                Volatile.Write(ref medianFailureLogged, 0);
+                return result;
+            }
+            catch (OperationCanceledException) when (!outer.IsCancellationRequested)
+            {
+                // 自己的時間上限或 HttpClient 逾時：只是這一批沒有中位數，不能讓整批最近成交價跟著算失敗。
+                NoteMedianFailure($"timeout {MedianTimeoutSeconds}s");
+                return null;
+            }
+            catch (Exception e)
+            {
+                NoteMedianFailure(e.Message);
+                return null;
+            }
+        }
+
+        private static SaleMedians MediansOf(List<HistoryEntryDto>? entries, ExclusionSnapshot ex, DateTime cutoffUtc)
+        {
+            var nq = new List<long>();
+            var hq = new List<long>();
+            foreach (var e in entries ?? [])
+            {
+                if (e.pricePerUnit is not { } price || price <= 0 ||
+                    ex.IsExcluded(e.worldID ?? 0u) || ToUtc(e.timestamp) < cutoffUtc)
+                    continue;
+                (e.hq ? hq : nq).Add(price);
+            }
+
+            return new SaleMedians(HistoryOutlier.Median(nq), nq.Count, HistoryOutlier.Median(hq), hq.Count);
+        }
+
+        private static void NoteMedianFailure(string reason)
+        {
+            if (Interlocked.Exchange(ref medianFailureLogged, 1) != 0)
+                return;
+
+            Log.Information(
+                $"[Marketbuddy] 近期成交中位數：向 Universalis 查詢失敗（{reason}）。" +
+                "這一批道具的異常價保護照舊用「下一位賣家」那一套判斷；成功一次之後會再回報下一次失敗。");
         }
 
         /// <summary>
@@ -1416,6 +1591,27 @@ namespace Marketbuddy
 
             /// <summary>Unix <b>毫秒</b>。</summary>
             public long? saleTime { get; set; }
+        }
+
+        /// <summary>v2 history：多件時是 <c>items</c>，只問一件時是 <c>itemID</c>＋<c>entries</c>。</summary>
+        internal sealed class HistoryDto
+        {
+            public uint itemID { get; set; }
+            public List<HistoryEntryDto>? entries { get; set; }
+            public Dictionary<string, HistoryDto>? items { get; set; }
+        }
+
+        internal sealed class HistoryEntryDto
+        {
+            public bool hq { get; set; }
+
+            /// <summary>成交單價，未稅。</summary>
+            public long? pricePerUnit { get; set; }
+
+            /// <summary>Unix 秒（<see cref="ToUtc"/> 秒與毫秒都吃）。</summary>
+            public long? timestamp { get; set; }
+
+            public uint? worldID { get; set; }
         }
 
         internal sealed class DataCenterDto

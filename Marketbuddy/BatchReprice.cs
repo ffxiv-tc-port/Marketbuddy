@@ -1290,8 +1290,7 @@ namespace Marketbuddy
             var ownBasis = job.QuickListed ? -1L : listedPrice;
 
             var undercut = conf.UndercutRuleSnapshot();
-            var anomalyRule = new RelistPricing.AnomalyRule(
-                conf.AnomalyGuardEnabled, conf.AnomalyGuardMinNormalPrice, conf.AnomalyGuardRatio);
+            var anomalyRule = conf.AnomalyRuleSnapshot();
 
             // ---------------- 候選 L：板上（家世界）別人的最低掛售價 ----------------
             long competitor = -1;
@@ -1321,15 +1320,18 @@ namespace Marketbuddy
 
             // 🔑 板上最便宜的那一筆是我們自己掛的時候，L 一律當成「沒有」：
             //    板上沒有給我們任何「該降到多少」的新資訊，而且我們不會自己壓自己的價。
+            var saleWitness = SaleWitness(job, now, conf.RelistLastSoldMaxAgeDays);
             var listing = ownIsLowest
                 ? PriceCandidate.None
                 : RelistPricing.FromListing(
-                    competitor, peerBaseline, ownBasis, listingSource, listingAt, undercut, anomalyRule);
+                    competitor, peerBaseline, ownBasis, listingSource, listingAt, undercut, anomalyRule,
+                    LastSoldPriceSource.SaleMedianOrUnknown(job.ItemId, job.IsHq), saleWitness);
 
             // ---------------- 候選 S：資料中心最近一筆成交價 ----------------
             var sale = RelistPricing.FromSale(
                 job.SaleUnitPrice, job.SaleAtUtc, job.SalePeerBaseline, ownBasis,
-                now, conf.RelistLastSoldMaxAgeDays, anomalyRule);
+                now, conf.RelistLastSoldMaxAgeDays, anomalyRule,
+                LastSoldPriceSource.SaleMedianOrUnknown(job.ItemId, job.SaleHq), competitor);
 
             var decision = RelistPricing.Decide(listing, sale);
             LogPricingDecision(job, listing, sale, decision, listedPrice, ownIsLowest, competitor);
@@ -1385,8 +1387,7 @@ namespace Marketbuddy
         {
             var now = DateTime.UtcNow;
             var undercut = conf.UndercutRuleSnapshot();
-            var anomalyRule = new RelistPricing.AnomalyRule(
-                conf.AnomalyGuardEnabled, conf.AnomalyGuardMinNormalPrice, conf.AnomalyGuardRatio);
+            var anomalyRule = conf.AnomalyRuleSnapshot();
 
             long competitor = -1;
             long peerBaseline = -1;
@@ -1409,14 +1410,16 @@ namespace Marketbuddy
                 listingAt = now;
             }
 
-            var listing = ownIsLowest
-                ? PriceCandidate.None
-                : RelistPricing.FromListing(competitor, peerBaseline, -1, listingSource, listingAt, undercut, anomalyRule);
             var maxAgeDays = conf.RelistLastSoldMaxAgeDays > 0
                 ? conf.RelistLastSoldMaxAgeDays
                 : ProbeSaleMaxAgeDaysWhenUnlimited;
+            var listing = ownIsLowest
+                ? PriceCandidate.None
+                : RelistPricing.FromListing(competitor, peerBaseline, -1, listingSource, listingAt, undercut, anomalyRule,
+                    LastSoldPriceSource.SaleMedianOrUnknown(job.ItemId, job.IsHq), SaleWitness(job, now, maxAgeDays));
             var sale = RelistPricing.FromSale(
-                job.SaleUnitPrice, job.SaleAtUtc, job.SalePeerBaseline, -1, now, maxAgeDays, anomalyRule);
+                job.SaleUnitPrice, job.SaleAtUtc, job.SalePeerBaseline, -1, now, maxAgeDays, anomalyRule,
+                LastSoldPriceSource.SaleMedianOrUnknown(job.ItemId, job.SaleHq), competitor);
             var decision = RelistPricing.Decide(listing, sale);
             LogPricingDecision(job, listing, sale, decision, -1, ownIsLowest, competitor);
 
@@ -1434,8 +1437,11 @@ namespace Marketbuddy
                 PriceProbeOutcome.BelowVendor => "market net ?? < NPC ?? gil".Loc(
                     price * (100L - taxPercent) / 100L, job.VendorUnitPrice),
                 PriceProbeOutcome.BelowMin => "price ?? below your minimum ??".Loc(price, conf.BatchMinPrice),
-                PriceProbeOutcome.Hold => "?? gil looks like a mistyped price".Loc(
-                    decision.Winner.Anomaly.Reference.ToString("N0")),
+                PriceProbeOutcome.Hold => decision.Winner.Anomaly.IsHistory
+                    ? "?? gil is ??x off the recent sale median ?? gil".Loc(
+                        decision.Winner.Anomaly.Reference.ToString("N0"), decision.Winner.Anomaly.RatioText,
+                        decision.Winner.Anomaly.NormalPrice.ToString("N0"))
+                    : "?? gil looks like a mistyped price".Loc(decision.Winner.Anomaly.Reference.ToString("N0")),
                 _ => "no one is selling this item".Loc(),
             };
             ProcessedSlots++;
@@ -1466,6 +1472,12 @@ namespace Marketbuddy
 
             HandleNoListings(job, cacheTag);
         }
+
+        /// <summary>拿來佐證板上價的成交單價：過期或沒有就是 -1（過期的成交不能替現況背書）。</summary>
+        private static long SaleWitness(SlotJob job, DateTime now, int maxAgeDays)
+            => job.SaleUnitPrice > 0 && !RelistPricing.IsSaleStale(job.SaleAtUtc, now, maxAgeDays)
+                ? job.SaleUnitPrice
+                : -1;
 
         /// <summary>異常低價保護的 log 欄位 <c>refKind</c>：參考價是哪一種。</summary>
         private static string ReferenceKindOf(PriceCandidate candidate)
@@ -2134,6 +2146,12 @@ namespace Marketbuddy
             var reference = anomaly.Reference.ToString("N0");
             var normal = anomaly.NormalPrice.ToString("N0");
 
+            if (anomaly.IsHistory)
+            {
+                HoldForHistoryOutlier(job, anomaly, ours, reference, normal, cacheTag);
+                return;
+            }
+
             if (job.QuickListed)
             {
                 // 快速上架的那一格本來就停在上限價：保護不改價，所以它還在上限價上，
@@ -2148,6 +2166,25 @@ namespace Marketbuddy
 
             Skip(job,
                 "[Marketbuddy] ??: kept at ?? gil - ?? gil looks like a mistyped price (??x below the ?? gil that looks normal), so it was not used"
+                    .Loc(job.Name, ours, reference, anomaly.RatioText, normal) + cacheTag);
+        }
+
+        /// <summary>參考價和近期成交中位數差太多倍（兩個方向）：與 <see cref="HoldForAnomaly"/> 同一個處置，只是講法不同。</summary>
+        private void HoldForHistoryOutlier(SlotJob job, PriceAnomaly anomaly, string ours, string reference,
+            string normal, string cacheTag)
+        {
+            if (job.QuickListed)
+            {
+                ProcessedSlots++;
+                NeedsPricingCount++;
+                ChatGui.PrintError(
+                    "[Marketbuddy] ??: ?? gil is ??x off the recent sale median ?? gil, so this is still at the price cap - price it by hand"
+                        .Loc(job.Name, reference, anomaly.RatioText, normal) + cacheTag);
+                return;
+            }
+
+            Skip(job,
+                "[Marketbuddy] ??: kept at ?? gil - ?? gil is ??x off the recent sale median ?? gil, so it was not used"
                     .Loc(job.Name, ours, reference, anomaly.RatioText, normal) + cacheTag);
         }
 

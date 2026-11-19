@@ -223,6 +223,38 @@ namespace Marketbuddy
             ImGui.SetNextItemWidth(45);
             if (ImGui.InputInt(anomalyRatioLabel, ref conf.AnomalyGuardRatio, 0))
                 conf.Save();
+
+            DrawNestIndicator(1);
+            if (ImGui.Checkbox("Judge by the recent sale median when there is one (both directions)".Loc(),
+                    ref conf.AnomalyGuardUseSaleHistory))
+                conf.Save();
+            HelpMarker(
+                "On by default. When Universalis has at least ?? sales of the item on your data centre in the last ?? days, the cheapest listing and the last sale are both compared against the median of those sales instead of against the next seller. A price that is the multiplier above (or more) away from the median in either direction - typically somebody moving gil between their own characters with a silly price - is ignored, unless something else seen right now backs it up (another seller or the last sale in the same range), which is what a real market move looks like. If that leaves nothing to price by, the slot is left alone as above. The gil threshold above only applies to the next-seller test. Needs \"Also price from the most recent sale, and use whichever is lower\" on, because that is where the sales come from; items without enough sales are judged the old way."
+                    .Loc(HistoryOutlier.MinEntries, HistoryOutlier.WindowDays));
+            if (conf.AnomalyGuardUseSaleHistory)
+            {
+                DrawNestIndicator(2);
+                var historyMinRowX = ImGui.GetCursorPosX();
+                ImGui.TextWrapped("only when the median is at least".Loc());
+                var historyMinLabel = DrawText.Concat("gil or more (0 = always)".Loc(), "##mbanomalyhistmin");
+                SameLineOrBelow(historyMinRowX, LabeledItemWidth(110, historyMinLabel));
+                ImGui.SetNextItemWidth(110);
+                if (ImGui.InputInt(historyMinLabel, ref conf.AnomalyHistoryMinMedian, 0))
+                {
+                    if (conf.AnomalyHistoryMinMedian < 0)
+                        conf.AnomalyHistoryMinMedian = 0;
+                    conf.Save();
+                }
+
+                if (!conf.RelistUseLastSoldPrice)
+                {
+                    DrawNestIndicator(2);
+                    ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+                    ImGui.TextWrapped("Not in effect: \"Also price from the most recent sale, and use whichever is lower\" is off, so there are no sales to take a median of.".Loc());
+                    ImGui.PopStyleColor();
+                }
+            }
+
             if (!anomalyOn) PopStyleDisabled();
 
             // 🔑 「設成這樣等於沒開」必須在畫面上看得見：靜靜地不作用與「開著」長得一模一樣。

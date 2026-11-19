@@ -110,6 +110,19 @@ namespace Marketbuddy
         /// 超出範圍時保護<b>整個不作用</b>（寧可不擋，也不要擋住正常的降價）。
         /// </remarks>
         public int AnomalyGuardRatio = 5;
+
+        /// <summary>
+        /// 異常價保護有近期成交中位數時改用它判，<b>兩個方向都判</b>（轉錢交易的天價掛單／成交也擋）。<b>預設開。</b>
+        /// </summary>
+        /// <remarks>
+        /// 倍數沿用 <see cref="AnomalyGuardRatio"/>；中位數來自 Universalis（資料中心近
+        /// <see cref="HistoryOutlier.WindowDays"/> 天成交），所以只在 <see cref="RelistUseLastSoldPrice"/> 開著時有資料。
+        /// 沒有中位數的道具照舊走同業／自家現價那一套，<see cref="AnomalyGuardMinNormalPrice"/> 也只管那一套。
+        /// </remarks>
+        public bool AnomalyGuardUseSaleHistory = true;
+
+        /// <summary>近期成交中位數低於這個數（gil）就不用中位數判。</summary>
+        public int AnomalyHistoryMinMedian = 1000;
         public int MarketTaxPercent = 5;
         public bool DelistToRetainerInventory = false;
         public int QuickListKeyCode = 0;
@@ -590,6 +603,11 @@ namespace Marketbuddy
         internal RelistPricing.UndercutRule UndercutRuleSnapshot()
             => new(UndercutUsePercent, UndercutPercent, UndercutPrice, EffectiveRoundingMultiple(), BatchMinPrice);
 
+        /// <summary>異常價保護的值快照；所有算 L／S 的地方共用這一份。</summary>
+        internal RelistPricing.AnomalyRule AnomalyRuleSnapshot()
+            => new(AnomalyGuardEnabled, AnomalyGuardMinNormalPrice, AnomalyGuardRatio,
+                AnomalyGuardUseSaleHistory, AnomalyHistoryMinMedian);
+
         /// <summary>已經載入的設定；還沒載入時回 <c>null</c>。</summary>
         /// <remarks>🔴 給不可以在自己執行緒上讀檔的呼叫端用（封包處理器、hook detour）：<see cref="GetOrLoad"/> 的冷路徑會讀檔並可能寫檔。</remarks>
         internal static Configuration? Loaded => _cachedConfig;
@@ -620,6 +638,8 @@ namespace Marketbuddy
                     conf.BatchMinPrice = 0;
                 if (conf.AnomalyGuardMinNormalPrice < 0)
                     conf.AnomalyGuardMinNormalPrice = 0;
+                if (conf.AnomalyHistoryMinMedian < 0)
+                    conf.AnomalyHistoryMinMedian = 0;
                 // 🔴 刻意**不**夾到合法範圍內：被手改成範圍外的值時該發生的事是
                 //    「保護不作用」（PriceAnomalyGuard.Evaluate 自己會放行），
                 //    而不是被我們悄悄改成 2 或 1000 —— 那等於替使用者做了他沒要的決定。

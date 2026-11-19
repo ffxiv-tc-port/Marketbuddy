@@ -52,7 +52,7 @@ namespace Marketbuddy
         /// <summary>這個候選可以拿來定價。</summary>
         public bool IsUsable => Target >= Configuration.MIN_PRICE;
 
-        /// <summary>這個候選被異常低價保護擋下來了（而且不是因為太舊被丟掉）。</summary>
+        /// <summary>這個候選被異常價保護擋下來了（而且不是因為太舊被丟掉）。</summary>
         public bool HeldByAnomaly => Anomaly.IsAnomalous && !Stale;
     }
 
@@ -108,8 +108,11 @@ namespace Marketbuddy
         internal readonly record struct UndercutRule(
             bool UsePercent, int Percent, int Amount, int RoundTo, long RoundFloor);
 
-        /// <summary>異常低價保護的<b>值快照</b>。語意逐字比照 <see cref="PriceAnomalyGuard"/>。</summary>
-        internal readonly record struct AnomalyRule(bool Enabled, int MinNormalPrice, int Ratio);
+        /// <summary>異常價保護的<b>值快照</b>。語意逐字比照 <see cref="PriceAnomalyGuard"/>。</summary>
+        /// <param name="UseHistory">有近期成交中位數時改用它判（兩個方向），見 <see cref="HistoryOutlier"/>。</param>
+        /// <param name="HistoryMinMedian">中位數低於這個數就不用中位數判。</param>
+        internal readonly record struct AnomalyRule(
+            bool Enabled, int MinNormalPrice, int Ratio, bool UseHistory, int HistoryMinMedian);
 
         /// <summary>
         /// 把參考價換算成掛售價：百分比模式用浮點乘法（<b>絕不用整數除法</b>），然後夾到合法範圍，
@@ -254,16 +257,20 @@ namespace Marketbuddy
         /// <param name="ownListedPrice">自己這一格目前的掛售價；-1＝不知道／不可信（停在上限價的那種）。</param>
         /// <param name="source">出處標籤（<see cref="PriceSourceTag.Live"/>／<c>Cache</c>／<c>Survey</c>）。</param>
         /// <param name="atUtc">這個觀測是什麼時候的；<see cref="DateTime.MinValue"/>＝不知道。</param>
+        /// <param name="historyMedian">近期成交中位數（這一格的品質）；-1＝沒有。</param>
+        /// <param name="saleWitness">可以佐證行情的成交單價（過期的不算）；-1＝沒有。</param>
+        /// <remarks>偏高只認成交當佐證：下一位賣家一定不比最低價便宜，拿它佐證「行情真的這麼高」沒有意義。</remarks>
         internal static PriceCandidate FromListing(
             long lowestCompetitor, long peerBaseline, long ownListedPrice,
-            string source, DateTime atUtc, UndercutRule undercut, AnomalyRule anomaly)
+            string source, DateTime atUtc, UndercutRule undercut, AnomalyRule anomaly,
+            long historyMedian, long saleWitness)
         {
             if (lowestCompetitor <= 0)
                 return PriceCandidate.None;
 
             var verdict = PriceAnomalyGuard.Evaluate(
-                lowestCompetitor, peerBaseline, ownListedPrice,
-                anomaly.Enabled, anomaly.MinNormalPrice, anomaly.Ratio);
+                lowestCompetitor, peerBaseline, ownListedPrice, anomaly, historyMedian,
+                [peerBaseline, saleWitness], [saleWitness]);
 
             return new PriceCandidate(
                 lowestCompetitor,
@@ -283,17 +290,20 @@ namespace Marketbuddy
         /// <param name="ownListedPrice">自己這一格目前的掛售價；-1＝不知道／不可信。</param>
         /// <param name="nowUtc">現在（呼叫端傳進來，這個類別不讀時鐘）。</param>
         /// <param name="maxAgeDays">新鮮度窗（天）；<b>0＝不限</b>。</param>
+        /// <param name="historyMedian">近期成交中位數（這筆成交的品質）；-1＝沒有。</param>
+        /// <param name="listingWitness">這一輪看到的板上別人最低價（自家最低時也照填）；-1＝沒有。</param>
         internal static PriceCandidate FromSale(
             long unitPrice, DateTime soldAtUtc, long peerBaseline, long ownListedPrice,
-            DateTime nowUtc, int maxAgeDays, AnomalyRule anomaly)
+            DateTime nowUtc, int maxAgeDays, AnomalyRule anomaly,
+            long historyMedian, long listingWitness)
         {
             if (unitPrice <= 0)
                 return PriceCandidate.None;
 
             var stale = IsSaleStale(soldAtUtc, nowUtc, maxAgeDays);
             var verdict = PriceAnomalyGuard.Evaluate(
-                unitPrice, peerBaseline, ownListedPrice,
-                anomaly.Enabled, anomaly.MinNormalPrice, anomaly.Ratio);
+                unitPrice, peerBaseline, ownListedPrice, anomaly, historyMedian,
+                [peerBaseline, listingWitness], [peerBaseline, listingWitness]);
 
             return new PriceCandidate(
                 unitPrice,
