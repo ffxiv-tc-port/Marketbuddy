@@ -492,6 +492,20 @@ namespace Marketbuddy
                 return;
             }
 
+            // 選單留著不動：使用者想掛還是可以自己點「到市場出售」。
+            if (QuickListSkipList.ShouldSkip(conf, item->ItemId, (item->Flags & InventoryItem.ItemFlags.HighQuality) != 0,
+                    out var skipRecord))
+            {
+                var skipName = ResolveItemName(item, out _);
+                ChatGui.Print(
+                    "[Marketbuddy] ??: delisted ?? time(s) for a low price (last ??, ?? gil) - not quick-listed. Pick \"Put up for sale\" yourself to list it anyway, or remove it from the skip list in settings."
+                        .Loc(skipName, skipRecord.Count, RelistPricing.FormatAt(skipRecord.LastDelistUtc),
+                            skipRecord.LastTargetPrice > 0 ? skipRecord.LastTargetPrice.ToString("N0") : "?"));
+                WriteDiag("低價下架過跳過", item->ItemId, skipName,
+                    $"原因=低價下架紀錄 {skipRecord.Count} 次、最後 {RelistPricing.FormatAt(skipRecord.LastDelistUtc)}（當時算出 {skipRecord.LastTargetPrice}），沒有選出售");
+                return;
+            }
+
             // 再選出售會把正在等確認的那扇上架視窗換掉：這一件不做、立刻講，正在等的那件不丟。
             if (deferredConfirm is { } waiting)
             {

@@ -656,8 +656,17 @@ namespace Marketbuddy
             if (CheckMarketFull(now, job))
                 return;
 
-            job.Token = ++nextToken;
             var key = job.Pick.Slot.Key;
+            if (QuickListSkipList.ShouldSkip(conf, key.ItemId, key.Hq, out var skipRecord))
+            {
+                // 不查價，當成這一次也查到低於門檻：玩家背包的照樣進賣給商店的清單。
+                HandleBelowThreshold(job, new PriceProbeResult(0, PriceProbeOutcome.BelowMin, 0,
+                    "delisted ?? time(s) for a low price, last ??".Loc(skipRecord.Count,
+                        RelistPricing.FormatAt(skipRecord.LastDelistUtc))));
+                return;
+            }
+
+            job.Token = ++nextToken;
             if (engine.StartPriceProbe(job.Token, key.ItemId, key.Hq, job.Pick.Name))
             {
                 SetPhase(job, Phase.WaitProbe, now);

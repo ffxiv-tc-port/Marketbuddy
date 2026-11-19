@@ -127,6 +127,18 @@ namespace Marketbuddy
         /// </summary>
         public bool TreatAllCharactersRetainersAsOwn = true;
 
+        /// <summary>
+        /// 快速上架／批次上架跳過近 <see cref="QuickListSkipDays"/> 天被低價下架過的道具（只寫一行提示，不上架）。<b>預設開。</b>
+        /// 清單與移除見 <see cref="QuickListSkipList"/>。
+        /// </summary>
+        public bool QuickListSkipLowPriceDelisted = true;
+
+        /// <summary>只看這麼多天內的低價下架；<b>0 = 不限</b>（紀錄本身最多留 180 天）。</summary>
+        public int QuickListSkipDays = 30;
+
+        /// <summary>使用者從跳過清單移除的道具與時間。</summary>
+        public List<QuickListSkipDismissal> QuickListSkipDismissed = [];
+
         /// <summary>近期成交中位數低於這個數（gil）就不用中位數判。</summary>
         public int AnomalyHistoryMinMedian = 1000;
         public int MarketTaxPercent = 5;
@@ -656,6 +668,9 @@ namespace Marketbuddy
                 conf.DelistTourSkipRetainers ??= [];
                 conf.ReplenishPicks ??= [];
                 conf.ReplenishPicks.RemoveAll(p => p == null);
+                conf.QuickListSkipDismissed ??= [];
+                conf.QuickListSkipDismissed.RemoveAll(d => d == null);
+                conf.QuickListSkipDays = Math.Clamp(conf.QuickListSkipDays, 0, 3650);
                 conf.MarketTaxPercent = Math.Clamp(conf.MarketTaxPercent, 0, 25);
                 conf.MarketDataCacheSeconds = Math.Clamp(conf.MarketDataCacheSeconds, 0, 3600);
                 conf.PriceSurveyCacheSeconds = Math.Clamp(conf.PriceSurveyCacheSeconds, 0, 3600);

@@ -7,6 +7,7 @@ using Dalamud.Interface.Colors;
 using Lumina.Excel.Sheets;
 using Marketbuddy.Common;
 using static Marketbuddy.Common.Dalamud;
+using static Marketbuddy.Common.ImGuiEx;
 
 namespace Marketbuddy
 {
@@ -20,6 +21,14 @@ namespace Marketbuddy
         private CultureInfo? junkRowsCulture;
         private readonly HashSet<uint> junkUnticked = new();
         private string junkCopyStatus = string.Empty;
+
+        // ---- 快速上架跳過清單：紀錄、移除清單或天數變了才重算。
+        private List<LowPriceDelistRecord> skipRows = new();
+        private readonly List<string> skipRowText = new();
+        private long skipRowsRevision = -1;
+        private int skipRowsDismissed = -1;
+        private int skipRowsDays = -1;
+        private CultureInfo? skipRowsCulture;
 
         // ---- 背包分揀：列文字只在分揀結果換一份時重組。
         private readonly List<string> sortRowText = new();
@@ -35,7 +44,101 @@ namespace Marketbuddy
             ImGui.Spacing();
             ImGui.Separator();
             ImGui.Spacing();
+            DrawQuickListSkip();
+            ImGui.Spacing();
+            ImGui.Separator();
+            ImGui.Spacing();
             DrawBagSort();
+        }
+
+        private void DrawQuickListSkip()
+        {
+            if (ImGui.Checkbox("Quick listing and batch listing skip items recently delisted for a low price".Loc(),
+                    ref conf.QuickListSkipLowPriceDelisted))
+                conf.Save();
+            HelpMarker(
+                "On by default. Items that relisting took off the board because their price fell below the NPC price or below your minimum are not quick-listed again: the right-click menu stays open with a one-line note in chat, so you can still pick \"Put up for sale\" yourself. Batch listing does not price-check them either and treats them as below your threshold (from your bags they go on the sell-to-shop list, nothing is sold until you press that button). An item comes off this list by itself once relisting prices it at or above your thresholds again, or when you remove it; either way it only comes back if it is delisted for a low price again. The delist record itself is kept for the export above."
+                    .Loc());
+            if (!conf.QuickListSkipLowPriceDelisted)
+                return;
+
+            DrawNestIndicator(1);
+            var daysRowX = ImGui.GetCursorPosX();
+            ImGui.TextWrapped("only items delisted in the last".Loc());
+            var daysLabel = DrawText.Concat("days (0 = any time)".Loc(), "##mbqlskipdays");
+            SameLineOrBelow(daysRowX, LabeledItemWidth(60, daysLabel));
+            ImGui.SetNextItemWidth(60);
+            if (ImGui.InputInt(daysLabel, ref conf.QuickListSkipDays, 0))
+            {
+                conf.QuickListSkipDays = Math.Clamp(conf.QuickListSkipDays, 0, 3650);
+                conf.Save();
+            }
+
+            if (!LowPriceDelistLedger.Loaded)
+            {
+                GreyWrapped("Reading the record...".Loc());
+                return;
+            }
+
+            var revision = LowPriceDelistLedger.Revision;
+            if (revision != skipRowsRevision || conf.QuickListSkipDismissed.Count != skipRowsDismissed ||
+                conf.QuickListSkipDays != skipRowsDays || !ReferenceEquals(skipRowsCulture, CultureInfo.CurrentCulture))
+                RebuildSkipRows(revision);
+
+            if (skipRows.Count == 0)
+            {
+                GreyWrapped("Nothing is being skipped right now.".Loc());
+                return;
+            }
+
+            ImGui.TextUnformatted(DrawText.Loc("Skipped: ?? item(s)", skipRows.Count));
+            ImGui.SameLine();
+            if (ImGui.SmallButton("Remove all".Loc() + "##mbqlskipall"))
+            {
+                QuickListSkipList.DismissAll(conf, skipRows);
+                Log.Information($"[Marketbuddy] 快速上架跳過清單：全部移除 {skipRows.Count} 件");
+                skipRowsRevision = -1;
+                return;
+            }
+
+            var height = Math.Min(skipRows.Count, 10) * ImGui.GetFrameHeightWithSpacing() + ImGui.GetStyle().WindowPadding.Y * 2;
+            ImGui.BeginChild("##mbqlskiplist", new Vector2(0, height), true);
+            var removeAt = -1;
+            for (var i = 0; i < skipRows.Count; i++)
+            {
+                if (ImGui.SmallButton(DrawText.Concat(DrawText.Concat("Remove".Loc(), "##mbqlskip"), i)))
+                    removeAt = i;
+                ImGui.SameLine();
+                ImGui.TextUnformatted(skipRowText[i]);
+            }
+
+            ImGui.EndChild();
+
+            if (removeAt >= 0)
+            {
+                var row = skipRows[removeAt];
+                QuickListSkipList.Dismiss(conf, row.Key);
+                Log.Information($"[Marketbuddy] 快速上架跳過清單：移除 {row.Key.ItemId}（HQ={row.Key.Hq}）");
+                skipRowsRevision = -1;
+            }
+        }
+
+        private void RebuildSkipRows(long revision)
+        {
+            skipRowsRevision = revision;
+            skipRowsDismissed = conf.QuickListSkipDismissed.Count;
+            skipRowsDays = conf.QuickListSkipDays;
+            skipRowsCulture = CultureInfo.CurrentCulture;
+            skipRows = QuickListSkipList.Active(conf);
+            skipRowText.Clear();
+            foreach (var row in skipRows)
+            {
+                var name = ItemName(row.Key.ItemId);
+                if (row.Key.Hq)
+                    name += " " + (char)Dalamud.Game.Text.SeIconChar.HighQuality;
+                skipRowText.Add("??  delisted ?? times  last ??  (?? gil)".Loc(name, row.Count, FormatDay(row.LastDelistUtc),
+                    row.LastTargetPrice > 0 ? row.LastTargetPrice.ToString("N0") : "?"));
+            }
         }
 
         private void DrawJunkExport()

@@ -1607,6 +1607,9 @@ namespace Marketbuddy
             }
 
             RetainerMarketPrice.TryGet(inventoryManager, job.Slot, out var current);
+            // 過了兩道低價門檻＝這件現在掛得出去，跳過清單上的它就不再跳過（之後再被低價下架才回來）。
+            QuickListSkipList.NoteListedOk(conf, job.ItemId, job.IsHq);
+
             if (current == newPrice)
             {
                 // 已經在該有的價格上 ＝ 這一格沒事了，同樣要從待處理清單上消失。
