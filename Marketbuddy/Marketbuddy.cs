@@ -214,6 +214,7 @@ namespace Marketbuddy
                 MarketGuiEventHandler.BatchLister = BatchLister;
                 VendorSeller.BatchLister = BatchLister;
                 MultiTour.BatchLister = BatchLister;
+                MultiTour.VendorSeller = VendorSeller;
                 if (QuickLister != null)
                     QuickLister.BatchLister = BatchLister;
 

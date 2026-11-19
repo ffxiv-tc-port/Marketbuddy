@@ -57,6 +57,8 @@ namespace Marketbuddy
                 DrawTourStartButton(tour);
                 if (conf.ReplenishTourEnabled)
                     DrawReplenishTourButton(tour);
+                if (conf.TidyRoundEnabled)
+                    DrawTidyRoundButton(tour);
                 DrawDelistTourButton(tour);
             }
 
@@ -111,7 +113,12 @@ namespace Marketbuddy
 
             // 巡迴此刻驅動的引擎——重掛與下架是兩個不同的物件，不能寫死其中一個。
             var engine = tour.ActiveEngine;
-            if (marketbuddy.BatchLister is { IsRunning: true } lister)
+            if (marketbuddy.VendorSeller is { IsRunning: true } seller)
+            {
+                var current = Math.Min(seller.FinishedJobs + 1, seller.TotalJobs);
+                ImGui.TextUnformatted(ProgressText("Selling to the shop ??/??: ??", current, seller.TotalJobs, seller.CurrentItemName));
+            }
+            else if (marketbuddy.BatchLister is { IsRunning: true } lister)
             {
                 var current = Math.Min(lister.FinishedJobs + 1, lister.TotalJobs);
                 ImGui.TextUnformatted(ProgressText("Listing ??/??: ??", current, lister.TotalJobs, lister.CurrentItemName));
@@ -190,6 +197,61 @@ namespace Marketbuddy
                 ImGui.SetTooltip(
                     "Relists every retainer like the button above, then fills that retainer's free market slots from its own inventory - only with the items you ticked for that retainer in the batch listing panel, each priced first. Items below your thresholds stay in the retainer's inventory. ESC, Cancel or any confirm key stops it."
                         .Loc());
+            }
+        }
+
+        private DateTime tidyArmedUntil = DateTime.MinValue;
+
+        /// <summary>
+        /// 這個角色整理一輪：兩段式（會賣東西給商店，不可逆）。第一下武裝、幾秒內再按一下才開始。
+        /// </summary>
+        private void DrawTidyRoundButton(MultiRetainerTour tour)
+        {
+            var canStart = tour.CanStart(TourMode.Tidy, out var reason);
+            var disabled = !canStart && !AutoRetainerBridge.IsBusy;
+            var armed = tidyArmedUntil > DateTime.UtcNow;
+            if (disabled)
+            {
+                tidyArmedUntil = DateTime.MinValue;
+                armed = false;
+                ImGui.BeginDisabled();
+            }
+
+            if (armed)
+            {
+                var left = (int)Math.Ceiling((tidyArmedUntil - DateTime.UtcNow).TotalSeconds);
+                using (new ImRaii.Color().Push(ImGuiCol.Button, ImGuiColors.DalamudOrange)
+                           .Push(ImGuiCol.ButtonHovered, ImGuiColors.DalamudOrange)
+                           .Push(ImGuiCol.ButtonActive, ImGuiColors.DalamudOrange))
+                {
+                    if (ImGui.Button("Confirm: tidy up this character (??)".Loc(left) + "##mbtidystart"))
+                    {
+                        tidyArmedUntil = DateTime.MinValue;
+                        tour.Start(TourMode.Tidy);
+                    }
+                }
+
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Click again to go ahead, or wait for this to time out.".Loc());
+            }
+            else
+            {
+                if (ImGui.Button(DrawText.Concat("Tidy up this character".Loc(), "##mbtidyarm")))
+                    tidyArmedUntil = DateTime.UtcNow + DelistArmWindow;
+                if (!disabled && ImGui.IsItemHovered())
+                    ImGui.SetTooltip(
+                        "For each retainer: relist, have the retainer sell to the shop what that relisting just delisted into your bags, then replenish from the retainer's inventory with the items you ticked. Asks for confirmation first; ESC or Cancel stops it."
+                            .Loc());
+            }
+
+            if (disabled)
+            {
+                ImGui.EndDisabled();
+                if (!string.IsNullOrEmpty(reason) && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                {
+                    using var tooltipAlpha = new ImRaii.Style().Push(ImGuiStyleVar.Alpha, 1f);
+                    ImGui.SetTooltip(reason);
+                }
             }
         }
 

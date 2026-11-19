@@ -136,6 +136,10 @@ namespace Marketbuddy
 
         private Configuration conf => Configuration.GetOrLoad();
 
+        /// <summary>巡迴驅動的補上架由哪一個開關管：全僱員補上架，或整理一輪自己的開關。</summary>
+        private bool TourMayReplenish
+            => conf.ReplenishTourEnabled || (tour.Mode == TourMode.Tidy && conf.TidyRoundEnabled);
+
         public bool IsRunning { get; private set; }
         public BatchListSource Source { get; private set; }
         public int TotalJobs => jobs.Count;
@@ -403,7 +407,7 @@ namespace Marketbuddy
                 return false;
             }
 
-            if (!(forTour ? conf.ReplenishTourEnabled : conf.BatchListEnabled))
+            if (!(forTour ? TourMayReplenish : conf.BatchListEnabled))
             {
                 reason = "the feature is turned off in /mbuddy".Loc();
                 return false;
@@ -574,7 +578,7 @@ namespace Marketbuddy
 
         private string? RunBlockedReason()
         {
-            if (!(drivenByTour ? conf.ReplenishTourEnabled : conf.BatchListEnabled))
+            if (!(drivenByTour ? TourMayReplenish : conf.BatchListEnabled))
                 return "the feature was turned off".Loc();
             if (!gui.IsRetainerSellListOpen)
                 return "the retainer sell list was closed".Loc();

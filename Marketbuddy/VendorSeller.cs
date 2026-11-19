@@ -130,6 +130,17 @@ namespace Marketbuddy
         private ulong runContentId;
         private bool runHasRoundJobs;
 
+        /// <summary>這一次是整理一輪（<see cref="MultiRetainerTour"/>）帶起來的：巡迴在跑不算「別的工作」。</summary>
+        private bool runOwnedByTour;
+
+        /// <summary>只在 <see cref="StartForTour"/> 呼叫 CanStart 的那一下為 true。</summary>
+        private bool startingForTour;
+
+        /// <summary>最近一次是被擋下停的（不是賣完）；整理一輪靠它決定要不要整趟停。</summary>
+        public bool LastRunStopped { get; private set; }
+
+        public string LastStopReason { get; private set; } = string.Empty;
+
         /// <summary>批次上架；建構後注入（兩者互斥）。</summary>
         internal BatchLister? BatchLister { get; set; }
 
@@ -489,6 +500,32 @@ namespace Marketbuddy
                 return;
             }
 
+            StartCore(includeSortPicks: true);
+        }
+
+        /// <summary>
+        /// 整理一輪的那一段：只賣這一輪下架、判成可賣而且沒被取消勾選的格（背包分揀的勾選留給使用者自己按）。
+        /// 其餘守衛與 <see cref="Start"/> 相同。回 false＝沒開始（原因在 <paramref name="reason"/>，不印聊天）。
+        /// </summary>
+        internal bool StartForTour(out string reason)
+        {
+            startingForTour = true;
+            var canStart = CanStart(out reason);
+            startingForTour = false;
+            if (!canStart)
+                return false;
+            if (StartCore(includeSortPicks: false))
+            {
+                runOwnedByTour = true;
+                return true;
+            }
+
+            reason = "nothing is ticked to sell".Loc();
+            return false;
+        }
+
+        private bool StartCore(bool includeSortPicks)
+        {
             // 按下去的這一刻重算一次：面板上的清單最多是半秒前的。
             RefreshPlan();
             jobs.Clear();
@@ -508,7 +545,7 @@ namespace Marketbuddy
             var fromSort = 0;
             foreach (var pick in sortPicks)
             {
-                if (!IsActiveSortPick(pick))
+                if (!includeSortPicks || !IsActiveSortPick(pick))
                     continue;
                 jobs.Add(new SellJob
                 {
@@ -520,11 +557,15 @@ namespace Marketbuddy
 
             if (jobs.Count == 0)
             {
-                ChatGui.PrintError("[Marketbuddy] Cannot start: ??".Loc("nothing is ticked to sell".Loc()));
-                return;
+                if (includeSortPicks)
+                    ChatGui.PrintError("[Marketbuddy] Cannot start: ??".Loc("nothing is ticked to sell".Loc()));
+                return false;
             }
 
             jobIndex = 0;
+            runOwnedByTour = false;
+            LastRunStopped = false;
+            LastStopReason = string.Empty;
             SoldStacks = 0;
             SoldGil = 0;
             SkippedStacks = 0;
@@ -540,6 +581,7 @@ namespace Marketbuddy
                 $"[Marketbuddy] VendorSell: 開始交給僱員賣給商店，{jobs.Count} 格（其中背包分揀 {fromSort} 格），預估 {gil:N0} gil");
             ChatGui.Print("[Marketbuddy] Having the retainer sell ?? stack(s) to the shop (about ?? gil)..."
                 .Loc(jobs.Count, gil.ToString("N0")));
+            return true;
         }
 
         public void CancelByButton() => Stop("cancelled by user".Loc());
@@ -881,6 +923,7 @@ namespace Marketbuddy
         private void Finish()
         {
             IsRunning = false;
+            runOwnedByTour = false;
             WaitingFor = string.Empty;
             ReleaseSuppressionIfHeld();
             planRefreshedAt = DateTime.MinValue;
@@ -895,6 +938,9 @@ namespace Marketbuddy
             if (!IsRunning)
                 return;
             IsRunning = false;
+            LastRunStopped = true;
+            LastStopReason = reason;
+            runOwnedByTour = false;
             WaitingFor = string.Empty;
             ReleaseSuppressionIfHeld();
             planRefreshedAt = DateTime.MinValue;
@@ -933,7 +979,8 @@ namespace Marketbuddy
         }
 
         private bool OtherTaskRunning()
-            => reprice.IsRunning || delist.IsRunning || tour.IsRunning || gui.Survey?.IsRunning == true ||
+            => reprice.IsRunning || delist.IsRunning || (tour.IsRunning && !(startingForTour || runOwnedByTour)) ||
+               gui.Survey?.IsRunning == true ||
                (quickLister?.PendingCount ?? 0) > 0 || gui.BatchLister?.IsRunning == true;
 
         /// <summary>

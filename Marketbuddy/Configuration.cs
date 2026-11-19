@@ -81,6 +81,12 @@ namespace Marketbuddy
         public List<ReplenishPick> ReplenishPicks = [];
 
         /// <summary>
+        /// 僱員選單旁的「這個角色整理一輪」按鈕（重掛 → 剛下架的賣給商店 → 補上架）。<b>預設關閉。</b>
+        /// 🔴 市場紅線：只是多一顆兩段確認的按鈕；不掛進多角色巡迴、沒有事件接手。
+        /// </summary>
+        public bool TidyRoundEnabled = false;
+
+        /// <summary>
         /// 異常低價保護：別人手滑少打一個 0 的時候，不要跟著把自己的東西降到那個價。
         /// <b>預設開啟。</b>
         /// </summary>

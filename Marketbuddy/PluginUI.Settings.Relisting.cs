@@ -299,6 +299,13 @@ namespace Marketbuddy
                     .Loc());
 
             ImGui.Spacing();
+            if (ImGui.Checkbox("Offer \"Tidy up this character\" next to the retainer list".Loc(), ref conf.TidyRoundEnabled))
+                conf.Save();
+            HelpMarker(
+                "Off by default. One button (pressed twice to confirm) that visits each of this character's retainers in turn and, for each one: relists what is up, has the retainer sell to the shop what that relisting just took off the board into your bags, then fills free market slots from the retainer's inventory with the items you ticked for it. Every step keeps its own safeguards (thresholds, the sell-to-shop checks, the ticked items). Needs \"Offer to have a retainer sell those delisted items to the shop\" on. ESC, Cancel or the fleet emergency stop ends the whole round. It only runs when you press it - never from AutoRetainer, never in the multi-character round."
+                    .Loc());
+
+            ImGui.Spacing();
             ImGui.Separator();
             ImGui.Spacing();
             if (ImGui.Checkbox("Relist across characters together with AutoRetainer's multi mode".Loc(),
