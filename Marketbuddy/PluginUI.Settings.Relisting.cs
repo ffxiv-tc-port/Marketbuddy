@@ -99,6 +99,16 @@ namespace Marketbuddy
             HelpMarker(
                 "A sale from months ago cannot tell you what it takes to sell the item today, and it would otherwise override the current listings. Sales older than this are ignored and the item just uses the cheapest listing instead. Sales whose date Universalis does not give are treated as too old."
                     .Loc());
+
+            DrawNestIndicator(1);
+            if (ImGui.Checkbox("Don't follow a lower last sale that is one of your own prices".Loc(),
+                    ref conf.RelistSkipOwnSalePrice))
+                conf.Save();
+            HelpMarker(
+                "Off by default. When the most recent sale is lower than the cheapest listing on your world, the item is normally priced at that sale. Often that sale is just one of your own retainers' listings being bought, and following it keeps dragging your price back down to your own earlier price. With this on, a sale at exactly a price your retainers have up now, or had up in the last ?? days (same item and quality), is not followed: the item is priced from the cheapest listing instead, and the chat line and the log say so. When nobody else is listing the item the sale is still used. It can misjudge: if someone else listed at exactly the same price (for example by copying yours) and that sold, it is treated as yours too and not followed that time. Your prices come from the retainer sell lists Marketbuddy has already seen (\"Record what disappears from your retainers' listings\"); nothing new is saved for this."
+                    .Loc(OwnPriceIndex.WindowDays));
+            if (conf.RelistSkipOwnSalePrice)
+                DrawOwnSalePriceStatus();
             if (!lastSoldOn) PopStyleDisabled();
 
             ImGui.Spacing();
@@ -282,6 +292,30 @@ namespace Marketbuddy
                         .Loc(PriceAnomalyGuard.MinRatio, PriceAnomalyGuard.MaxRatio));
                 ImGui.PopStyleColor();
             }
+        }
+
+        /// <summary>「成交價是自家掛的價時不採用」開著時的資料狀態；沒有紀錄要在列上看得見，不能長得跟「有在作用」一樣。</summary>
+        private void DrawOwnSalePriceStatus()
+        {
+            OwnPriceEcho.Refresh();
+            string text;
+            var warn = true;
+            if (!conf.RetainerSalesLogEnabled)
+                text = "\"Record what disappears from your retainers' listings\" is off, so your own prices are not being recorded and this has little or nothing to go on.".Loc();
+            else if (!OwnPriceEcho.Ready || !RetainerMarketState.Loaded)
+                text = "Reading your retainers' records...".Loc();
+            else if (OwnPriceEcho.Count == 0)
+                text = "No records yet: open each retainer's sell list once so Marketbuddy can see your prices. Until then every last sale is used as before.".Loc();
+            else
+            {
+                text = "Knows ?? of your own prices (item, quality and price).".Loc(OwnPriceEcho.Count);
+                warn = false;
+            }
+
+            DrawNestIndicator(2);
+            ImGui.PushStyleColor(ImGuiCol.Text, warn ? ImGuiColors.DalamudOrange : ImGuiColors.DalamudGrey);
+            ImGui.TextWrapped(text);
+            ImGui.PopStyleColor();
         }
 
         /// <summary>

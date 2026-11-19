@@ -79,7 +79,9 @@ namespace Marketbuddy
     /// <param name="Winner">
     /// 勝出（或被擋下來）的那個候選，聊天訊息與 log 靠它講出「用的是哪個來源」。
     /// </param>
-    internal readonly record struct RelistDecision(RelistOutcome Outcome, long Price, PriceCandidate Winner);
+    /// <param name="OwnSaleSkipped">S 比 L 低、但因為是自家掛過的價而改用 L（只有這一種情形為 true）。</param>
+    internal readonly record struct RelistDecision(
+        RelistOutcome Outcome, long Price, PriceCandidate Winner, bool OwnSaleSkipped);
 
     /// <summary>
     /// 重掛的定價規則——<b>唯一真值來源</b>。
@@ -334,7 +336,7 @@ namespace Marketbuddy
         /// <remarks>
         /// <para><list type="table">
         ///   <item><term>S 與 L 都能用、<c>S &gt;= L</c></term><description>L（跟板上最低價）</description></item>
-        ///   <item><term>S 與 L 都能用、<c>S &lt; L</c></term><description>S（要更低才賣得掉）</description></item>
+        ///   <item><term>S 與 L 都能用、<c>S &lt; L</c></term><description>S（要更低才賣得掉）；但 <paramref name="saleIsOwnPrice"/> 時 L</description></item>
         ///   <item><term>只有 S</term><description>S</description></item>
         ///   <item><term>只有 L</term><description>L</description></item>
         ///   <item><term>都不能用，但有一個是被異常低價保護擋下來的</term><description><see cref="RelistOutcome.Hold"/>（一個 gil 都不改，但要說明原因）</description></item>
@@ -343,27 +345,35 @@ namespace Marketbuddy
         /// <para>🔑 兩個都被擋下來時回報 <b>L</b> 那一個：那是舊版（不開成交價定價）唯一會看到的原因，
         /// 判讀時比較不會被新來的那一側混淆。這是<b>刻意的、決定性的</b>選擇，不是巧合。</para>
         /// </remarks>
-        internal static RelistDecision Decide(PriceCandidate listing, PriceCandidate sale)
+        /// <param name="saleIsOwnPrice">
+        /// S 的成交單價是自家僱員掛過的價，而且使用者開了 <see cref="Configuration.RelistSkipOwnSalePrice"/>（呼叫端判好）。
+        /// 只在兩個都能用、S 比 L 低時才有作用；只有 S 可用時照舊用 S。
+        /// </param>
+        internal static RelistDecision Decide(PriceCandidate listing, PriceCandidate sale, bool saleIsOwnPrice)
         {
             var listingOk = listing.IsUsable;
             var saleOk = sale.IsUsable;
 
             if (listingOk && saleOk)
-                return sale.Target < listing.Target
-                    ? new RelistDecision(RelistOutcome.Price, sale.Target, sale)
-                    : new RelistDecision(RelistOutcome.Price, listing.Target, listing);
+            {
+                if (sale.Target >= listing.Target)
+                    return new RelistDecision(RelistOutcome.Price, listing.Target, listing, false);
+                return saleIsOwnPrice
+                    ? new RelistDecision(RelistOutcome.Price, listing.Target, listing, true)
+                    : new RelistDecision(RelistOutcome.Price, sale.Target, sale, false);
+            }
 
             if (listingOk)
-                return new RelistDecision(RelistOutcome.Price, listing.Target, listing);
+                return new RelistDecision(RelistOutcome.Price, listing.Target, listing, false);
             if (saleOk)
-                return new RelistDecision(RelistOutcome.Price, sale.Target, sale);
+                return new RelistDecision(RelistOutcome.Price, sale.Target, sale, false);
 
             if (listing.HeldByAnomaly)
-                return new RelistDecision(RelistOutcome.Hold, -1, listing);
+                return new RelistDecision(RelistOutcome.Hold, -1, listing, false);
             if (sale.HeldByAnomaly)
-                return new RelistDecision(RelistOutcome.Hold, -1, sale);
+                return new RelistDecision(RelistOutcome.Hold, -1, sale, false);
 
-            return new RelistDecision(RelistOutcome.NoData, -1, PriceCandidate.None);
+            return new RelistDecision(RelistOutcome.NoData, -1, PriceCandidate.None, false);
         }
 
         /// <summary>一個時間點的人類可讀形式；<see cref="DateTime.MinValue"/> 一律畫成 <c>?</c>，絕不畫成某個看起來合理的日期。</summary>

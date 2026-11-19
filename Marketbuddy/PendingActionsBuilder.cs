@@ -244,7 +244,8 @@ namespace Marketbuddy
             IReadOnlySet<uint> ExcludedWorlds,
             bool UseLastSold,
             bool IgnoreQuality,
-            int MaxSaleAgeDays);
+            int MaxSaleAgeDays,
+            bool SkipOwnSale);
 
         /// <summary>執行緒池那一段的產出：純資料，沒有任何遊戲指標。</summary>
         private sealed class Prepared
@@ -336,7 +337,8 @@ namespace Marketbuddy
                 // 拍成快照帶走（同上）：這三個決定「成交價這一側算不算數」。
                 conf.RelistUseLastSoldPrice,
                 conf.RelistLastSoldIgnoreQuality,
-                conf.RelistLastSoldMaxAgeDays);
+                conf.RelistLastSoldMaxAgeDays,
+                conf.RelistSkipOwnSalePrice);
 
             prepareRequest = request;
             StatusText = "Recomputing...".Loc();
@@ -403,7 +405,7 @@ namespace Marketbuddy
             DateTime ListingAt,
             long SaleReference, long SalePeer, string SaleWorld, DateTime SaleAt,
             long OtherReference, string OtherSource, string OtherWorld, DateTime OtherAt,
-            long ListingMedian, long SaleMedian);
+            long ListingMedian, long SaleMedian, bool SaleIsOwnPrice);
 
         /// <summary>
         /// 巡檢記錄裡有資料、但被排除清單擋下來的那些世界的名字（已排序）。
@@ -578,6 +580,7 @@ namespace Marketbuddy
             long saleMedian = -1;
             var saleWorld = string.Empty;
             var saleAt = DateTime.MinValue;
+            var saleIsOwn = false;
             if (request.UseLastSold
                 && LastSoldPriceSource.TryGet(itemId, hq, request.IgnoreQuality, out var sold))
             {
@@ -585,6 +588,7 @@ namespace Marketbuddy
                 saleAt = sold.SoldAtUtc;
                 saleWorld = sold.World;
                 saleMedian = LastSoldPriceSource.SaleMedianOrUnknown(itemId, sold.Hq);
+                saleIsOwn = request.SkipOwnSale && OwnPriceEcho.Contains(itemId, sold.Hq, sold.UnitPrice);
                 // 異常低價保護在成交價這一側的同業基準＝本世界目前最低掛售價，
                 // 與重掛引擎用的是同一個來源（理由見 BatchReprice.TickSaleCandidate）。
                 salePeer = LastSoldPriceSource.TryGetMinPrices(itemId, hq, out var minWorld, out _)
@@ -650,7 +654,7 @@ namespace Marketbuddy
                 otherSource,
                 best >= 0 ? bestWorld : excludedWorld,
                 best >= 0 ? bestAt : excludedAt,
-                LastSoldPriceSource.SaleMedianOrUnknown(itemId, hq), saleMedian);
+                LastSoldPriceSource.SaleMedianOrUnknown(itemId, hq), saleMedian, saleIsOwn);
         }
 
         /// <summary>
@@ -684,7 +688,7 @@ namespace Marketbuddy
                 observed.SaleReference, observed.SaleAt, observed.SalePeer, currentPrice,
                 now, request.MaxSaleAgeDays, anomalyRule, observed.SaleMedian, observed.ListingReference);
 
-            var decision = RelistPricing.Decide(listing, sale);
+            var decision = RelistPricing.Decide(listing, sale, observed.SaleIsOwnPrice);
             switch (decision.Outcome)
             {
                 case RelistOutcome.Price:

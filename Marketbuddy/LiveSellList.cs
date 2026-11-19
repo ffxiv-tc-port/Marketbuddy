@@ -447,7 +447,9 @@ namespace Marketbuddy
                             LastSoldPriceSource.SaleMedianOrUnknown(slot->ItemId, sold.Hq), boardWitness)
                         : PriceCandidate.None;
 
-                    var decision = RelistPricing.Decide(listingCandidate, saleCandidate);
+                    var saleIsOwn = hasSold && conf.RelistSkipOwnSalePrice
+                                    && OwnPriceEcho.Contains(slot->ItemId, sold.Hq, sold.UnitPrice);
+                    var decision = RelistPricing.Decide(listingCandidate, saleCandidate, saleIsOwn);
                     relistSource = decision.Winner.Source;
                     relistReference = decision.Winner.Reference;
                     relistAtUtc = decision.Winner.AtUtc;

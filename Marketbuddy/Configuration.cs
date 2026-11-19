@@ -441,6 +441,13 @@ namespace Marketbuddy
         public int RelistLastSoldMaxAgeDays = 7;
 
         /// <summary>
+        /// 最近成交價比板上最低還低、而且正好是自家僱員掛過的價（同道具、同品質；見 <see cref="OwnPriceEcho"/>）時
+        /// 不採用成交價，照板上最低價定價。<b>預設關。</b>
+        /// </summary>
+        /// <remarks>別人剛好掛同一個價（照抄我們的價）而真的賣掉時也會被當成自家，那一次就不會往下跟。</remarks>
+        public bool RelistSkipOwnSalePrice = false;
+
+        /// <summary>
         /// 遊戲內市場查詢被拒絕／逾時之後，改用<b>跨世界價格巡檢</b>記錄裡家世界那一列
         /// 當「板上最低價」的時限（<b>小時</b>）。<b>0 = 不使用巡檢補位</b>。
         /// </summary>

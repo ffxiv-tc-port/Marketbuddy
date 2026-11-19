@@ -1108,6 +1108,10 @@ namespace Marketbuddy
         /// </summary>
         private TickTaskResult? TickSaleCandidate(SlotJob job, DateTime now)
         {
+            // 趁市場查詢還沒回來先排自家掛價索引的重建，定價那一刻才不會撞上「還沒建好」。
+            if (conf.RelistSkipOwnSalePrice)
+                OwnPriceEcho.Refresh();
+
             var state = LastSoldPriceSource.StateOf(job.ItemId);
 
             if (state is LastSoldState.Unknown or LastSoldState.Loading)
@@ -1324,8 +1328,9 @@ namespace Marketbuddy
                 now, conf.RelistLastSoldMaxAgeDays, anomalyRule,
                 LastSoldPriceSource.SaleMedianOrUnknown(job.ItemId, job.SaleHq), competitor);
 
-            var decision = RelistPricing.Decide(listing, sale);
-            LogPricingDecision(job, listing, sale, decision, listedPrice, ownIsLowest, competitor);
+            var saleIsOwn = SaleIsOwnPrice(job, out var ownSaleTag);
+            var decision = RelistPricing.Decide(listing, sale, saleIsOwn);
+            LogPricingDecision(job, listing, sale, decision, listedPrice, ownIsLowest, competitor, ownSaleTag);
 
             switch (decision.Outcome)
             {
@@ -1367,7 +1372,7 @@ namespace Marketbuddy
                 }
             }
 
-            FinishPricing(job, (uint)target, cacheTag, null, SourceNoteFor(decision.Winner));
+            FinishPricing(job, (uint)target, cacheTag, null, SourceNoteFor(decision, sale));
         }
 
         /// <summary>
@@ -1411,8 +1416,9 @@ namespace Marketbuddy
             var sale = RelistPricing.FromSale(
                 job.SaleUnitPrice, job.SaleAtUtc, job.SalePeerBaseline, -1, now, maxAgeDays, anomalyRule,
                 LastSoldPriceSource.SaleMedianOrUnknown(job.ItemId, job.SaleHq), competitor);
-            var decision = RelistPricing.Decide(listing, sale);
-            LogPricingDecision(job, listing, sale, decision, -1, ownIsLowest, competitor);
+            var saleIsOwn = SaleIsOwnPrice(job, out var ownSaleTag);
+            var decision = RelistPricing.Decide(listing, sale, saleIsOwn);
+            LogPricingDecision(job, listing, sale, decision, -1, ownIsLowest, competitor, ownSaleTag);
 
             var taxPercent = CurrentTaxPercent();
             var outcome = BatchListRules.Classify(
@@ -1423,7 +1429,7 @@ namespace Marketbuddy
             var note = outcome switch
             {
                 PriceProbeOutcome.List => decision.Outcome == RelistOutcome.Price && price == decision.Price
-                    ? SourceNoteFor(decision.Winner).Trim()
+                    ? SourceNoteFor(decision, sale).Trim()
                     : "(matched your own lowest listing ?? gil)".Loc(price.ToString("N0")),
                 PriceProbeOutcome.BelowVendor => "market net ?? < NPC ?? gil".Loc(
                     price * (100L - taxPercent) / 100L, job.VendorUnitPrice),
@@ -1500,6 +1506,38 @@ namespace Marketbuddy
             };
         }
 
+        /// <summary><see cref="SourceNoteFor(PriceCandidate)"/>，S 因為是自家掛過的價而沒採用時再補一句。</summary>
+        private static string SourceNoteFor(RelistDecision decision, PriceCandidate sale)
+        {
+            var note = SourceNoteFor(decision.Winner);
+            return decision.OwnSaleSkipped
+                ? note + " " + "(last sale ?? gil was one of your own prices, not followed)".Loc(sale.Reference.ToString("N0"))
+                : note;
+        }
+
+        /// <summary>
+        /// S 是不是自家僱員掛過的價（同道具、S 的品質）。<paramref name="tag"/> 給 PRICE 行的 <c>ownSale=</c>：
+        /// off＝設定關、none＝沒有 S、loading＝索引還沒建好（照舊採用 S）、own／other＝判定結果。
+        /// </summary>
+        private bool SaleIsOwnPrice(SlotJob job, out string tag)
+        {
+            if (!conf.RelistSkipOwnSalePrice)
+            {
+                tag = "off";
+                return false;
+            }
+
+            if (job.SaleUnitPrice <= 0)
+            {
+                tag = "none";
+                return false;
+            }
+
+            var own = OwnPriceEcho.Contains(job.ItemId, job.SaleHq, job.SaleUnitPrice);
+            tag = !OwnPriceEcho.Ready ? "loading" : own ? "own" : "other";
+            return own;
+        }
+
         /// <summary>
         /// 一格一行的定價決策紀錄。
         /// </summary>
@@ -1509,7 +1547,7 @@ namespace Marketbuddy
         /// 當成「沒有」，那時候板上別人開多少仍然是判讀時必要的資訊。
         /// </remarks>
         private void LogPricingDecision(SlotJob job, PriceCandidate listing, PriceCandidate sale,
-            RelistDecision decision, long listedPrice, bool ownIsLowest, long competitor)
+            RelistDecision decision, long listedPrice, bool ownIsLowest, long competitor, string ownSaleTag)
         {
             var winner = decision.Winner.Source.Length == 0 ? "?" : decision.Winner.Source;
             var pick = decision.Outcome switch
@@ -1525,7 +1563,15 @@ namespace Marketbuddy
                 $"ownIsLowest={ownIsLowest} boardCompetitor={competitor} listings={captured.Count} " +
                 $"pick={pick} final={(decision.Outcome == RelistOutcome.Price ? decision.Price.ToString() : "-")} " +
                 $"saleMaxAgeDays={conf.RelistLastSoldMaxAgeDays} " +
-                $"surveyHours={conf.RelistSurveyFallbackHours} quickListed={job.QuickListed} probe={job.ProbeOnly}");
+                $"surveyHours={conf.RelistSurveyFallbackHours} quickListed={job.QuickListed} probe={job.ProbeOnly} " +
+                $"ownSale={(decision.OwnSaleSkipped ? "skip" : ownSaleTag)}");
+
+            if (decision.OwnSaleSkipped)
+                Log.Information(
+                    $"{Diag} OWN-SALE-SKIP item={job.ItemId} '{job.Name}' hq={job.IsHq} saleHq={job.SaleHq} " +
+                    $"S={sale.Reference}->{sale.Target} L={listing.Reference}->{listing.Target} final={decision.Price} " +
+                    $"quickListed={job.QuickListed} probe={job.ProbeOnly}：最近成交價比板上最低低，" +
+                    $"但它正是自家僱員架上或 {OwnPriceIndex.WindowDays} 天內掛過的價，不採用，照板上最低價定價。");
         }
 
         /// <summary>

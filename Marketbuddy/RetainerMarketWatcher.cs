@@ -270,6 +270,34 @@ namespace Marketbuddy
             }
         }
 
+        /// <summary>每位僱員基準線裡每一筆掛單的 (道具, 品質, 單價)；單價讀不到（-1）的不收。</summary>
+        internal static void CopyListingsTo(List<(uint ItemId, bool Hq, long UnitPrice)> target)
+        {
+            lock (Gate)
+            {
+                foreach (var snapshot in Snapshots.Values)
+                {
+                    foreach (var listing in snapshot.Listings)
+                    {
+                        if (listing.UnitPrice > 0)
+                            target.Add((listing.ItemId, listing.Hq, listing.UnitPrice));
+                    }
+                }
+            }
+        }
+
+        /// <summary>基準線每換一次 +1（讀檔不算，讀完與否看 <see cref="Loaded"/>）。</summary>
+        internal static long Revision
+        {
+            get
+            {
+                lock (Gate)
+                {
+                    return revision;
+                }
+            }
+        }
+
         /// <summary>已經有基準線的僱員數（UI 顯示用）。</summary>
         internal static int Count
         {
