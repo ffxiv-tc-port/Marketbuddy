@@ -336,7 +336,7 @@ namespace Marketbuddy
                 result.Add(new Candidate
                 {
                     Key = key, Name = name, Slots = slots, Quantity = qty,
-                    Estimate = withEstimate ? Estimate(key, own ??= OwnRetainerIds()) : -1,
+                    Estimate = withEstimate ? Estimate(key, own ??= OwnRetainers.Snapshot(conf)) : -1,
                     Protected = protectedItems.Contains(key.ItemId),
                 });
             }
@@ -355,21 +355,6 @@ namespace Marketbuddy
             if (ownIsLowest && ownLowest > 0)
                 return ownLowest;
             return lowest > 0 ? RelistPricing.ApplyUndercut(lowest, conf.UndercutRuleSnapshot()) : -1;
-        }
-
-        private static HashSet<ulong> OwnRetainerIds()
-        {
-            var result = new HashSet<ulong>();
-            var retainerManager = RetainerManager.Instance();
-            if (retainerManager == null)
-                return result;
-            foreach (var retainer in retainerManager->Retainers)
-            {
-                if (retainer.RetainerId != 0)
-                    result.Add(retainer.RetainerId);
-            }
-
-            return result;
         }
 
         /// <summary>按下開始時要做的格：勾選道具的每一疊，照容器與格號排。</summary>

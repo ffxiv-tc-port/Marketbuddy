@@ -521,7 +521,7 @@ namespace Marketbuddy
                 || listings.Count == 0)
                 return false;
 
-            var ownRetainers = OwnRetainerIds();
+            var ownRetainers = OwnRetainers.Snapshot(conf);
             long lowest = -1;
             ulong lowestRetainerId = 0;
             var lowestHq = false;
@@ -578,26 +578,6 @@ namespace Marketbuddy
             var proxy = (FFXIVClientStructs.FFXIV.Client.UI.Info.InfoProxyItemSearch*)
                 infoModule->GetInfoProxyById(FFXIVClientStructs.FFXIV.Client.UI.Info.InfoProxyId.ItemSearch);
             return proxy == null ? 0 : proxy->SearchItemId;
-        }
-
-        /// <summary>
-        /// 目前角色的僱員 id。
-        /// ⚠️ 只涵蓋<b>目前角色</b>——別的角色的僱員會被當成別人，
-        /// 那個方向的失敗是「保護比較不容易作用」，不是賤賣。
-        /// </summary>
-        private static HashSet<ulong> OwnRetainerIds()
-        {
-            var result = new HashSet<ulong>();
-            var retainerManager = FFXIVClientStructs.FFXIV.Client.Game.RetainerManager.Instance();
-            if (retainerManager == null)
-                return result;
-            foreach (var retainer in retainerManager->Retainers)
-            {
-                if (retainer.RetainerId != 0)
-                    result.Add(retainer.RetainerId);
-            }
-
-            return result;
         }
 
         private unsafe int getPricePerItem(IntPtr /* AtkResNode* */ nodeParam)

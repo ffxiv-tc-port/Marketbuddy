@@ -121,6 +121,12 @@ namespace Marketbuddy
         /// </remarks>
         public bool AnomalyGuardUseSaleHistory = true;
 
+        /// <summary>
+        /// 比價時把<b>所有角色</b>的僱員掛單都當成自家（分身之間不互相跟價）。<b>預設開。</b>
+        /// 來源見 <see cref="OwnRetainers"/>；關掉＝只認目前角色的僱員（舊行為）。
+        /// </summary>
+        public bool TreatAllCharactersRetainersAsOwn = true;
+
         /// <summary>近期成交中位數低於這個數（gil）就不用中位數判。</summary>
         public int AnomalyHistoryMinMedian = 1000;
         public int MarketTaxPercent = 5;

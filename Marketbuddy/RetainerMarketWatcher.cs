@@ -223,6 +223,7 @@ namespace Marketbuddy
                 return;
             loadTask = null;
             Loaded = true;
+            OwnRetainers.Invalidate();
         }
 
         private static void LoadCore()
@@ -257,6 +258,16 @@ namespace Marketbuddy
             }
 
             KickSave();
+        }
+
+        /// <summary>有基準線的每一位僱員（所有角色）；檔案還沒讀完時只有這個工作階段見過的。</summary>
+        internal static void CopyRetainerIdsTo(HashSet<ulong> target)
+        {
+            lock (Gate)
+            {
+                foreach (var id in Snapshots.Keys)
+                    target.Add(id);
+            }
         }
 
         /// <summary>已經有基準線的僱員數（UI 顯示用）。</summary>

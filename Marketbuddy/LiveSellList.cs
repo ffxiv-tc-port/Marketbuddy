@@ -307,15 +307,7 @@ namespace Marketbuddy
             // 「按下重掛會掛出去多少」要用的共用輸入，在迴圈外算一次。
             // 🔴 這一段純唯讀而且<b>不送任何市場查詢</b>：面板只是預告，真正的查詢在引擎那側。
             var ownRetainers = ownRetainerIds;
-            ownRetainers.Clear();
-            if (retainerManager != null)
-            {
-                foreach (var retainer in retainerManager->Retainers)
-                {
-                    if (retainer.RetainerId != 0)
-                        ownRetainers.Add(retainer.RetainerId);
-                }
-            }
+            OwnRetainers.Fill(ownRetainers, conf);
 
             var homeWorldId = PlayerState.ContentId == 0 ? 0u : PlayerState.HomeWorld.RowId;
             var undercutRule = conf.UndercutRuleSnapshot();

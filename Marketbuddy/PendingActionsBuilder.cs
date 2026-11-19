@@ -446,7 +446,7 @@ namespace Marketbuddy
                     placements = PriceSurveyItemSource.ReadPlacementsFromSellList(gui);
             }
 
-            var ownRetainers = new HashSet<ulong>();
+            var ownRetainers = OwnRetainers.Snapshot(Configuration.GetOrLoad());
             var names = new Dictionary<ulong, string>();
             foreach (var placement in placements)
             {

@@ -264,6 +264,14 @@ namespace Marketbuddy
 
             /// <summary>勾了「不要處理這個角色的僱員」——那種角色沒有重掛可做。</summary>
             public bool ExcludeRetainer;
+
+            /// <summary>這個角色的僱員（AR 端 <c>OfflineRetainerData</c>，只鏡像用得到的欄位）。</summary>
+            public List<AutoRetainerRetainerData>? RetainerData;
+        }
+
+        internal sealed class AutoRetainerRetainerData
+        {
+            public ulong RetainerID;
         }
 #pragma warning restore CS0649
 

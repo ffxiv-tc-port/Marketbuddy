@@ -692,16 +692,7 @@ namespace Marketbuddy
         {
             // All of our own retainers: if the lowest listing is ours (any
             // retainer), never undercut ourselves.
-            ownRetainerIds = new HashSet<ulong>();
-            var retainerManager = RetainerManager.Instance();
-            if (retainerManager != null)
-            {
-                foreach (var retainer in retainerManager->Retainers)
-                {
-                    if (retainer.RetainerId != 0)
-                        ownRetainerIds.Add(retainer.RetainerId);
-                }
-            }
+            ownRetainerIds = OwnRetainers.Snapshot(conf);
 
             // 預設是「一般重掛」；快速上架那條路徑在 BeginBatch 回來之後自己標回 true。
             quickRepriceBatch = false;

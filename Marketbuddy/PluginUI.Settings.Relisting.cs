@@ -121,6 +121,18 @@ namespace Marketbuddy
             if (ImGui.Checkbox("HQ items only undercut other HQ listings".Loc(), ref conf.BatchCompareHqOnly))
                 conf.Save();
 
+            if (ImGui.Checkbox("Treat every character's retainers as your own".Loc(),
+                    ref conf.TreatAllCharactersRetainersAsOwn))
+            {
+                OwnRetainers.Invalidate();
+                conf.Save();
+            }
+
+            var (otherTotal, fromSellLists, fromAutoRetainer) = OwnRetainers.OtherCounts;
+            HelpMarker(
+                "On by default. Your alts' listings are not undercut: when the cheapest listing belongs to any of your retainers, the slot is left alone (a quick-listed item matches it), just as it already was for the character you are on. Retainers are known from every sell list Marketbuddy has seen and from AutoRetainer's character data; with neither available only the current character counts. Known right now: ?? other retainer(s) (?? from sell lists, ?? from AutoRetainer)."
+                    .Loc(CountOrUnknown(otherTotal), CountOrUnknown(fromSellLists), CountOrUnknown(fromAutoRetainer)));
+
             ImGui.Spacing();
             var cacheRowX = ImGui.GetCursorPosX();
             ImGui.TextWrapped("Reuse market data seen in the last".Loc());
@@ -346,6 +358,9 @@ namespace Marketbuddy
                 ImGui.PopStyleColor();
             }
         }
+
+        /// <summary>-1＝不知道，畫成 ?（不畫成 0）。</summary>
+        private static string CountOrUnknown(int count) => count < 0 ? "?" : count.ToString();
 
         private static string QuickListKeyLabel(int keyCode)
         {
