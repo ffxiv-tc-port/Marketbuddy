@@ -28,6 +28,7 @@ internal static class Program
         BoundariesAreInclusive();
         InvalidSettingsJudgeNothing();
         MedianNeedsEnoughEntries();
+        DeviationIgnoresWitnesses();
 
         Console.WriteLine($"HISTORYOUTLIER_DONE pass={passes} fail={failures}");
         return failures == 0 ? 0 : 1;
@@ -107,6 +108,15 @@ internal static class Program
         Check("ratio 1001", HistoryOutlier.Judge(1, 10_000, 1001, Floor, [], []), HistoryVerdict.NoData);
         Check("no median", Judge(1, -1, [], []), HistoryVerdict.NoData);
         Check("no reference", Judge(0, 10_000, [], []), HistoryVerdict.NoData);
+    }
+
+    /// <summary>診斷 log 用的偏離方向：佐證救回的情境仍要看得出偏離（log 才寫得出「有佐證，照常採用」）。</summary>
+    private static void DeviationIgnoresWitnesses()
+    {
+        Check("deviation: crash S backed by board", HistoryOutlier.Deviation(20_000, 100_000, Ratio, Floor), HistoryVerdict.Low);
+        Check("deviation: rise L backed by sale", HistoryOutlier.Deviation(5_750, 1_000, Ratio, Floor), HistoryVerdict.High);
+        Check("deviation: inside ratio", HistoryOutlier.Deviation(2_001, 10_000, Ratio, Floor), HistoryVerdict.Normal);
+        Check("deviation: under floor", HistoryOutlier.Deviation(4, 999, Ratio, Floor), HistoryVerdict.NoData);
     }
 
     private static void MedianNeedsEnoughEntries()

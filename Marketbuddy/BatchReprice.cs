@@ -233,6 +233,11 @@ namespace Marketbuddy
         // Batch state (for UI / summary).
         private HashSet<ulong> ownRetainerIds = new();
 
+        // 只給 PRICE 行的 ownRet／ownRetOther 用，與 ownRetainerIds 同時取（見 OwnRetainerListingCounts）。
+        private const int OwnRetainersOthersOff = -2;
+        private int ownRetainerOthersKnown = OwnRetainersOthersOff;
+        private readonly HashSet<ulong> currentCharacterRetainerIds = new();
+
         /// <summary>Fired when a batch runs to completion (all slots processed).</summary>
         public event System.Action? BatchFinished;
 
@@ -693,6 +698,11 @@ namespace Marketbuddy
             // All of our own retainers: if the lowest listing is ours (any
             // retainer), never undercut ourselves.
             ownRetainerIds = OwnRetainers.Snapshot(conf);
+            ownRetainerOthersKnown = conf.TreatAllCharactersRetainersAsOwn
+                ? OwnRetainers.OtherCounts.Total
+                : OwnRetainersOthersOff;
+            currentCharacterRetainerIds.Clear();
+            OwnRetainers.AddCurrentCharacter(currentCharacterRetainerIds);
 
             // 預設是「一般重掛」；快速上架那條路徑在 BeginBatch 回來之後自己標回 true。
             quickRepriceBatch = false;
@@ -1316,21 +1326,25 @@ namespace Marketbuddy
             // 🔑 板上最便宜的那一筆是我們自己掛的時候，L 一律當成「沒有」：
             //    板上沒有給我們任何「該降到多少」的新資訊，而且我們不會自己壓自己的價。
             var saleWitness = SaleWitness(job, now, conf.RelistLastSoldMaxAgeDays);
+            var listingMedian = LastSoldPriceSource.SaleMedianOrUnknown(job.ItemId, job.IsHq);
+            var saleMedian = LastSoldPriceSource.SaleMedianOrUnknown(job.ItemId, job.SaleHq);
             var listing = ownIsLowest
                 ? PriceCandidate.None
                 : RelistPricing.FromListing(
                     competitor, peerBaseline, ownBasis, listingSource, listingAt, undercut, anomalyRule,
-                    LastSoldPriceSource.SaleMedianOrUnknown(job.ItemId, job.IsHq), saleWitness);
+                    listingMedian, saleWitness);
 
             // ---------------- 候選 S：資料中心最近一筆成交價 ----------------
             var sale = RelistPricing.FromSale(
                 job.SaleUnitPrice, job.SaleAtUtc, job.SalePeerBaseline, ownBasis,
                 now, conf.RelistLastSoldMaxAgeDays, anomalyRule,
-                LastSoldPriceSource.SaleMedianOrUnknown(job.ItemId, job.SaleHq), competitor);
+                saleMedian, competitor);
 
             var saleIsOwn = SaleIsOwnPrice(job, out var ownSaleTag);
             var decision = RelistPricing.Decide(listing, sale, saleIsOwn);
             LogPricingDecision(job, listing, sale, decision, listedPrice, ownIsLowest, competitor, ownSaleTag);
+            LogHistoryOutliers(job, listing, sale, anomalyRule, listingMedian, saleMedian, peerBaseline, saleWitness,
+                competitor);
 
             switch (decision.Outcome)
             {
@@ -1409,16 +1423,21 @@ namespace Marketbuddy
             var maxAgeDays = conf.RelistLastSoldMaxAgeDays > 0
                 ? conf.RelistLastSoldMaxAgeDays
                 : ProbeSaleMaxAgeDaysWhenUnlimited;
+            var saleWitness = SaleWitness(job, now, maxAgeDays);
+            var listingMedian = LastSoldPriceSource.SaleMedianOrUnknown(job.ItemId, job.IsHq);
+            var saleMedian = LastSoldPriceSource.SaleMedianOrUnknown(job.ItemId, job.SaleHq);
             var listing = ownIsLowest
                 ? PriceCandidate.None
                 : RelistPricing.FromListing(competitor, peerBaseline, -1, listingSource, listingAt, undercut, anomalyRule,
-                    LastSoldPriceSource.SaleMedianOrUnknown(job.ItemId, job.IsHq), SaleWitness(job, now, maxAgeDays));
+                    listingMedian, saleWitness);
             var sale = RelistPricing.FromSale(
                 job.SaleUnitPrice, job.SaleAtUtc, job.SalePeerBaseline, -1, now, maxAgeDays, anomalyRule,
-                LastSoldPriceSource.SaleMedianOrUnknown(job.ItemId, job.SaleHq), competitor);
+                saleMedian, competitor);
             var saleIsOwn = SaleIsOwnPrice(job, out var ownSaleTag);
             var decision = RelistPricing.Decide(listing, sale, saleIsOwn);
             LogPricingDecision(job, listing, sale, decision, -1, ownIsLowest, competitor, ownSaleTag);
+            LogHistoryOutliers(job, listing, sale, anomalyRule, listingMedian, saleMedian, peerBaseline, saleWitness,
+                competitor);
 
             var taxPercent = CurrentTaxPercent();
             var outcome = BatchListRules.Classify(
@@ -1564,7 +1583,7 @@ namespace Marketbuddy
                 $"pick={pick} final={(decision.Outcome == RelistOutcome.Price ? decision.Price.ToString() : "-")} " +
                 $"saleMaxAgeDays={conf.RelistLastSoldMaxAgeDays} " +
                 $"surveyHours={conf.RelistSurveyFallbackHours} quickListed={job.QuickListed} probe={job.ProbeOnly} " +
-                $"ownSale={(decision.OwnSaleSkipped ? "skip" : ownSaleTag)}");
+                $"ownSale={(decision.OwnSaleSkipped ? "skip" : ownSaleTag)} {OwnRetainerListingCounts(job)}");
 
             if (decision.OwnSaleSkipped)
                 Log.Information(
@@ -1572,6 +1591,87 @@ namespace Marketbuddy
                     $"S={sale.Reference}->{sale.Target} L={listing.Reference}->{listing.Target} final={decision.Price} " +
                     $"quickListed={job.QuickListed} probe={job.ProbeOnly}：最近成交價比板上最低低，" +
                     $"但它正是自家僱員架上或 {OwnPriceIndex.WindowDays} 天內掛過的價，不採用，照板上最低價定價。");
+        }
+
+        /// <summary>
+        /// PRICE 行尾的 <c>ownRet=</c>：<c>listings=</c> 那些掛單裡屬於自家僱員、不當對手的筆數（不套品質篩選，分母與 <c>listings=</c> 相同）；
+        /// <c>ownRetOther=</c>：其中別的角色的僱員（off＝設定關；?＝別的角色那一份還沒有任何資料，分不出「沒有」與「還不知道」）。
+        /// 巡檢退路沒有原始掛單，兩個都寫 ?。
+        /// </summary>
+        private string OwnRetainerListingCounts(SlotJob job)
+        {
+            if (job.SurveyLowest > 0)
+                return "ownRet=? ownRetOther=?";
+
+            var own = 0;
+            var other = 0;
+            foreach (var listing in captured)
+            {
+                if (!ownRetainerIds.Contains(listing.RetainerId))
+                    continue;
+                own++;
+                if (!currentCharacterRetainerIds.Contains(listing.RetainerId))
+                    other++;
+            }
+
+            var otherText = ownRetainerOthersKnown switch
+            {
+                OwnRetainersOthersOff => "off",
+                <= 0 => "?",
+                _ => other.ToString(),
+            };
+            return $"ownRet={own} ownRetOther={otherText}";
+        }
+
+        /// <summary>
+        /// L／S 偏離近期成交中位數達倍數時，一側一行 <c>HIST-OUTLIER</c>（Information）：沒佐證而不採用，或有佐證照常採用。
+        /// 只在定價決策時呼叫。<c>witness=</c> 逐字對應 <see cref="RelistPricing.FromListing"/>／<see cref="RelistPricing.FromSale"/>
+        /// 交給判定的佐證（-1＝沒有）。
+        /// </summary>
+        private void LogHistoryOutliers(SlotJob job, PriceCandidate listing, PriceCandidate sale,
+            RelistPricing.AnomalyRule rule, long listingMedian, long saleMedian, long peerBaseline, long saleWitness,
+            long competitor)
+        {
+            if (!rule.Enabled || !rule.UseHistory)
+                return;
+
+            if (listing.IsObserved)
+            {
+                var dir = HistoryOutlier.Deviation(listing.Reference, listingMedian, rule.Ratio, rule.HistoryMinMedian);
+                LogHistoryOutlier(job, "L", job.IsHq, listing, dir, listingMedian,
+                    dir == HistoryVerdict.High ? $"sale:{saleWitness}" : $"peer:{peerBaseline},sale:{saleWitness}", rule);
+            }
+
+            // 過期的 S 本來就不用，不是被這一道擋掉的。
+            if (sale.IsObserved && !sale.Stale)
+            {
+                var dir = HistoryOutlier.Deviation(sale.Reference, saleMedian, rule.Ratio, rule.HistoryMinMedian);
+                LogHistoryOutlier(job, "S", job.SaleHq, sale, dir, saleMedian,
+                    $"worldMin:{job.SalePeerBaseline},board:{competitor}", rule);
+            }
+        }
+
+        private void LogHistoryOutlier(SlotJob job, string side, bool hq, PriceCandidate candidate, HistoryVerdict dir,
+            long median, string witnesses, RelistPricing.AnomalyRule rule)
+        {
+            if (dir is not (HistoryVerdict.Low or HistoryVerdict.High))
+                return;
+
+            // 規則開著、中位數可用時判定只有「離群」與「有佐證的正常」兩種結果，所以沒被擋＝有佐證。
+            var ignored = candidate.Anomaly.IsHistory;
+            var high = dir == HistoryVerdict.High;
+            var ratio = new PriceAnomaly(high ? AnomalyBaseline.HistoryHigh : AnomalyBaseline.History,
+                candidate.Reference, median).RatioText;
+            var what = side == "L" ? "板上最低價" : "最近成交價";
+            var tail = ignored
+                ? $"{what}比近 {HistoryOutlier.WindowDays} 天成交中位數{(high ? "高" : "低")} {ratio} 倍、沒有佐證，不採用。"
+                : $"{what}比近 {HistoryOutlier.WindowDays} 天成交中位數{(high ? "高" : "低")} {ratio} 倍，但有佐證，照常採用。";
+            Log.Information(
+                $"{Diag} HIST-OUTLIER item={job.ItemId} '{job.Name}' hq={hq} side={side} value={candidate.Reference} " +
+                $"median={median} ratio={ratio}x dir={(high ? "high" : "low")} " +
+                $"ignored={(ignored ? "yes" : "no")} corroborated={(ignored ? "no" : "yes")} witness={witnesses} " +
+                $"mult={rule.Ratio} minMedian={rule.HistoryMinMedian} quickListed={job.QuickListed} probe={job.ProbeOnly}：" +
+                tail);
         }
 
         /// <summary>

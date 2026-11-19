@@ -31,15 +31,7 @@ namespace Marketbuddy
         internal static void Fill(HashSet<ulong> target, Configuration conf)
         {
             target.Clear();
-            var retainerManager = RetainerManager.Instance();
-            if (retainerManager != null)
-            {
-                foreach (var retainer in retainerManager->Retainers)
-                {
-                    if (retainer.RetainerId != 0)
-                        target.Add(retainer.RetainerId);
-                }
-            }
+            AddCurrentCharacter(target);
 
             if (!conf.TreatAllCharactersRetainersAsOwn)
                 return;
@@ -47,6 +39,19 @@ namespace Marketbuddy
             if ((DateTime.UtcNow - othersBuiltUtc).TotalSeconds >= RefreshSeconds)
                 Rebuild();
             target.UnionWith(others);
+        }
+
+        /// <summary>把目前角色的僱員加進 <paramref name="target"/>（不清空）。</summary>
+        internal static void AddCurrentCharacter(HashSet<ulong> target)
+        {
+            var retainerManager = RetainerManager.Instance();
+            if (retainerManager == null)
+                return;
+            foreach (var retainer in retainerManager->Retainers)
+            {
+                if (retainer.RetainerId != 0)
+                    target.Add(retainer.RetainerId);
+            }
         }
 
         internal static HashSet<ulong> Snapshot(Configuration conf)

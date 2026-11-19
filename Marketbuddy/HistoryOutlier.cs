@@ -77,6 +77,11 @@ namespace Marketbuddy
             return HistoryVerdict.Normal;
         }
 
+        /// <summary>不看佐證時這個參考價偏離中位數的方向（<see cref="HistoryVerdict.Low"/>／<see cref="HistoryVerdict.High"/>／其他＝沒偏離）。</summary>
+        /// <remarks>只給診斷 log 分辨「有佐證所以照常採用」；判定一律走 <see cref="Judge"/>。</remarks>
+        internal static HistoryVerdict Deviation(long reference, long median, int ratio, long minMedian)
+            => Judge(reference, median, ratio, minMedian, ReadOnlySpan<long>.Empty, ReadOnlySpan<long>.Empty);
+
         /// <summary>中位數（偶數筆取中間兩筆的平均、無條件捨去）；筆數不足 <see cref="MinEntries"/> 回 -1。</summary>
         /// <remarks>會就地排序 <paramref name="prices"/>。</remarks>
         internal static long Median(List<long> prices)

@@ -663,6 +663,11 @@ namespace Marketbuddy
             var key = job.Pick.Slot.Key;
             if (QuickListSkipList.ShouldSkip(conf, key.ItemId, key.Hq, out var skipRecord))
             {
+                Log.Information(
+                    $"[BatchList] 低價下架過跳過：{Describe(job)} HQ={key.Hq} 低價下架紀錄 {skipRecord.Count} 次、" +
+                    $"最後 {RelistPricing.FormatAt(skipRecord.LastDelistUtc)}" +
+                    $"（當時算出 {(skipRecord.LastTargetPrice > 0 ? skipRecord.LastTargetPrice.ToString() : "?")}）、" +
+                    $"跳過天數={conf.QuickListSkipDays}，不查價，當成低於門檻");
                 // 不查價，當成這一次也查到低於門檻：玩家背包的照樣進賣給商店的清單。
                 HandleBelowThreshold(job, new PriceProbeResult(0, PriceProbeOutcome.BelowMin, 0,
                     "delisted ?? time(s) for a low price, last ??".Loc(skipRecord.Count,

@@ -502,7 +502,9 @@ namespace Marketbuddy
                         .Loc(skipName, skipRecord.Count, RelistPricing.FormatAt(skipRecord.LastDelistUtc),
                             skipRecord.LastTargetPrice > 0 ? skipRecord.LastTargetPrice.ToString("N0") : "?"));
                 WriteDiag("低價下架過跳過", item->ItemId, skipName,
-                    $"原因=低價下架紀錄 {skipRecord.Count} 次、最後 {RelistPricing.FormatAt(skipRecord.LastDelistUtc)}（當時算出 {skipRecord.LastTargetPrice}），沒有選出售");
+                    $"HQ={skipRecord.Key.Hq} 原因=低價下架紀錄 {skipRecord.Count} 次、最後 {RelistPricing.FormatAt(skipRecord.LastDelistUtc)}" +
+                    $"（當時算出 {(skipRecord.LastTargetPrice > 0 ? skipRecord.LastTargetPrice.ToString() : "?")}）、" +
+                    $"跳過天數={conf.QuickListSkipDays}，沒有選出售");
                 return;
             }
 
