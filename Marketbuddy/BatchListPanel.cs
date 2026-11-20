@@ -135,8 +135,16 @@ namespace Marketbuddy
                         : "? = no recent market data; the price is checked when it is its turn, and it is skipped if nobody is selling it.".Loc());
             }
 
-            if (candidates.Count > 0 && ImGui.SmallButton(DrawText.Concat("Untick all".Loc(), "##mbbatchlistclear")))
-                lister.ClearTicks();
+            if (candidates.Count > 0)
+            {
+                if (ImGui.SmallButton(DrawText.Concat("Tick all".Loc(), "##mbbatchlistall")))
+                    lister.TickAll();
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Items on a craft list are not ticked - tick those yourself if you want to sell them.".Loc());
+                ImGui.SameLine();
+                if (ImGui.SmallButton(DrawText.Concat("Untick all".Loc(), "##mbbatchlistclear")))
+                    lister.ClearTicks();
+            }
             ImGui.TreePop();
         }
 

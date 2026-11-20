@@ -239,6 +239,38 @@ namespace Marketbuddy
                 conf.Save();
         }
 
+        /// <summary>勾選面板上每一種道具；在製作清單上的（<see cref="Candidate.Protected"/>）不勾，要賣讓使用者自己勾。</summary>
+        public void TickAll()
+        {
+            if (IsRunning)
+                return;
+            if (CandidateSource == BatchListSource.PlayerBags)
+            {
+                foreach (var c in Candidates)
+                {
+                    if (!c.Protected)
+                        playerTicks.Add(c.Key);
+                }
+
+                return;
+            }
+
+            var retainerId = BatchReprice.ActiveRetainerId();
+            if (retainerId == 0)
+                return;
+            var changed = false;
+            foreach (var c in Candidates)
+            {
+                if (c.Protected || IsReplenishPick(retainerId, c.Key))
+                    continue;
+                conf.ReplenishPicks.Add(new ReplenishPick { RetainerId = retainerId, ItemId = c.Key.ItemId, Hq = c.Key.Hq });
+                changed = true;
+            }
+
+            if (changed)
+                conf.Save();
+        }
+
         internal static bool IsReplenishPick(ulong retainerId, VendorSellKey key)
         {
             if (retainerId == 0)
