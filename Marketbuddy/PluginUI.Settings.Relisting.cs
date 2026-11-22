@@ -252,8 +252,8 @@ namespace Marketbuddy
                     ref conf.AnomalyGuardUseSaleHistory))
                 conf.Save();
             HelpMarker(
-                "On by default. When Universalis has at least ?? sales of the item on your data centre in the last ?? days, the cheapest listing and the last sale are both compared against the median of those sales instead of against the next seller. A price that is the multiplier above (or more) away from the median in either direction - typically somebody moving gil between their own characters with a silly price - is ignored, unless something else seen right now backs it up (another seller or the last sale in the same range), which is what a real market move looks like. If that leaves nothing to price by, the slot is left alone as above. The gil threshold above only applies to the next-seller test. Needs \"Also price from the most recent sale, and use whichever is lower\" on, because that is where the sales come from; items without enough sales are judged the old way."
-                    .Loc(HistoryOutlier.MinEntries, HistoryOutlier.WindowDays));
+                "On by default. The yardstick is the consensus of the latest sales of the item on your data centre (how many and how far back is set below): the median of those sales after odd one-off prices - the multiplier above (or more) away from the first median - are left out, and only when at least ?? sales are left. The cheapest listing and the last sale are both compared against it instead of against the next seller. A price that is the multiplier above (or more) away from it in either direction - typically somebody moving gil between their own characters with a silly price - is ignored, unless something else seen right now backs it up (another seller or the last sale in the same range), which is what a real market move looks like. If that leaves nothing to price by, the slot is left alone as above (a new listing can use the fallback below instead). Items without enough sales are judged the old way, except that a next seller far above the consensus or above the ordinary listings on other worlds is treated as an odd one-off listing and not used as the yardstick. The gil threshold above only applies to the next-seller test. Needs \"Also price from the most recent sale, and use whichever is lower\" on, because that is where the sales come from."
+                    .Loc(PriceConsensus.MinEntries));
             if (conf.AnomalyGuardUseSaleHistory)
             {
                 DrawNestIndicator(2);
@@ -291,6 +291,54 @@ namespace Marketbuddy
                 ImGui.TextWrapped(
                     "With these numbers the protection never does anything: the multiplier has to be between ?? and ??, and the gil threshold above 0."
                         .Loc(PriceAnomalyGuard.MinRatio, PriceAnomalyGuard.MaxRatio));
+                ImGui.PopStyleColor();
+            }
+
+            DrawNewListingFallbackSettings();
+        }
+
+        /// <summary>新上架退路的開關，以及共識價的筆數與窗（窗與筆數也是異常價保護「用成交紀錄判」的基準，所以不隨開關停用）。</summary>
+        private void DrawNewListingFallbackSettings()
+        {
+            ImGui.Spacing();
+            if (ImGui.Checkbox("When listing something new that nobody else is selling, price it from recent sales or other worlds".Loc(),
+                    ref conf.NewListingFallbackEnabled))
+                conf.Save();
+            HelpMarker(
+                "On by default. Only for putting new things on the board: batch listing (including the all-retainers top-up and the tidy round) and a quick-listed slot still parked at the price cap. When nobody else is listing the item on your own world and the last sale is missing or older than your limit, the price is the consensus of the latest sales on your data centre (see below), rounded down to 100 gil; with fewer than ?? usable sales it is the cheapest ordinary listing on another world of your data centre (Universalis plus your own cross-world survey, inside the same number of days, with your undercut applied). When the only reference price was set aside as an odd one-off (mistyped or moving gil) and there is a consensus price, the consensus is used instead of skipping the item. Everything else still applies afterwards: your minimum price, the NPC vendor check and the recently-delisted skip. Listings that already have a price are never touched by this - relisting them works as before - and once listed, the survey and relisting pick them up like anything else. Needs \"Also price from the most recent sale, and use whichever is lower\" on."
+                    .Loc(PriceConsensus.MinEntries));
+
+            DrawNestIndicator(1);
+            var entriesRowX = ImGui.GetCursorPosX();
+            ImGui.TextWrapped("Consensus price: the latest".Loc());
+            var entriesLabel = DrawText.Concat("sales (3-50)".Loc(), "##mbconsensusentries");
+            SameLineOrBelow(entriesRowX, LabeledItemWidth(45, entriesLabel));
+            ImGui.SetNextItemWidth(45);
+            if (ImGui.InputInt(entriesLabel, ref conf.PriceConsensusEntries, 0))
+            {
+                conf.PriceConsensusEntries = Math.Clamp(conf.PriceConsensusEntries,
+                    PriceConsensus.MinEntries, PriceConsensus.MaxEntries);
+                conf.Save();
+            }
+
+            DrawNestIndicator(1);
+            var windowRowX = ImGui.GetCursorPosX();
+            ImGui.TextWrapped("only sales and other-world listings from the last".Loc());
+            var windowLabel = DrawText.Concat("days (1-90)".Loc(), "##mbconsensuswindow");
+            SameLineOrBelow(windowRowX, LabeledItemWidth(45, windowLabel));
+            ImGui.SetNextItemWidth(45);
+            if (ImGui.InputInt(windowLabel, ref conf.PriceConsensusWindowDays, 0))
+            {
+                conf.PriceConsensusWindowDays = Math.Clamp(conf.PriceConsensusWindowDays,
+                    PriceConsensus.MinWindowDays, PriceConsensus.MaxWindowDays);
+                conf.Save();
+            }
+
+            if (conf.NewListingFallbackEnabled && !conf.RelistUseLastSoldPrice)
+            {
+                DrawNestIndicator(1);
+                ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+                ImGui.TextWrapped("Not in effect: \"Also price from the most recent sale, and use whichever is lower\" is off, so there are no sales or other-world listings to fall back on.".Loc());
                 ImGui.PopStyleColor();
             }
         }

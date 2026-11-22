@@ -145,21 +145,27 @@ namespace Marketbuddy
             /// </summary>
             public int ExclusionRevision;
 
-            /// <summary>近期成交中位數（依品質分開，扣掉排除清單上的世界）；-1＝沒有或筆數不足。</summary>
-            public long MedianNq = -1;
+            /// <summary>近期成交共識價（扣掉排除清單上的世界）；null＝這一輪沒查到。</summary>
+            public RecentSales? Sales;
 
-            public long MedianHq = -1;
-
-            /// <summary>中位數是用幾筆成交算的（只給 log）。</summary>
-            public int MedianNqCount;
-
-            public int MedianHqCount;
+            /// <summary>資料中心別的世界現在的掛單；null＝這一輪沒查到。內容見 <see cref="DcListings"/>。</summary>
+            public DcListings? Dc;
 
             public DateTime StampUtc;
         }
 
-        /// <summary>一件道具的近期成交中位數（依品質分開）。</summary>
-        private readonly record struct SaleMedians(long Nq, int NqCount, long Hq, int HqCount);
+        /// <summary>一件道具的近期成交共識價：依品質分開，以及兩種品質合併算的一份。</summary>
+        internal sealed record RecentSales(ConsensusResult Nq, ConsensusResult Hq, ConsensusResult Any);
+
+        /// <summary>
+        /// 資料中心<b>別的世界</b>現在的掛單（未稅單價、依品質分開、由低到高）。
+        /// 🔴 已經扣掉掛售所在的世界（那是自己的板，L 已經看過）與排除清單上的世界，只留窗內有人看過的。
+        /// </summary>
+        internal sealed record DcListings(long[] NqPrices, uint[] NqWorlds, long[] HqPrices, uint[] HqWorlds);
+
+        /// <summary>近期成交與別的世界掛單要不要查、怎麼算；換規則＝整份快取作廢。</summary>
+        /// <param name="Want">要不要查（異常價保護用成交紀錄判，或新上架退路開著）。</param>
+        internal sealed record HistoryRule(bool Want, int WindowDays, int Entries, int Ratio);
 
         /// <summary>
         /// 排除清單的一份不可變快照。
@@ -228,21 +234,26 @@ namespace Marketbuddy
         private static uint cacheWorldId;
 
         /// <summary>
-        /// 這一輪要不要順便查近期成交中位數（<see cref="Request"/> 在 framework 執行緒上照設定寫入）。
-        /// 📌 開關一變就整份快取作廢：留著的答案沒有中位數，等 TTL 到期才補會讓開關看起來沒作用。
+        /// 這一輪要不要順便查近期成交與別的世界掛單、怎麼算（<see cref="Request"/> 在 framework 執行緒上照設定寫入）。
+        /// 📌 規則一變就整份快取作廢：留著的答案是照舊規則算的，等 TTL 到期才補會讓設定看起來沒作用。
         /// </summary>
-        private static volatile bool wantMedians;
+        private static volatile HistoryRule historyRule = new(false, 30, 20, 5);
 
-        /// <summary>每件道具最多取幾筆成交算中位數（Universalis 由新到舊回傳）。</summary>
+        /// <summary>每件道具最多取幾筆成交（Universalis 由新到舊回傳）。</summary>
         private const int MedianEntriesPerItem = 200;
 
         /// <summary>
-        /// 中位數那一次 GET 的時間上限（含重試）。🔴 它排在最近成交價查詢前面，而重掛每一格最多只等 25 秒
-        /// 最近成交價——慢的中位數不能把那一條也拖成逾時。
+        /// 近期成交、別的世界掛單各自那一次 GET 的時間上限（含重試）。🔴 它們排在最近成交價查詢前面，而重掛每一格最多只等 25 秒
+        /// 最近成交價——慢的這兩條不能把那一條也拖成逾時。
         /// </summary>
         private const int MedianTimeoutSeconds = 8;
 
+        /// <summary>每件道具最多取幾筆別的世界的掛單（Universalis 由便宜到貴回傳）。</summary>
+        private const int DcListingsPerItem = 50;
+
         private static int medianFailureLogged;
+
+        private static int dcListingFailureLogged;
 
         /// <summary>單一飛行閘：0＝沒有 pump 在跑。</summary>
         private static int pumping;
@@ -311,6 +322,7 @@ namespace Marketbuddy
             Volatile.Write(ref overviewFailureLogged, 0);
             Volatile.Write(ref successLogged, 0);
             Volatile.Write(ref medianFailureLogged, 0);
+            Volatile.Write(ref dcListingFailureLogged, 0);
         }
 
         internal static void Shutdown()
@@ -505,6 +517,90 @@ namespace Marketbuddy
             return mine || (hq ? item.ExcludedNq : item.ExcludedHq);
         }
 
+        /// <summary>這一份答案還算數（照現行排除清單算的、已經問完）時的近期成交資料；否則 null。</summary>
+        private static ItemEntry? Settled(uint itemId)
+            => Cache.TryGetValue(itemId, out var item) && item.ExclusionRevision == exclusion.Revision &&
+               item.State is LastSoldState.Ready or LastSoldState.NoData
+                ? item
+                : null;
+
+        /// <summary>
+        /// 這件道具這個品質的近期成交共識價（資料中心、扣掉排除清單上的世界、窗與筆數照設定）。
+        /// 🔴 沒查到或筆數不足一律回 <see cref="ConsensusResult.None"/>，<b>價格不回 0</b>。
+        /// </summary>
+        internal static ConsensusResult ConsensusOf(uint itemId, bool hq)
+        {
+            var sales = Settled(itemId)?.Sales;
+            return sales == null ? ConsensusResult.None : hq ? sales.Hq : sales.Nq;
+        }
+
+        /// <summary>
+        /// 新上架退路用的共識價：先看這個品質；不夠而且 <paramref name="allowMixed"/>（使用者開了「忽略優質狀態」）時改用兩種品質合併算的那一份。
+        /// </summary>
+        internal static ConsensusResult FallbackConsensusOf(uint itemId, bool hq, bool allowMixed, out bool mixed)
+        {
+            mixed = false;
+            var sales = Settled(itemId)?.Sales;
+            if (sales == null)
+                return ConsensusResult.None;
+            var own = hq ? sales.Hq : sales.Nq;
+            if (own.IsKnown || !allowMixed || !sales.Any.IsKnown)
+                return own;
+            mixed = true;
+            return sales.Any;
+        }
+
+        /// <summary>同 <see cref="ConsensusOf"/> 的價格，查不到回 -1。給異常價判定當「近期成交基準」。</summary>
+        internal static long SaleConsensusOrUnknown(uint itemId, bool hq)
+        {
+            var consensus = ConsensusOf(itemId, hq);
+            return consensus.IsKnown ? consensus.Price : -1;
+        }
+
+        /// <summary>
+        /// 把這件道具這個品質「別的世界現在的掛單」抄進 <paramref name="prices"/>／<paramref name="worlds"/>（由低到高），回傳筆數。
+        /// 沒查到回 0。任何執行緒都可以呼叫（快取是不可變實例）。
+        /// </summary>
+        internal static int CopyDcListings(uint itemId, bool hq, Span<long> prices, Span<uint> worlds)
+        {
+            var dc = Settled(itemId)?.Dc;
+            if (dc == null)
+                return 0;
+            var source = hq ? dc.HqPrices : dc.NqPrices;
+            var sourceWorlds = hq ? dc.HqWorlds : dc.NqWorlds;
+            var n = Math.Min(Math.Min(source.Length, prices.Length), worlds.Length);
+            source.AsSpan(0, n).CopyTo(prices);
+            sourceWorlds.AsSpan(0, n).CopyTo(worlds);
+            return n;
+        }
+
+        /// <summary>目前資料中心的世界（Universalis 回報的）；還沒問到時空的。給巡檢記錄那一半的退路資料用。</summary>
+        internal static uint[] DataCenterWorlds => dcWorlds ?? [];
+
+        /// <summary>現行排除清單快照：掛售所在的世界（0＝不知道）。</summary>
+        internal static uint SellingWorldId => exclusion.SellingWorldId;
+
+        /// <summary>現行排除清單快照裡這個世界有沒有被排除（掛售所在的世界永遠不在裡面）。</summary>
+        internal static bool IsWorldExcluded(uint worldId) => exclusion.IsExcluded(worldId);
+
+        /// <summary>🔴 只從 framework 執行緒呼叫（讀設定）。</summary>
+        private static HistoryRule ReadHistoryRule()
+        {
+            try
+            {
+                var conf = Configuration.GetOrLoad();
+                var want = (conf.AnomalyGuardEnabled && conf.AnomalyGuardUseSaleHistory) || conf.NewListingFallbackEnabled;
+                return new HistoryRule(want,
+                    Math.Clamp(conf.PriceConsensusWindowDays, PriceConsensus.MinWindowDays, PriceConsensus.MaxWindowDays),
+                    Math.Clamp(conf.PriceConsensusEntries, PriceConsensus.MinEntries, PriceConsensus.MaxEntries),
+                    conf.AnomalyGuardRatio);
+            }
+            catch
+            {
+                return historyRule with { Want = false };
+            }
+        }
+
         /// <summary>
         /// 這件道具目前的最低掛售價：本世界一個、整個資料中心一個。
         /// 🔴 兩個都是 <c>MarketPricePoint?</c>：<b>「查不到」是 null，不會是 0</b>。
@@ -512,41 +608,6 @@ namespace Marketbuddy
         /// 那個選項的用途是找「最近賣出價」，而拿自己的優質品去跟普通品的最低價比是錯的比較。
         /// 📌 <b>這兩個值刻意不套世界排除清單</b>，而且也不受清單版號影響。
         /// </summary>
-        /// <summary>
-        /// 這件道具近 <see cref="HistoryOutlier.WindowDays"/> 天的資料中心成交中位數（照這個品質、扣掉排除清單上的世界）。
-        /// 🔴 筆數不足 <see cref="HistoryOutlier.MinEntries"/> 或沒查到一律回 false，<b>不回 0</b>。
-        /// </summary>
-        internal static bool TryGetSaleMedian(uint itemId, bool hq, out long median, out int count)
-        {
-            median = -1;
-            count = 0;
-            if (!Cache.TryGetValue(itemId, out var item) || item.State != LastSoldState.Ready ||
-                item.ExclusionRevision != exclusion.Revision)
-                return false;
-
-            median = hq ? item.MedianHq : item.MedianNq;
-            count = hq ? item.MedianHqCount : item.MedianNqCount;
-            return median > 0;
-        }
-
-        /// <summary>同 <see cref="TryGetSaleMedian"/>，查不到回 -1。</summary>
-        internal static long SaleMedianOrUnknown(uint itemId, bool hq)
-            => TryGetSaleMedian(itemId, hq, out var median, out _) ? median : -1;
-
-        /// <summary>🔴 只從 framework 執行緒呼叫（讀設定）。</summary>
-        private static bool WantMedians()
-        {
-            try
-            {
-                var conf = Configuration.GetOrLoad();
-                return conf.AnomalyGuardEnabled && conf.AnomalyGuardUseSaleHistory;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
         internal static bool TryGetMinPrices(uint itemId, bool hq,
             out MarketPricePoint? world, out MarketPricePoint? datacenter)
         {
@@ -590,10 +651,10 @@ namespace Marketbuddy
             EnsureWorldNames();
             var snapshot = SyncExclusions();
 
-            var medians = WantMedians();
-            if (worldId != cacheWorldId || medians != wantMedians)
+            var rule = ReadHistoryRule();
+            if (worldId != cacheWorldId || rule != historyRule)
             {
-                wantMedians = medians;
+                historyRule = rule;
                 // 換世界＝可能換了資料中心，整份丟掉重來。
                 Cache.Clear();
                 lock (Gate)
@@ -765,8 +826,13 @@ namespace Marketbuddy
 
             try
             {
-                var medians = wantMedians
-                    ? await FetchSaleMediansAsync(client, worldId, batch, ex, token).ConfigureAwait(false)
+                var rule = historyRule;
+                var medians = rule.Want
+                    ? await FetchRecentSalesAsync(client, worldId, batch, ex, rule, token).ConfigureAwait(false)
+                    : null;
+                var dc = rule.Want
+                    ? await FetchDcListingsAsync(client, worldId, ItemsWithoutConsensus(batch, medians), ex, rule, token)
+                        .ConfigureAwait(false)
                     : null;
 
                 var url = "https://universalis.app/api/v2/aggregated/" + worldId + "/" +
@@ -803,14 +869,14 @@ namespace Marketbuddy
                 }
                 else
                 {
-                    await ParseAggregatedAsync(response, batch, unresolved, worldId, ex, medians, token)
+                    await ParseAggregatedAsync(response, batch, unresolved, worldId, ex, medians, dc, token)
                         .ConfigureAwait(false);
                 }
 
                 HashSet<uint> recovered;
                 try
                 {
-                    recovered = await ResolveWithOverviewAsync(worldId, unresolved, ex, medians, token)
+                    recovered = await ResolveWithOverviewAsync(worldId, unresolved, ex, medians, dc, token)
                         .ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
@@ -828,12 +894,12 @@ namespace Marketbuddy
                 foreach (var itemId in unresolved)
                 {
                     if (!recovered.Contains(itemId))
-                        Cache[itemId] = new ItemEntry
+                        Cache[itemId] = WithHistory(new ItemEntry
                         {
                             State = LastSoldState.NoData,
                             StampUtc = stamp,
                             ExclusionRevision = ex.Revision,
-                        };
+                        }, itemId, medians, dc);
                 }
 
                 Volatile.Write(ref failureLogged, 0);
@@ -861,7 +927,8 @@ namespace Marketbuddy
         /// </summary>
         private static async Task ParseAggregatedAsync(
             HttpResponseMessage response, List<uint> batch, HashSet<uint> unresolved,
-            uint worldId, ExclusionSnapshot ex, Dictionary<uint, SaleMedians>? medians, CancellationToken token)
+            uint worldId, ExclusionSnapshot ex, Dictionary<uint, RecentSales>? medians,
+            Dictionary<uint, DcListings>? dc, CancellationToken token)
         {
             await using var stream = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
             var json = await JsonSerializer
@@ -897,7 +964,7 @@ namespace Marketbuddy
                                minDcNq != null || minDcHq != null ||
                                nqExcluded || hqExcluded;
 
-                Cache[result.itemId] = WithMedians(new ItemEntry
+                Cache[result.itemId] = WithHistory(new ItemEntry
                 {
                     State = anything ? LastSoldState.Ready : LastSoldState.NoData,
                     Nq = nq,
@@ -910,7 +977,7 @@ namespace Marketbuddy
                     ExcludedHq = hqExcluded,
                     ExclusionRevision = ex.Revision,
                     StampUtc = now,
-                }, result.itemId, medians);
+                }, result.itemId, medians, dc);
                 handled.Add(result.itemId);
             }
 
@@ -1004,7 +1071,7 @@ namespace Marketbuddy
         /// </summary>
         private static async Task<HashSet<uint>> ResolveWithOverviewAsync(
             uint worldId, IReadOnlyCollection<uint> itemIds, ExclusionSnapshot ex,
-            Dictionary<uint, SaleMedians>? medians, CancellationToken token)
+            Dictionary<uint, RecentSales>? medians, Dictionary<uint, DcListings>? dc, CancellationToken token)
         {
             var recovered = new HashSet<uint>();
             if (itemIds.Count == 0)
@@ -1046,7 +1113,7 @@ namespace Marketbuddy
                 {
                     if (entry == null)
                         continue;
-                    Cache[itemId] = WithMedians(entry, itemId, medians);
+                    Cache[itemId] = WithHistory(entry, itemId, medians, dc);
                     recovered.Add(itemId);
                 }
             }
@@ -1283,25 +1350,38 @@ namespace Marketbuddy
                 "成功之後不再重複回報，只有失敗才會再寫一行。");
         }
 
-        private static ItemEntry WithMedians(ItemEntry entry, uint itemId, Dictionary<uint, SaleMedians>? medians)
+        private static ItemEntry WithHistory(ItemEntry entry, uint itemId, Dictionary<uint, RecentSales>? medians,
+            Dictionary<uint, DcListings>? dc)
         {
             if (medians != null && medians.TryGetValue(itemId, out var m))
-            {
-                entry.MedianNq = m.Nq;
-                entry.MedianNqCount = m.NqCount;
-                entry.MedianHq = m.Hq;
-                entry.MedianHqCount = m.HqCount;
-            }
-
+                entry.Sales = m;
+            if (dc != null && dc.TryGetValue(itemId, out var d))
+                entry.Dc = d;
             return entry;
         }
 
+        /// <summary>兩個品質的共識價沒有都算出來的那幾件（近期成交整批失敗時＝全部）：只有它們需要別的世界的掛單。</summary>
+        private static List<uint> ItemsWithoutConsensus(List<uint> batch, Dictionary<uint, RecentSales>? medians)
+        {
+            if (medians == null)
+                return batch;
+            var result = new List<uint>();
+            foreach (var itemId in batch)
+            {
+                if (!medians.TryGetValue(itemId, out var m) || !m.Nq.IsKnown || !m.Hq.IsKnown)
+                    result.Add(itemId);
+            }
+
+            return result;
+        }
+
         /// <summary>
-        /// 一次 GET 問完這一批的近期成交（資料中心範圍；問不到資料中心名稱時退回本世界），算出每件、每個品質的中位數。
-        /// 🔴 不擲例外（取消除外）：失敗只代表這一批沒有中位數，異常價保護照舊走同業那一套。
+        /// 一次 GET 問完這一批的近期成交（資料中心範圍；問不到資料中心名稱時退回本世界），算出每件的共識價（依品質、以及合併）。
+        /// 🔴 不擲例外（取消除外）：失敗只代表這一批沒有共識價，異常價保護照舊走同業那一套、新上架沒有共識價退路。
         /// </summary>
-        private static async Task<Dictionary<uint, SaleMedians>?> FetchSaleMediansAsync(
-            HttpClient client, uint worldId, List<uint> batch, ExclusionSnapshot ex, CancellationToken outer)
+        private static async Task<Dictionary<uint, RecentSales>?> FetchRecentSalesAsync(
+            HttpClient client, uint worldId, List<uint> batch, ExclusionSnapshot ex, HistoryRule rule,
+            CancellationToken outer)
         {
             using var budget = CancellationTokenSource.CreateLinkedTokenSource(outer);
             budget.CancelAfter(TimeSpan.FromSeconds(MedianTimeoutSeconds));
@@ -1312,7 +1392,7 @@ namespace Marketbuddy
                 var name = dcWorldsForWorld == worldId ? dcName : string.Empty;
                 var scope = name.Length > 0 ? Uri.EscapeDataString(name) : worldId.ToString();
                 var url = "https://universalis.app/api/v2/history/" + scope + "/" + string.Join(",", batch) +
-                          "?entriesWithin=" + HistoryOutlier.WindowDays * 86400 +
+                          "?entriesWithin=" + rule.WindowDays * 86400 +
                           "&entriesToReturn=" + MedianEntriesPerItem;
                 using var response = await SendWithRetryAsync(client, url, token).ConfigureAwait(false);
                 if (!response.IsSuccessStatusCode)
@@ -1327,19 +1407,19 @@ namespace Marketbuddy
                 if (json == null)
                     return null;
 
-                var cutoff = DateTime.UtcNow.AddDays(-HistoryOutlier.WindowDays);
-                var result = new Dictionary<uint, SaleMedians>();
+                var cutoff = DateTime.UtcNow.AddDays(-rule.WindowDays);
+                var result = new Dictionary<uint, RecentSales>();
                 if (json.items != null)
                 {
                     foreach (var (key, item) in json.items)
                     {
                         if (uint.TryParse(key, out var itemId))
-                            result[itemId] = MediansOf(item.entries, ex, cutoff);
+                            result[itemId] = ConsensusOf(item.entries, ex, cutoff, rule);
                     }
                 }
                 else if (json.itemID != 0)
                 {
-                    result[json.itemID] = MediansOf(json.entries, ex, cutoff);
+                    result[json.itemID] = ConsensusOf(json.entries, ex, cutoff, rule);
                 }
 
                 Volatile.Write(ref medianFailureLogged, 0);
@@ -1358,19 +1438,139 @@ namespace Marketbuddy
             }
         }
 
-        private static SaleMedians MediansOf(List<HistoryEntryDto>? entries, ExclusionSnapshot ex, DateTime cutoffUtc)
+        private static RecentSales ConsensusOf(List<HistoryEntryDto>? entries, ExclusionSnapshot ex, DateTime cutoffUtc,
+            HistoryRule rule)
         {
-            var nq = new List<long>();
-            var hq = new List<long>();
+            // 🔑 自己排一次由新到舊：共識價取的是「最新 N 筆」，不依賴 Universalis 的回傳順序。
+            var usable = new List<(DateTime At, long Price, bool Hq)>();
             foreach (var e in entries ?? [])
             {
-                if (e.pricePerUnit is not { } price || price <= 0 ||
-                    ex.IsExcluded(e.worldID ?? 0u) || ToUtc(e.timestamp) < cutoffUtc)
+                if (e.pricePerUnit is not { } price || price <= 0 || ex.IsExcluded(e.worldID ?? 0u))
                     continue;
-                (e.hq ? hq : nq).Add(price);
+                var at = ToUtc(e.timestamp);
+                if (at < cutoffUtc)
+                    continue;
+                usable.Add((at, price, e.hq));
             }
 
-            return new SaleMedians(HistoryOutlier.Median(nq), nq.Count, HistoryOutlier.Median(hq), hq.Count);
+            usable.Sort((a, b) => b.At.CompareTo(a.At));
+            var nq = new List<long>();
+            var hq = new List<long>();
+            var any = new List<long>();
+            foreach (var (_, price, isHq) in usable)
+            {
+                (isHq ? hq : nq).Add(price);
+                any.Add(price);
+            }
+
+            return new RecentSales(
+                PriceConsensus.Compute(CollectionsMarshalSpan(nq), rule.Entries, rule.Ratio),
+                PriceConsensus.Compute(CollectionsMarshalSpan(hq), rule.Entries, rule.Ratio),
+                PriceConsensus.Compute(CollectionsMarshalSpan(any), rule.Entries, rule.Ratio));
+        }
+
+        private static ReadOnlySpan<long> CollectionsMarshalSpan(List<long> list)
+            => System.Runtime.InteropServices.CollectionsMarshal.AsSpan(list);
+
+        /// <summary>
+        /// 一次 GET 問完這幾件在資料中心<b>現在</b>的掛單，只留別的世界、窗內有人看過、不在排除清單上的。
+        /// 🔴 不擲例外（取消除外）：失敗只代表這幾件沒有「別的世界掛單」這條退路。
+        /// 只問資料中心範圍：問不到資料中心名稱時不退回單一世界（那會是自己的板），掛售所在的世界不知道時也不問。
+        /// </summary>
+        private static async Task<Dictionary<uint, DcListings>?> FetchDcListingsAsync(
+            HttpClient client, uint worldId, List<uint> items, ExclusionSnapshot ex, HistoryRule rule,
+            CancellationToken outer)
+        {
+            if (items.Count == 0 || ex.SellingWorldId == 0)
+                return null;
+
+            using var budget = CancellationTokenSource.CreateLinkedTokenSource(outer);
+            budget.CancelAfter(TimeSpan.FromSeconds(MedianTimeoutSeconds));
+            var token = budget.Token;
+            try
+            {
+                await GetDataCenterWorldsAsync(client, worldId, token).ConfigureAwait(false);
+                var name = dcWorldsForWorld == worldId ? dcName : string.Empty;
+                if (name.Length == 0)
+                    return null;
+
+                var url = "https://universalis.app/api/v2/" + Uri.EscapeDataString(name) + "/" + string.Join(",", items) +
+                          "?listings=" + DcListingsPerItem + "&entries=0&fields=" +
+                          "items.listings.pricePerUnit,items.listings.hq,items.listings.worldID,items.listings.lastReviewTime," +
+                          "listings.pricePerUnit,listings.hq,listings.worldID,listings.lastReviewTime";
+                using var response = await SendWithRetryAsync(client, url, token).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    NoteDcListingFailure($"HTTP {(int)response.StatusCode}");
+                    return null;
+                }
+
+                await using var stream = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
+                var json = await JsonSerializer.DeserializeAsync<CurrentlyShownDto>(stream, JsonOptions, token)
+                    .ConfigureAwait(false);
+                if (json == null)
+                    return null;
+
+                var cutoff = DateTime.UtcNow.AddDays(-rule.WindowDays);
+                var result = new Dictionary<uint, DcListings>();
+                if (json.items != null)
+                {
+                    foreach (var (key, item) in json.items)
+                    {
+                        if (uint.TryParse(key, out var itemId))
+                            result[itemId] = DcListingsOf(item.listings, ex, cutoff);
+                    }
+                }
+                else if (items.Count == 1)
+                {
+                    // 只問一件時回應沒有 items 這一層（而且 fields 篩掉了 itemID）。
+                    result[items[0]] = DcListingsOf(json.listings, ex, cutoff);
+                }
+
+                Volatile.Write(ref dcListingFailureLogged, 0);
+                return result;
+            }
+            catch (OperationCanceledException) when (!outer.IsCancellationRequested)
+            {
+                NoteDcListingFailure($"timeout {MedianTimeoutSeconds}s");
+                return null;
+            }
+            catch (Exception e)
+            {
+                NoteDcListingFailure(e.Message);
+                return null;
+            }
+        }
+
+        private static DcListings DcListingsOf(List<CurrentlyShownListingDto>? listings, ExclusionSnapshot ex,
+            DateTime cutoffUtc)
+        {
+            var nq = new List<(long Price, uint World)>();
+            var hq = new List<(long Price, uint World)>();
+            foreach (var l in listings ?? [])
+            {
+                var world = l.worldID ?? 0u;
+                if (l.pricePerUnit is not { } price || price <= 0 || world == 0 || world == ex.SellingWorldId ||
+                    ex.IsExcluded(world) || ToUtc(l.lastReviewTime) < cutoffUtc)
+                    continue;
+                (l.hq ? hq : nq).Add((price, world));
+            }
+
+            nq.Sort((a, b) => a.Price.CompareTo(b.Price));
+            hq.Sort((a, b) => a.Price.CompareTo(b.Price));
+            return new DcListings(
+                nq.Select(x => x.Price).ToArray(), nq.Select(x => x.World).ToArray(),
+                hq.Select(x => x.Price).ToArray(), hq.Select(x => x.World).ToArray());
+        }
+
+        private static void NoteDcListingFailure(string reason)
+        {
+            if (Interlocked.Exchange(ref dcListingFailureLogged, 1) != 0)
+                return;
+
+            Log.Information(
+                $"[Marketbuddy] 別的世界掛單：向 Universalis 查詢失敗（{reason}）。" +
+                "這一批道具新上架時沒有「別的世界最便宜掛單」這條退路，同業基準也不會排除特殊掛單；成功一次之後會再回報下一次失敗。");
         }
 
         private static void NoteMedianFailure(string reason)
@@ -1379,8 +1579,8 @@ namespace Marketbuddy
                 return;
 
             Log.Information(
-                $"[Marketbuddy] 近期成交中位數：向 Universalis 查詢失敗（{reason}）。" +
-                "這一批道具的異常價保護照舊用「下一位賣家」那一套判斷；成功一次之後會再回報下一次失敗。");
+                $"[Marketbuddy] 近期成交共識價：向 Universalis 查詢失敗（{reason}）。" +
+                "這一批道具的異常價保護照舊用「下一位賣家」那一套判斷、新上架沒有共識價退路；成功一次之後會再回報下一次失敗。");
         }
 
         /// <summary>
@@ -1612,6 +1812,26 @@ namespace Marketbuddy
             public long? timestamp { get; set; }
 
             public uint? worldID { get; set; }
+        }
+
+        /// <summary>v2 現在掛單：多件時是 <c>items</c>，只問一件時直接是 <c>listings</c>。</summary>
+        internal sealed class CurrentlyShownDto
+        {
+            public List<CurrentlyShownListingDto>? listings { get; set; }
+            public Dictionary<string, CurrentlyShownDto>? items { get; set; }
+        }
+
+        internal sealed class CurrentlyShownListingDto
+        {
+            /// <summary>未稅單價（實測 total＝pricePerUnit×quantity，稅另列在 tax）。</summary>
+            public long? pricePerUnit { get; set; }
+
+            public bool hq { get; set; }
+
+            public uint? worldID { get; set; }
+
+            /// <summary>Unix 秒：最後一次有人看過這筆掛單。</summary>
+            public long? lastReviewTime { get; set; }
         }
 
         internal sealed class DataCenterDto

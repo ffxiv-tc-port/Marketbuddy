@@ -107,7 +107,8 @@ namespace Marketbuddy
         /// 當參考」，而那句話是錯的——按下去真的會照它掛。
         /// </remarks>
         public bool SuggestionIsLocal
-            => SuggestedPrice >= 0 && SuggestionSource is "live" or "survey" or PriceSourceTag.Sale;
+            => SuggestedPrice >= 0 && SuggestionSource is "live" or "survey" or PriceSourceTag.Sale
+                or PriceSourceTag.Consensus or PriceSourceTag.DcListing;
     }
 
     /// <summary>

@@ -14,6 +14,7 @@
         <Compile Include="../../Marketbuddy/RelistPricing.cs" Link="RelistPricing.cs" />
         <Compile Include="../../Marketbuddy/PriceAnomalyGuard.cs" Link="PriceAnomalyGuard.cs" />
         <Compile Include="../../Marketbuddy/HistoryOutlier.cs" Link="HistoryOutlier.cs" />
+        <Compile Include="../../Marketbuddy/PriceConsensus.cs" Link="PriceConsensus.cs" />
         <Compile Include="../../Marketbuddy/OwnPriceIndex.cs" Link="OwnPriceIndex.cs" />
     </ItemGroup>
 </Project>

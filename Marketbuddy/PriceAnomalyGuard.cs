@@ -136,9 +136,11 @@ namespace Marketbuddy
         /// <remarks>
         /// 🔑 中位數優先而不是兩套都跑：同業基準在板上被一筆天價掛單佔住時會把正常的成交判成「打錯的低價」，
         /// 兩套並存等於讓那個誤判繼續擋住正常價。
+        /// 沒有中位數時，下一位賣家若被 <paramref name="peerReference"/> 判成特殊掛單就當成沒有（見 <see cref="PriceConsensus.SanitizePeer"/>）。
         /// </remarks>
+        /// <param name="peerReference">判「下一位賣家是不是特殊掛單」用的第三方參照價；-1＝沒有。只在 <see cref="RelistPricing.AnomalyRule.UseHistory"/> 時用。</param>
         internal static PriceAnomaly Evaluate(long reference, long peerBaseline, long ownPrice,
-            RelistPricing.AnomalyRule rule, long historyMedian,
+            RelistPricing.AnomalyRule rule, long historyMedian, long peerReference,
             ReadOnlySpan<long> lowWitnesses, ReadOnlySpan<long> highWitnesses)
         {
             if (!rule.Enabled)
@@ -146,6 +148,7 @@ namespace Marketbuddy
 
             if (rule.UseHistory)
             {
+                peerBaseline = PriceConsensus.SanitizePeer(reference, peerBaseline, peerReference, rule.Ratio);
                 switch (HistoryOutlier.Judge(reference, historyMedian, rule.Ratio, rule.HistoryMinMedian,
                             lowWitnesses, highWitnesses))
                 {

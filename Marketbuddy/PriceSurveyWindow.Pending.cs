@@ -366,6 +366,18 @@ namespace Marketbuddy
                         "What this item actually sold for on your data centre, rounded down to 100 gil. The relist engine uses whichever is lower - this, or the cheapest listing on your own world."
                             .Loc());
                     return;
+                case PriceSourceTag.Consensus:
+                    ImGui.TextUnformatted("sales consensus".Loc());
+                    Tooltip(
+                        "Only for slots still parked at the price cap: nobody else is selling this on your own world and there is no recent sale, so the relist engine would use the consensus of the latest sales on your data centre (odd one-off prices left out), rounded down to 100 gil."
+                            .Loc());
+                    return;
+                case PriceSourceTag.DcListing:
+                    ImGui.TextUnformatted("other world (cheapest ordinary)".Loc());
+                    Tooltip(
+                        "Only for slots still parked at the price cap: nobody else is selling this on your own world and there are not enough recent sales, so the relist engine would use the cheapest ordinary listing on another world of your data centre, with your undercut applied."
+                            .Loc());
+                    return;
                 case "anomaly-peer":
                     // 🔑 「拿什麼當正常價」必須在列上看得見：那是整個判定的全部依據。
                     ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudOrange);

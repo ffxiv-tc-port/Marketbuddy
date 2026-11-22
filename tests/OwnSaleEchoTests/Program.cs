@@ -31,10 +31,10 @@ internal static class Program
     }
 
     private static PriceCandidate L(long lowest)
-        => RelistPricing.FromListing(lowest, -1, -1, PriceSourceTag.Live, Now, Undercut, NoGuard, -1, -1);
+        => RelistPricing.FromListing(lowest, -1, -1, PriceSourceTag.Live, Now, Undercut, NoGuard, -1, -1, -1);
 
     private static PriceCandidate S(long unitPrice, double daysAgo = 0.5, int maxAgeDays = 7)
-        => RelistPricing.FromSale(unitPrice, Now.AddDays(-daysAgo), -1, -1, Now, maxAgeDays, NoGuard, -1, -1);
+        => RelistPricing.FromSale(unitPrice, Now.AddDays(-daysAgo), -1, -1, Now, maxAgeDays, NoGuard, -1, -1, -1);
 
     private static void DecideRule()
     {

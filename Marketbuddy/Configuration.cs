@@ -127,8 +127,8 @@ namespace Marketbuddy
         /// 異常價保護有近期成交中位數時改用它判，<b>兩個方向都判</b>（轉錢交易的天價掛單／成交也擋）。<b>預設開。</b>
         /// </summary>
         /// <remarks>
-        /// 倍數沿用 <see cref="AnomalyGuardRatio"/>；中位數來自 Universalis（資料中心近
-        /// <see cref="HistoryOutlier.WindowDays"/> 天成交），所以只在 <see cref="RelistUseLastSoldPrice"/> 開著時有資料。
+        /// 倍數沿用 <see cref="AnomalyGuardRatio"/>；基準是 Universalis 資料中心近期成交的共識價
+        /// （<see cref="PriceConsensusWindowDays"/>／<see cref="PriceConsensusEntries"/>），所以只在 <see cref="RelistUseLastSoldPrice"/> 開著時有資料。
         /// 沒有中位數的道具照舊走同業／自家現價那一套，<see cref="AnomalyGuardMinNormalPrice"/> 也只管那一套。
         /// </remarks>
         public bool AnomalyGuardUseSaleHistory = true;
@@ -151,8 +151,23 @@ namespace Marketbuddy
         /// <summary>使用者從跳過清單移除的道具與時間。</summary>
         public List<QuickListSkipDismissal> QuickListSkipDismissed = [];
 
-        /// <summary>近期成交中位數低於這個數（gil）就不用中位數判。</summary>
+        /// <summary>近期成交共識價低於這個數（gil）就不用它判。</summary>
         public int AnomalyHistoryMinMedian = 1000;
+
+        /// <summary>
+        /// 新上架（批次上架、快速上架停在上限價那格、全僱員補上架／整理一輪）時的退路。<b>預設開。</b>
+        /// 板上沒有別人在賣、最近成交沒有或太舊時，改用近期成交共識價，沒有再用別的世界最便宜的一般掛單；
+        /// 唯一的參考價被判成特殊交易而有共識價時，也改用共識價而不是不動。
+        /// </summary>
+        /// <remarks>規則本體在 <see cref="RelistPricing.WithNewListingFallback"/>；重掛已經有價的掛單不受影響。</remarks>
+        public bool NewListingFallbackEnabled = true;
+
+        /// <summary>共識價（與別的世界掛單）只看這麼多天內的資料。</summary>
+        public int PriceConsensusWindowDays = 30;
+
+        /// <summary>共識價取窗內最新幾筆成交。</summary>
+        /// <remarks>預設 20 而不是 10：同一時間一口氣成交的一批便宜貨會佔滿 10 筆，把真正的特殊交易擠進倍數以內。</remarks>
+        public int PriceConsensusEntries = 20;
         public int MarketTaxPercent = 5;
         public bool DelistToRetainerInventory = false;
         public int QuickListKeyCode = 0;
@@ -677,6 +692,10 @@ namespace Marketbuddy
                     conf.AnomalyGuardMinNormalPrice = 0;
                 if (conf.AnomalyHistoryMinMedian < 0)
                     conf.AnomalyHistoryMinMedian = 0;
+                conf.PriceConsensusWindowDays = Math.Clamp(conf.PriceConsensusWindowDays,
+                    PriceConsensus.MinWindowDays, PriceConsensus.MaxWindowDays);
+                conf.PriceConsensusEntries = Math.Clamp(conf.PriceConsensusEntries,
+                    PriceConsensus.MinEntries, PriceConsensus.MaxEntries);
                 // 🔴 刻意**不**夾到合法範圍內：被手改成範圍外的值時該發生的事是
                 //    「保護不作用」（PriceAnomalyGuard.Evaluate 自己會放行），
                 //    而不是被我們悄悄改成 2 或 1000 —— 那等於替使用者做了他沒要的決定。

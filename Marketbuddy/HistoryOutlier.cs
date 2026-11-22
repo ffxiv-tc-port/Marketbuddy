@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 
 namespace Marketbuddy
 {
@@ -21,7 +20,7 @@ namespace Marketbuddy
     }
 
     /// <summary>
-    /// 「和近期成交中位數差太多倍」的判定（轉錢交易、打錯字的掛單與成交）。
+    /// 「和近期成交共識價差太多倍」的判定（轉錢交易、打錯字的掛單與成交）；共識價怎麼算見 <see cref="PriceConsensus"/>。
     /// 🔴 純函式：不讀設定、不碰遊戲、不做 I/O，離線測試直接編這個檔。
     /// <para>🔑 偏離本身不夠：整個市場一起漲跌時中位數會落後好幾天。所以偏離的那一筆要
     /// <b>沒有任何獨立的現況觀測站在它那邊</b>才算離群——偏低時有別的觀測也一樣低（&lt; 參考價×倍數），
@@ -29,17 +28,11 @@ namespace Marketbuddy
     /// </summary>
     internal static class HistoryOutlier
     {
-        /// <summary>中位數只看這麼多天內的成交。</summary>
-        internal const int WindowDays = 7;
-
-        /// <summary>窗內至少要有這麼多筆成交，中位數才算數。</summary>
-        internal const int MinEntries = 5;
-
         internal const int MinRatio = 2;
         internal const int MaxRatio = 1000;
 
         /// <param name="reference">要判的參考價；&lt;=0＝沒有。</param>
-        /// <param name="median">近期成交中位數；&lt;=0＝沒有。</param>
+        /// <param name="median">近期成交共識價；&lt;=0＝沒有。</param>
         /// <param name="ratio">差幾倍（含）以上算離群。</param>
         /// <param name="minMedian">中位數低於它就不判（便宜貨本來就常整批跳動）。</param>
         /// <param name="lowWitnesses">偏低時可以佐證的獨立觀測；&lt;=0 的值不算。</param>
@@ -81,16 +74,5 @@ namespace Marketbuddy
         /// <remarks>只給診斷 log 分辨「有佐證所以照常採用」；判定一律走 <see cref="Judge"/>。</remarks>
         internal static HistoryVerdict Deviation(long reference, long median, int ratio, long minMedian)
             => Judge(reference, median, ratio, minMedian, ReadOnlySpan<long>.Empty, ReadOnlySpan<long>.Empty);
-
-        /// <summary>中位數（偶數筆取中間兩筆的平均、無條件捨去）；筆數不足 <see cref="MinEntries"/> 回 -1。</summary>
-        /// <remarks>會就地排序 <paramref name="prices"/>。</remarks>
-        internal static long Median(List<long> prices)
-        {
-            if (prices.Count < MinEntries)
-                return -1;
-            prices.Sort();
-            var mid = prices.Count / 2;
-            return prices.Count % 2 == 1 ? prices[mid] : (prices[mid - 1] + prices[mid]) / 2;
-        }
     }
 }

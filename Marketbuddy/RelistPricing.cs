@@ -20,6 +20,12 @@ namespace Marketbuddy
 
         /// <summary>Universalis 的「資料中心最近一次實際成交」（<see cref="LastSoldPriceSource"/>）。</summary>
         internal const string Sale = "sale";
+
+        /// <summary>新上架的退路：窗內最新多筆成交排除特殊交易後的共識價（<see cref="PriceConsensus"/>）。</summary>
+        internal const string Consensus = "consensus";
+
+        /// <summary>新上架的退路：資料中心<b>別的世界</b>最便宜的一般掛單（Universalis 現在掛單＋巡檢記錄）。</summary>
+        internal const string DcListing = "dc-listing";
     }
 
     /// <summary>
@@ -259,19 +265,22 @@ namespace Marketbuddy
         /// <param name="ownListedPrice">自己這一格目前的掛售價；-1＝不知道／不可信（停在上限價的那種）。</param>
         /// <param name="source">出處標籤（<see cref="PriceSourceTag.Live"/>／<c>Cache</c>／<c>Survey</c>）。</param>
         /// <param name="atUtc">這個觀測是什麼時候的；<see cref="DateTime.MinValue"/>＝不知道。</param>
-        /// <param name="historyMedian">近期成交中位數（這一格的品質）；-1＝沒有。</param>
+        /// <param name="historyMedian">近期成交共識價（這一格的品質）；-1＝沒有。</param>
         /// <param name="saleWitness">可以佐證行情的成交單價（過期的不算）；-1＝沒有。</param>
+        /// <param name="peerReference">判下一位賣家是不是特殊掛單的參照價（見 <see cref="PriceConsensus.SanitizePeer"/>）；-1＝沒有。</param>
         /// <remarks>偏高只認成交當佐證：下一位賣家一定不比最低價便宜，拿它佐證「行情真的這麼高」沒有意義。</remarks>
         internal static PriceCandidate FromListing(
             long lowestCompetitor, long peerBaseline, long ownListedPrice,
             string source, DateTime atUtc, UndercutRule undercut, AnomalyRule anomaly,
-            long historyMedian, long saleWitness)
+            long historyMedian, long saleWitness, long peerReference)
         {
             if (lowestCompetitor <= 0)
                 return PriceCandidate.None;
 
+            if (anomaly.UseHistory)
+                peerBaseline = PriceConsensus.SanitizePeer(lowestCompetitor, peerBaseline, peerReference, anomaly.Ratio);
             var verdict = PriceAnomalyGuard.Evaluate(
-                lowestCompetitor, peerBaseline, ownListedPrice, anomaly, historyMedian,
+                lowestCompetitor, peerBaseline, ownListedPrice, anomaly, historyMedian, peerReference,
                 [peerBaseline, saleWitness], [saleWitness]);
 
             return new PriceCandidate(
@@ -292,19 +301,22 @@ namespace Marketbuddy
         /// <param name="ownListedPrice">自己這一格目前的掛售價；-1＝不知道／不可信。</param>
         /// <param name="nowUtc">現在（呼叫端傳進來，這個類別不讀時鐘）。</param>
         /// <param name="maxAgeDays">新鮮度窗（天）；<b>0＝不限</b>。</param>
-        /// <param name="historyMedian">近期成交中位數（這筆成交的品質）；-1＝沒有。</param>
+        /// <param name="historyMedian">近期成交共識價（這筆成交的品質）；-1＝沒有。</param>
         /// <param name="listingWitness">這一輪看到的板上別人最低價（自家最低時也照填）；-1＝沒有。</param>
+        /// <param name="peerReference">同 <see cref="FromListing"/>。</param>
         internal static PriceCandidate FromSale(
             long unitPrice, DateTime soldAtUtc, long peerBaseline, long ownListedPrice,
             DateTime nowUtc, int maxAgeDays, AnomalyRule anomaly,
-            long historyMedian, long listingWitness)
+            long historyMedian, long listingWitness, long peerReference)
         {
             if (unitPrice <= 0)
                 return PriceCandidate.None;
 
             var stale = IsSaleStale(soldAtUtc, nowUtc, maxAgeDays);
+            if (anomaly.UseHistory)
+                peerBaseline = PriceConsensus.SanitizePeer(unitPrice, peerBaseline, peerReference, anomaly.Ratio);
             var verdict = PriceAnomalyGuard.Evaluate(
-                unitPrice, peerBaseline, ownListedPrice, anomaly, historyMedian,
+                unitPrice, peerBaseline, ownListedPrice, anomaly, historyMedian, peerReference,
                 [peerBaseline, listingWitness], [peerBaseline, listingWitness]);
 
             return new PriceCandidate(
@@ -374,6 +386,56 @@ namespace Marketbuddy
                 return new RelistDecision(RelistOutcome.Hold, -1, sale, false);
 
             return new RelistDecision(RelistOutcome.NoData, -1, PriceCandidate.None, false);
+        }
+
+        /// <summary>新上架退路的輸入（值快照）。</summary>
+        /// <param name="Consensus">這一格品質的共識價（不夠時可能是兩種品質合併算的，見 <paramref name="ConsensusMixed"/>）。</param>
+        /// <param name="DcCheapest">別的世界最便宜的一般掛單；-1＝沒有。</param>
+        /// <param name="DcReference">別的世界掛單的參照價（下中位數）；-1＝沒有。</param>
+        /// <param name="DcCount">別的世界可用的掛單筆數。</param>
+        /// <param name="LastSale">最近一筆成交（過期也算）；-1＝沒有。只拿來擋天價掛單。</param>
+        internal readonly record struct FallbackInputs(
+            ConsensusResult Consensus, bool ConsensusMixed, long DcCheapest, long DcReference, int DcCount, long LastSale);
+
+        /// <summary>
+        /// 新上架的退路候選：有共識價用共識價（捨去到百位，比照 S）；沒有就用別的世界最便宜的一般掛單（套降價設定）。
+        /// </summary>
+        /// <remarks>
+        /// 別的世界的掛單比最近一筆成交貴到倍數（含）以上就不用：只剩一筆天價掛單時取最便宜也躲不掉它。
+        /// </remarks>
+        internal static PriceCandidate FallbackCandidate(in FallbackInputs inputs, UndercutRule undercut, int ratio)
+        {
+            if (inputs.Consensus.IsKnown)
+                return new PriceCandidate(inputs.Consensus.Price,
+                    LastSoldPriceSource.RoundDownToHundred(inputs.Consensus.Price),
+                    PriceSourceTag.Consensus, PriceAnomaly.Clear, DateTime.MinValue, false);
+
+            if (inputs.DcCheapest <= 0)
+                return PriceCandidate.None;
+            if (inputs.LastSale > 0 && PriceConsensus.ValidRatio(ratio) && inputs.DcCheapest >= inputs.LastSale * ratio)
+                return PriceCandidate.None;
+            return new PriceCandidate(inputs.DcCheapest, ApplyUndercut(inputs.DcCheapest, undercut),
+                PriceSourceTag.DcListing, PriceAnomaly.Clear, DateTime.MinValue, false);
+        }
+
+        /// <summary>
+        /// 新上架（批次上架、快速上架停在上限價那格）才套的退路：板上沒有別人、成交沒有或過期（<see cref="RelistOutcome.NoData"/>）時
+        /// 用退路候選；唯一的參考價被判成特殊交易（<see cref="RelistOutcome.Hold"/>）而有共識價時改用共識價。其餘原樣回傳。
+        /// </summary>
+        /// <remarks>
+        /// 🔴 呼叫端負責只在「把新東西掛上去」時呼叫：重掛已經有價的掛單一律照舊（維持原價）。
+        /// 板上最低是自家掛單時不套：那時候自家掛價就是錨點，既有流程會與它齊平。
+        /// </remarks>
+        internal static RelistDecision WithNewListingFallback(RelistDecision decision, bool ownIsLowest,
+            PriceCandidate fallback)
+        {
+            if (!fallback.IsUsable)
+                return decision;
+            if (decision.Outcome == RelistOutcome.NoData && !ownIsLowest)
+                return new RelistDecision(RelistOutcome.Price, fallback.Target, fallback, false);
+            if (decision.Outcome == RelistOutcome.Hold && fallback.Source == PriceSourceTag.Consensus)
+                return new RelistDecision(RelistOutcome.Price, fallback.Target, fallback, false);
+            return decision;
         }
 
         /// <summary>一個時間點的人類可讀形式；<see cref="DateTime.MinValue"/> 一律畫成 <c>?</c>，絕不畫成某個看起來合理的日期。</summary>

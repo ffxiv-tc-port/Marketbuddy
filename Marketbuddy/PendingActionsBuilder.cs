@@ -245,7 +245,9 @@ namespace Marketbuddy
             bool UseLastSold,
             bool IgnoreQuality,
             int MaxSaleAgeDays,
-            bool SkipOwnSale);
+            bool SkipOwnSale,
+            bool NewListingFallback,
+            int ConsensusWindowDays);
 
         /// <summary>執行緒池那一段的產出：純資料，沒有任何遊戲指標。</summary>
         private sealed class Prepared
@@ -338,7 +340,9 @@ namespace Marketbuddy
                 conf.RelistUseLastSoldPrice,
                 conf.RelistLastSoldIgnoreQuality,
                 conf.RelistLastSoldMaxAgeDays,
-                conf.RelistSkipOwnSalePrice);
+                conf.RelistSkipOwnSalePrice,
+                conf.NewListingFallbackEnabled,
+                conf.PriceConsensusWindowDays);
 
             prepareRequest = request;
             StatusText = "Recomputing...".Loc();
@@ -405,7 +409,8 @@ namespace Marketbuddy
             DateTime ListingAt,
             long SaleReference, long SalePeer, string SaleWorld, DateTime SaleAt,
             long OtherReference, string OtherSource, string OtherWorld, DateTime OtherAt,
-            long ListingMedian, long SaleMedian, bool SaleIsOwnPrice);
+            long ListingMedian, long SaleMedian, bool SaleIsOwnPrice,
+            long PeerReference, bool OwnIsLowest, RelistPricing.FallbackInputs Fallback);
 
         /// <summary>
         /// 巡檢記錄裡有資料、但被排除清單擋下來的那些世界的名字（已排序）。
@@ -541,6 +546,7 @@ namespace Marketbuddy
         private static Observations Observe(uint itemId, bool hq, Request request, Prepared prepared,
             HashSet<ulong> ownRetainers)
         {
+            var ownIsLowest = false;
             long listingRef = -1;
             long listingPeer = -1;
             var listingSource = string.Empty;
@@ -552,7 +558,7 @@ namespace Marketbuddy
                 && MarketDataCache.TryGet(itemId, request.CacheSeconds, out var listings, out var ageMs))
             {
                 var lowest = RelistPricing.LowestCompetitor(listings, hq, request.CompareHqOnly,
-                    ownRetainers, out var peerBaseline, out _, out _);
+                    ownRetainers, out var peerBaseline, out ownIsLowest, out _);
                 if (lowest >= 0)
                 {
                     listingRef = lowest;
@@ -573,6 +579,11 @@ namespace Marketbuddy
                 listingWorld = homeRow.WorldName;
                 listingAt = homeRow.AtUtc;
             }
+            else if (listingRef < 0 && prepared.Latest.TryGetValue((itemId, hq, request.HomeWorldId), out var ownRow)
+                     && ownRow.Verdict == "ok" && ownRow.LowestIsOurs != 0)
+            {
+                ownIsLowest = true;
+            }
 
             // S：資料中心最近一次實際成交。⚠️ 只讀快取，絕不在這裡發 HTTP 查詢。
             long saleRef = -1;
@@ -587,7 +598,7 @@ namespace Marketbuddy
                 saleRef = sold.UnitPrice;
                 saleAt = sold.SoldAtUtc;
                 saleWorld = sold.World;
-                saleMedian = LastSoldPriceSource.SaleMedianOrUnknown(itemId, sold.Hq);
+                saleMedian = LastSoldPriceSource.SaleConsensusOrUnknown(itemId, sold.Hq);
                 saleIsOwn = request.SkipOwnSale && OwnPriceEcho.Contains(itemId, sold.Hq, sold.UnitPrice);
                 // 異常低價保護在成交價這一側的同業基準＝本世界目前最低掛售價，
                 // 與重掛引擎用的是同一個來源（理由見 BatchReprice.TickSaleCandidate）。
@@ -647,6 +658,14 @@ namespace Marketbuddy
                     ? "survey-excluded"
                     : string.Empty;
 
+            var now = DateTime.UtcNow;
+            var ratio = request.Anomaly.Ratio;
+            var peerReference = NewListingFallback.PeerReference(itemId, hq, ratio, request.ConsensusWindowDays, now);
+            var fallback = request.NewListingFallback
+                ? NewListingFallback.Gather(itemId, hq, request.IgnoreQuality, ratio, request.ConsensusWindowDays,
+                    saleRef, now)
+                : default;
+
             return new Observations(
                 listingRef, listingPeer, listingSource, listingWorld, listingAt,
                 saleRef, salePeer, saleWorld, saleAt,
@@ -654,7 +673,8 @@ namespace Marketbuddy
                 otherSource,
                 best >= 0 ? bestWorld : excludedWorld,
                 best >= 0 ? bestAt : excludedAt,
-                LastSoldPriceSource.SaleMedianOrUnknown(itemId, hq), saleMedian, saleIsOwn);
+                LastSoldPriceSource.SaleConsensusOrUnknown(itemId, hq), saleMedian, saleIsOwn,
+                peerReference, ownIsLowest, fallback);
         }
 
         /// <summary>
@@ -683,12 +703,17 @@ namespace Marketbuddy
             var listing = RelistPricing.FromListing(
                 observed.ListingReference, observed.ListingPeer, currentPrice,
                 observed.ListingSource, observed.ListingAt, undercut, anomalyRule,
-                observed.ListingMedian, saleWitness);
+                observed.ListingMedian, saleWitness, observed.PeerReference);
             var sale = RelistPricing.FromSale(
                 observed.SaleReference, observed.SaleAt, observed.SalePeer, currentPrice,
-                now, request.MaxSaleAgeDays, anomalyRule, observed.SaleMedian, observed.ListingReference);
+                now, request.MaxSaleAgeDays, anomalyRule, observed.SaleMedian, observed.ListingReference,
+                observed.PeerReference);
 
             var decision = RelistPricing.Decide(listing, sale, observed.SaleIsOwnPrice);
+            // 與引擎同一條規則：停在上限價的格子還沒有真的價，按下重新定價時套新上架退路（BatchReprice.ApplySlot）。
+            if (currentPrice >= Configuration.MAX_PRICE && request.NewListingFallback)
+                decision = RelistPricing.WithNewListingFallback(decision, observed.OwnIsLowest,
+                    RelistPricing.FallbackCandidate(observed.Fallback, undercut, anomalyRule.Ratio));
             switch (decision.Outcome)
             {
                 case RelistOutcome.Price:
@@ -696,7 +721,9 @@ namespace Marketbuddy
                     var winner = decision.Winner;
                     var world = winner.Source == PriceSourceTag.Sale
                         ? observed.SaleWorld
-                        : observed.ListingWorld;
+                        : winner.Source is PriceSourceTag.Consensus or PriceSourceTag.DcListing
+                            ? string.Empty
+                            : observed.ListingWorld;
                     return new Suggestion(decision.Price, winner.Source, world, winner.AtUtc,
                         winner.Reference, observed.ListingPeer);
                 }
@@ -745,7 +772,8 @@ namespace Marketbuddy
                 return PendingActionKind.PriceAnomaly;
 
             if (request.MinPrice > 0 && suggestion.Price >= 0
-                && suggestion.Source is "live" or "survey" or PriceSourceTag.Sale
+                && suggestion.Source is "live" or "survey" or PriceSourceTag.Sale or PriceSourceTag.Consensus
+                    or PriceSourceTag.DcListing
                 && suggestion.Price < request.MinPrice)
                 return PendingActionKind.BelowMinimum;
 

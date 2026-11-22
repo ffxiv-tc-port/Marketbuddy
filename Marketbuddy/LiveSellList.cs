@@ -394,6 +394,7 @@ namespace Marketbuddy
                     long competitor = -1;
                     long boardWitness = -1;
                     long peerBaseline = -1;
+                    var boardOwnIsLowest = false;
                     var listingSource = string.Empty;
                     var listingAt = DateTime.MinValue;
 
@@ -404,9 +405,9 @@ namespace Marketbuddy
                     {
                         competitor = RelistPricing.LowestCompetitor(
                             cachedListings, isHq, conf.BatchCompareHqOnly, ownRetainers,
-                            out peerBaseline, out var ownIsLowest, out _);
+                            out peerBaseline, out boardOwnIsLowest, out _);
                         boardWitness = competitor;
-                        if (ownIsLowest)
+                        if (boardOwnIsLowest)
                         {
                             // 與引擎同一條規則：自家掛單已經是最低時板上不提供目標價。
                             competitor = -1;
@@ -435,21 +436,36 @@ namespace Marketbuddy
                         sold.SoldAtUtc, now, conf.RelistLastSoldMaxAgeDays)
                         ? sold.UnitPrice
                         : -1L;
+                    // 每幀路徑：只有真的有同業基準可排除時才收集參照價。
+                    var peerRef = anomalyRule.UseHistory && (peerBaseline > 0 || minWorld != null)
+                        ? NewListingFallback.PeerReference(slot->ItemId, isHq, anomalyRule.Ratio,
+                            conf.PriceConsensusWindowDays, now)
+                        : -1L;
                     var listingCandidate = RelistPricing.FromListing(
                         competitor, peerBaseline, listedPrice, listingSource, listingAt,
                         undercutRule, anomalyRule,
-                        LastSoldPriceSource.SaleMedianOrUnknown(slot->ItemId, isHq), saleWitness);
+                        LastSoldPriceSource.SaleConsensusOrUnknown(slot->ItemId, isHq), saleWitness, peerRef);
                     var saleCandidate = hasSold
                         ? RelistPricing.FromSale(
                             sold.UnitPrice, sold.SoldAtUtc,
                             minWorld is { } salePeer ? salePeer.UnitPrice : -1L,
                             listedPrice, now, conf.RelistLastSoldMaxAgeDays, anomalyRule,
-                            LastSoldPriceSource.SaleMedianOrUnknown(slot->ItemId, sold.Hq), boardWitness)
+                            LastSoldPriceSource.SaleConsensusOrUnknown(slot->ItemId, sold.Hq), boardWitness, peerRef)
                         : PriceCandidate.None;
 
                     var saleIsOwn = hasSold && conf.RelistSkipOwnSalePrice
                                     && OwnPriceEcho.Contains(slot->ItemId, sold.Hq, sold.UnitPrice);
                     var decision = RelistPricing.Decide(listingCandidate, saleCandidate, saleIsOwn);
+                    // 與引擎同一條規則：停在上限價的格子還沒有真的價，重掛時套新上架退路（BatchReprice.ApplySlot）。
+                    if (listedPrice >= Configuration.MAX_PRICE && conf.NewListingFallbackEnabled
+                        && decision.Outcome != RelistOutcome.Price)
+                    {
+                        var inputs = NewListingFallback.Gather(slot->ItemId, isHq, conf.RelistLastSoldIgnoreQuality,
+                            anomalyRule.Ratio, conf.PriceConsensusWindowDays,
+                            saleCandidate.IsObserved ? saleCandidate.Reference : -1, now);
+                        decision = RelistPricing.WithNewListingFallback(decision, boardOwnIsLowest,
+                            RelistPricing.FallbackCandidate(inputs, undercutRule, anomalyRule.Ratio));
+                    }
                     relistSource = decision.Winner.Source;
                     relistReference = decision.Winner.Reference;
                     relistAtUtc = decision.Winner.AtUtc;
@@ -815,6 +831,12 @@ namespace Marketbuddy
                     PriceSourceTag.Survey =>
                         "From the cross-world survey taken ??: the cheapest listing on your own world was ?? gil. Used because the live market data is not available."
                             .Loc(when, reference),
+                    PriceSourceTag.Consensus =>
+                        "Nobody else is selling this on your own world and there is no recent sale, so this is the consensus of the latest sales on your data centre (?? gil, odd one-off prices left out), rounded down to 100 gil."
+                            .Loc(reference),
+                    PriceSourceTag.DcListing =>
+                        "Nobody else is selling this on your own world and there are not enough recent sales, so this is the cheapest ordinary listing on another world of your data centre (?? gil), with your undercut applied."
+                            .Loc(reference),
                     _ =>
                         "The cheapest listing on your own world that is not yours is ?? gil, with your undercut applied. That is lower than the last sale, or there is none."
                             .Loc(reference),

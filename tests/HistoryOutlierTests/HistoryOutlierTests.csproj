@@ -1,5 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
-    <!-- 離線情境測試：只編 HistoryOutlier.cs 這個純函式檔，不引用 Dalamud。
+    <!-- 離線情境測試：編 HistoryOutlier.cs（離群判定）、PriceConsensus.cs（共識價與別的世界掛單）、
+         RelistPricing.cs／PriceAnomalyGuard.cs（候選、取低與新上架退路）這幾個純函式檔，不引用 Dalamud；
+         Configuration 與 LastSoldPriceSource 只用到兩個常數與一支捨去函式，由 Stubs.cs 提供。
          不在 Marketbuddy.sln 裡，CI 只建 Marketbuddy/Marketbuddy.csproj，不會碰到它。
          執行方式寫在 Program.cs 開頭。 -->
     <PropertyGroup>
@@ -11,5 +13,8 @@
     </PropertyGroup>
     <ItemGroup>
         <Compile Include="../../Marketbuddy/HistoryOutlier.cs" Link="HistoryOutlier.cs" />
+        <Compile Include="../../Marketbuddy/PriceConsensus.cs" Link="PriceConsensus.cs" />
+        <Compile Include="../../Marketbuddy/RelistPricing.cs" Link="RelistPricing.cs" />
+        <Compile Include="../../Marketbuddy/PriceAnomalyGuard.cs" Link="PriceAnomalyGuard.cs" />
     </ItemGroup>
 </Project>

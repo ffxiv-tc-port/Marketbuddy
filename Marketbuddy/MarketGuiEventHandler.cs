@@ -545,9 +545,14 @@ namespace Marketbuddy
                               && !RelistPricing.IsSaleStale(sold.SoldAtUtc, DateTime.UtcNow, conf.RelistLastSoldMaxAgeDays)
                 ? sold.UnitPrice
                 : -1L;
+            var rule = conf.AnomalyRuleSnapshot();
+            var peerRef = NewListingFallback.PeerReference(itemId, lowestHq, rule.Ratio, conf.PriceConsensusWindowDays,
+                DateTime.UtcNow);
+            if (rule.UseHistory)
+                peer = PriceConsensus.SanitizePeer(lowest, peer, peerRef, rule.Ratio);
             var anomaly = PriceAnomalyGuard.Evaluate(lowest, peer,
                 // 🔴 -1＝「我現在賣多少」不知道，所以自家現價那條退路整個不走。
-                -1L, conf.AnomalyRuleSnapshot(), LastSoldPriceSource.SaleMedianOrUnknown(itemId, lowestHq),
+                -1L, rule, LastSoldPriceSource.SaleConsensusOrUnknown(itemId, lowestHq), peerRef,
                 [peer, saleWitness], [saleWitness]);
             // 偏高不擋：手動點了一個偏高的最低價不會賤賣任何東西。
             if (!anomaly.IsAnomalous || anomaly.Baseline == AnomalyBaseline.HistoryHigh)

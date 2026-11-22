@@ -748,7 +748,7 @@ namespace Marketbuddy
             // 巡檢補位要用的記憶體索引。🔴 讀檔在執行緒池上，這裡只是把它踢起來；
             // 已經讀過就是一次 Interlocked 比較。⚠️ 它是**補位**，所以來不及讀完也只是
             // 退回「查詢失敗就算失敗」的舊行為，不會讓任何一格拿到錯的價。
-            if (conf.RelistSurveyFallbackHours > 0)
+            if (conf.RelistSurveyFallbackHours > 0 || conf.NewListingFallbackEnabled)
                 PriceSurveySnapshot.EnsureLoaded();
             lastAcceptedRequestId = int.MinValue;
             offeringsPending = false;
@@ -1293,6 +1293,8 @@ namespace Marketbuddy
             var listedPrice = CurrentListedPrice(job.Slot);
             // 🔴 快速上架的那一格停在上限價，那不是一個真的價格，絕不能當異常判定的基準。
             var ownBasis = job.QuickListed ? -1L : listedPrice;
+            // 停在上限價的格子還沒有真的價，和快速上架那一格一樣算「新上架」。
+            var newListing = job.QuickListed || listedPrice >= Configuration.MAX_PRICE;
 
             var undercut = conf.UndercutRuleSnapshot();
             var anomalyRule = conf.AnomalyRuleSnapshot();
@@ -1326,23 +1328,30 @@ namespace Marketbuddy
             // 🔑 板上最便宜的那一筆是我們自己掛的時候，L 一律當成「沒有」：
             //    板上沒有給我們任何「該降到多少」的新資訊，而且我們不會自己壓自己的價。
             var saleWitness = SaleWitness(job, now, conf.RelistLastSoldMaxAgeDays);
-            var listingMedian = LastSoldPriceSource.SaleMedianOrUnknown(job.ItemId, job.IsHq);
-            var saleMedian = LastSoldPriceSource.SaleMedianOrUnknown(job.ItemId, job.SaleHq);
+            var listingMedian = LastSoldPriceSource.SaleConsensusOrUnknown(job.ItemId, job.IsHq);
+            var saleMedian = LastSoldPriceSource.SaleConsensusOrUnknown(job.ItemId, job.SaleHq);
+            var peerRef = NewListingFallback.PeerReference(job.ItemId, job.IsHq, anomalyRule.Ratio,
+                conf.PriceConsensusWindowDays, now);
             var listing = ownIsLowest
                 ? PriceCandidate.None
                 : RelistPricing.FromListing(
                     competitor, peerBaseline, ownBasis, listingSource, listingAt, undercut, anomalyRule,
-                    listingMedian, saleWitness);
+                    listingMedian, saleWitness, peerRef);
 
             // ---------------- 候選 S：資料中心最近一筆成交價 ----------------
             var sale = RelistPricing.FromSale(
                 job.SaleUnitPrice, job.SaleAtUtc, job.SalePeerBaseline, ownBasis,
                 now, conf.RelistLastSoldMaxAgeDays, anomalyRule,
-                saleMedian, competitor);
+                saleMedian, competitor, peerRef);
 
             var saleIsOwn = SaleIsOwnPrice(job, out var ownSaleTag);
             var decision = RelistPricing.Decide(listing, sale, saleIsOwn);
-            LogPricingDecision(job, listing, sale, decision, listedPrice, ownIsLowest, competitor, ownSaleTag);
+            var fallbackTag = "-";
+            if (newListing)
+                decision = ApplyNewListingFallback(job, decision, ownIsLowest, sale, undercut, anomalyRule, now,
+                    out fallbackTag);
+            LogPricingDecision(job, listing, sale, decision, listedPrice, ownIsLowest, competitor, ownSaleTag,
+                fallbackTag, peerRef);
             LogHistoryOutliers(job, listing, sale, anomalyRule, listingMedian, saleMedian, peerBaseline, saleWitness,
                 competitor);
 
@@ -1424,18 +1433,22 @@ namespace Marketbuddy
                 ? conf.RelistLastSoldMaxAgeDays
                 : ProbeSaleMaxAgeDaysWhenUnlimited;
             var saleWitness = SaleWitness(job, now, maxAgeDays);
-            var listingMedian = LastSoldPriceSource.SaleMedianOrUnknown(job.ItemId, job.IsHq);
-            var saleMedian = LastSoldPriceSource.SaleMedianOrUnknown(job.ItemId, job.SaleHq);
+            var listingMedian = LastSoldPriceSource.SaleConsensusOrUnknown(job.ItemId, job.IsHq);
+            var saleMedian = LastSoldPriceSource.SaleConsensusOrUnknown(job.ItemId, job.SaleHq);
+            var peerRef = NewListingFallback.PeerReference(job.ItemId, job.IsHq, anomalyRule.Ratio,
+                conf.PriceConsensusWindowDays, now);
             var listing = ownIsLowest
                 ? PriceCandidate.None
                 : RelistPricing.FromListing(competitor, peerBaseline, -1, listingSource, listingAt, undercut, anomalyRule,
-                    listingMedian, saleWitness);
+                    listingMedian, saleWitness, peerRef);
             var sale = RelistPricing.FromSale(
                 job.SaleUnitPrice, job.SaleAtUtc, job.SalePeerBaseline, -1, now, maxAgeDays, anomalyRule,
-                saleMedian, competitor);
+                saleMedian, competitor, peerRef);
             var saleIsOwn = SaleIsOwnPrice(job, out var ownSaleTag);
-            var decision = RelistPricing.Decide(listing, sale, saleIsOwn);
-            LogPricingDecision(job, listing, sale, decision, -1, ownIsLowest, competitor, ownSaleTag);
+            var decision = ApplyNewListingFallback(job, RelistPricing.Decide(listing, sale, saleIsOwn), ownIsLowest,
+                sale, undercut, anomalyRule, now, out var fallbackTag);
+            LogPricingDecision(job, listing, sale, decision, -1, ownIsLowest, competitor, ownSaleTag, fallbackTag,
+                peerRef);
             LogHistoryOutliers(job, listing, sale, anomalyRule, listingMedian, saleMedian, peerBaseline, saleWitness,
                 competitor);
 
@@ -1489,6 +1502,59 @@ namespace Marketbuddy
             HandleNoListings(job, cacheTag);
         }
 
+        /// <summary>
+        /// 新上架才套的退路（見 <see cref="RelistPricing.WithNewListingFallback"/>）：原本會是 NoData／Hold 時才算，
+        /// 算了就寫一行 <c>FALLBACK</c>（Information）。<paramref name="tag"/> 給 PRICE 行尾的 <c>fallback=</c>：
+        /// -＝不必退、off＝設定關、none＝沒有可用的退路、其餘＝用了的來源。
+        /// </summary>
+        private RelistDecision ApplyNewListingFallback(SlotJob job, RelistDecision decision, bool ownIsLowest,
+            PriceCandidate sale, RelistPricing.UndercutRule undercut, RelistPricing.AnomalyRule rule, DateTime now,
+            out string tag)
+        {
+            if (decision.Outcome == RelistOutcome.Price || (decision.Outcome == RelistOutcome.NoData && ownIsLowest))
+            {
+                tag = "-";
+                return decision;
+            }
+
+            if (!conf.NewListingFallbackEnabled)
+            {
+                tag = "off";
+                return decision;
+            }
+
+            var window = conf.PriceConsensusWindowDays;
+            var inputs = NewListingFallback.Gather(job.ItemId, job.IsHq, conf.RelistLastSoldIgnoreQuality, rule.Ratio,
+                window, sale.IsObserved ? sale.Reference : -1, now);
+            var candidate = RelistPricing.FallbackCandidate(inputs, undercut, rule.Ratio);
+            var result = RelistPricing.WithNewListingFallback(decision, ownIsLowest, candidate);
+            var applied = result.Outcome == RelistOutcome.Price;
+            var held = decision.Outcome == RelistOutcome.Hold;
+            tag = applied ? result.Winner.Source : "none";
+
+            var consensus = inputs.Consensus;
+            var why = (applied, result.Winner.Source, held) switch
+            {
+                (true, PriceSourceTag.Consensus, true) =>
+                    $"唯一的參考價被判成特殊交易，改用近 {window} 天最新 {consensus.Used} 筆成交的共識價（丟掉 {consensus.Dropped.Length} 筆特殊交易）。",
+                (true, PriceSourceTag.Consensus, false) =>
+                    $"板上沒有別人在賣、成交沒有或太舊，改用近 {window} 天最新 {consensus.Used} 筆成交的共識價（丟掉 {consensus.Dropped.Length} 筆特殊交易）。",
+                (true, _, _) =>
+                    $"板上沒有別人在賣、成交沒有或太舊、也沒有共識價，改用別的世界最便宜的一般掛單（{inputs.DcCount} 筆可比）。",
+                (false, _, true) => "唯一的參考價被判成特殊交易，但沒有共識價可以替代，照舊不動。",
+                _ => "沒有共識價、也沒有可用的別的世界一般掛單，照舊不定價。",
+            };
+            Log.Information(
+                $"{Diag} FALLBACK item={job.ItemId} '{job.Name}' hq={job.IsHq} " +
+                $"from={(held ? $"hold({decision.Winner.Anomaly.Tag})" : "nodata")} pick={tag} " +
+                $"price={(applied ? result.Price.ToString() : "-")} consensus={consensus.Price} " +
+                $"n={consensus.Used}/{consensus.Considered} dropped={consensus.DroppedText} mixed={inputs.ConsensusMixed} " +
+                $"dcCheapest={inputs.DcCheapest} dcRef={inputs.DcReference} dcCount={inputs.DcCount} " +
+                $"lastSale={inputs.LastSale} window={window} entries={conf.PriceConsensusEntries} mult={rule.Ratio} " +
+                $"quickListed={job.QuickListed} probe={job.ProbeOnly}：{why}");
+            return result;
+        }
+
         /// <summary>拿來佐證板上價的成交單價：過期或沒有就是 -1（過期的成交不能替現況背書）。</summary>
         private static long SaleWitness(SlotJob job, DateTime now, int maxAgeDays)
             => job.SaleUnitPrice > 0 && !RelistPricing.IsSaleStale(job.SaleAtUtc, now, maxAgeDays)
@@ -1521,6 +1587,8 @@ namespace Marketbuddy
                 PriceSourceTag.Survey => " " + "(lowest listing ?? gil, cross-world scan ??)".Loc(
                     reference, FormatSoldAt(candidate.AtUtc)),
                 PriceSourceTag.Live or PriceSourceTag.Cache => " " + "(lowest listing ?? gil)".Loc(reference),
+                PriceSourceTag.Consensus => " " + "(recent sales consensus ?? gil)".Loc(reference),
+                PriceSourceTag.DcListing => " " + "(cheapest listing on another world ?? gil)".Loc(reference),
                 _ => string.Empty,
             };
         }
@@ -1565,8 +1633,11 @@ namespace Marketbuddy
         /// 📌 <c>boardCompetitor</c> 是獨立欄位而不是從 <c>L=</c> 讀：自家掛單是最低價時 L 會被
         /// 當成「沒有」，那時候板上別人開多少仍然是判讀時必要的資訊。
         /// </remarks>
+        /// <param name="fallbackTag">新上架退路的結果（見 <see cref="ApplyNewListingFallback"/>）。</param>
+        /// <param name="peerRef">判下一位賣家是不是特殊掛單用的參照價；-1＝沒有。</param>
         private void LogPricingDecision(SlotJob job, PriceCandidate listing, PriceCandidate sale,
-            RelistDecision decision, long listedPrice, bool ownIsLowest, long competitor, string ownSaleTag)
+            RelistDecision decision, long listedPrice, bool ownIsLowest, long competitor, string ownSaleTag,
+            string fallbackTag, long peerRef)
         {
             var winner = decision.Winner.Source.Length == 0 ? "?" : decision.Winner.Source;
             var pick = decision.Outcome switch
@@ -1583,7 +1654,8 @@ namespace Marketbuddy
                 $"pick={pick} final={(decision.Outcome == RelistOutcome.Price ? decision.Price.ToString() : "-")} " +
                 $"saleMaxAgeDays={conf.RelistLastSoldMaxAgeDays} " +
                 $"surveyHours={conf.RelistSurveyFallbackHours} quickListed={job.QuickListed} probe={job.ProbeOnly} " +
-                $"ownSale={(decision.OwnSaleSkipped ? "skip" : ownSaleTag)} {OwnRetainerListingCounts(job)}");
+                $"ownSale={(decision.OwnSaleSkipped ? "skip" : ownSaleTag)} {OwnRetainerListingCounts(job)} " +
+                $"fallback={fallbackTag} peerRef={peerRef}");
 
             if (decision.OwnSaleSkipped)
                 Log.Information(
@@ -1624,7 +1696,7 @@ namespace Marketbuddy
         }
 
         /// <summary>
-        /// L／S 偏離近期成交中位數達倍數時，一側一行 <c>HIST-OUTLIER</c>（Information）：沒佐證而不採用，或有佐證照常採用。
+        /// L／S 偏離近期成交共識價達倍數時，一側一行 <c>HIST-OUTLIER</c>（Information）：沒佐證而不採用，或有佐證照常採用。
         /// 只在定價決策時呼叫。<c>witness=</c> 逐字對應 <see cref="RelistPricing.FromListing"/>／<see cref="RelistPricing.FromSale"/>
         /// 交給判定的佐證（-1＝沒有）。
         /// </summary>
@@ -1663,12 +1735,15 @@ namespace Marketbuddy
             var ratio = new PriceAnomaly(high ? AnomalyBaseline.HistoryHigh : AnomalyBaseline.History,
                 candidate.Reference, median).RatioText;
             var what = side == "L" ? "板上最低價" : "最近成交價";
+            var consensus = LastSoldPriceSource.ConsensusOf(job.ItemId, hq);
+            var basis = $"近 {conf.PriceConsensusWindowDays} 天最新 {consensus.Used} 筆成交共識價";
             var tail = ignored
-                ? $"{what}比近 {HistoryOutlier.WindowDays} 天成交中位數{(high ? "高" : "低")} {ratio} 倍、沒有佐證，不採用。"
-                : $"{what}比近 {HistoryOutlier.WindowDays} 天成交中位數{(high ? "高" : "低")} {ratio} 倍，但有佐證，照常採用。";
+                ? $"{what}比{basis}{(high ? "高" : "低")} {ratio} 倍、沒有佐證，不採用。"
+                : $"{what}比{basis}{(high ? "高" : "低")} {ratio} 倍，但有佐證，照常採用。";
             Log.Information(
                 $"{Diag} HIST-OUTLIER item={job.ItemId} '{job.Name}' hq={hq} side={side} value={candidate.Reference} " +
-                $"median={median} ratio={ratio}x dir={(high ? "high" : "low")} " +
+                $"consensus={median} n={consensus.Used}/{consensus.Considered} dropped={consensus.DroppedText} " +
+                $"ratio={ratio}x dir={(high ? "high" : "low")} " +
                 $"ignored={(ignored ? "yes" : "no")} corroborated={(ignored ? "no" : "yes")} witness={witnesses} " +
                 $"mult={rule.Ratio} minMedian={rule.HistoryMinMedian} quickListed={job.QuickListed} probe={job.ProbeOnly}：" +
                 tail);
