@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Colors;
 using Marketbuddy.Common;
@@ -15,6 +16,9 @@ namespace Marketbuddy
     internal sealed class VendorSellPanel
     {
         private static readonly TimeSpan ArmWindow = TimeSpan.FromSeconds(6);
+
+        /// <summary>「要賣的道具」超過這麼多行就改成固定高度、可捲動的區塊。</summary>
+        private const int MaxVisibleLines = 12;
 
         private readonly VendorSeller seller;
         private DateTime armedUntil = DateTime.MinValue;
@@ -35,6 +39,10 @@ namespace Marketbuddy
         private readonly List<SortRow> sortRows = new();
         private int sortRowsVersion = -1;
         private CultureInfo? sortRowsCulture;
+
+        // 清單內容的寬度（上一幀量到的）：捲動區塊照它定寬，面板照舊跟著最長的一列變寬。
+        private float detailsWidth;
+        private float measureRight;
 
         public VendorSellPanel(VendorSeller seller)
         {
@@ -191,6 +199,25 @@ namespace Marketbuddy
             manual.Clear();
             for (var i = 0; i < plan.Count; i++)
             {
+                if (plan[i].State == VendorSellState.Manual)
+                    manual.Add(plan[i]);
+            }
+
+            var lines = plan.Count + (manual.Count > 0 ? 1 : 0) +
+                        (seller.SortPicks.Count > 0 ? seller.SortPicks.Count + 2 : 0);
+            var bounded = lines > MaxVisibleLines;
+            if (bounded)
+            {
+                var style = ImGui.GetStyle();
+                var width = detailsWidth > 0f ? detailsWidth + (style.WindowPadding.X * 2) + style.ScrollbarSize : 0f;
+                ImGui.BeginChild("##mbvendorselldetails",
+                    new Vector2(width, (MaxVisibleLines * ImGui.GetFrameHeightWithSpacing()) + (style.WindowPadding.Y * 2)), true);
+            }
+
+            var originX = ImGui.GetCursorScreenPos().X;
+            measureRight = originX;
+            for (var i = 0; i < plan.Count; i++)
+            {
                 var v = plan[i];
                 switch (v.State)
                 {
@@ -199,9 +226,7 @@ namespace Marketbuddy
                         break;
                     case VendorSellState.Waiting:
                         Grey(RowText(v).Line);
-                        break;
-                    case VendorSellState.Manual:
-                        manual.Add(v);
+                        Measure();
                         break;
                 }
             }
@@ -214,15 +239,20 @@ namespace Marketbuddy
                 ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudOrange);
                 ImGui.TextUnformatted(DrawText.Loc("By hand (??)", manual.Count));
                 ImGui.PopStyleColor();
+                Measure();
                 foreach (var v in manual)
                 {
                     ImGui.TextUnformatted(RowText(v).Line);
+                    Measure();
                     if (ImGui.IsItemHovered())
                         ImGui.SetTooltip(ManualReasonLong(v));
                 }
-
-                manual.Clear();
             }
+
+            manual.Clear();
+            detailsWidth = measureRight - originX;
+            if (bounded)
+                ImGui.EndChild();
 
             ImGui.Spacing();
             if (ImGui.SmallButton(DrawText.Concat("Forget this list".Loc(), "##mbvendorsellclear")))
@@ -253,6 +283,7 @@ namespace Marketbuddy
 
             ImGui.Spacing();
             ImGui.TextUnformatted(DrawText.Loc("From the bag sort (??)", sortRows.Count));
+            Measure();
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip(
                     "Stacks you ticked in the bag sort (/mbuddy, Clear-out tab). These are stacks you already had, so each one is only sold if that slot still holds exactly the same item, quality and amount as when you handed it over; anything else is skipped."
@@ -264,12 +295,14 @@ namespace Marketbuddy
                     seller.SetSortExcluded(row.Key, !include);
                 ImGui.SameLine();
                 ImGui.TextUnformatted(row.Line);
+                Measure();
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip(row.Tooltip);
             }
 
             if (ImGui.SmallButton(DrawText.Concat("Forget the bag sort picks".Loc(), "##mbvendorsellsortclear")))
                 seller.ClearSortPicks();
+            Measure();
         }
 
         private void RebuildSortRows(IReadOnlyList<VendorSeller.SortPick> picks)
@@ -314,6 +347,7 @@ namespace Marketbuddy
                 seller.SetExcluded(v.Key, !include);
             ImGui.SameLine();
             ImGui.TextUnformatted(text.Line);
+            Measure();
             if (!ImGui.IsItemHovered())
                 return;
 
@@ -365,6 +399,8 @@ namespace Marketbuddy
                 "It went into the armoury chest; only your four bags are sold automatically.".Loc(),
             _ => "?",
         };
+
+        private void Measure() => measureRight = MathF.Max(measureRight, ImGui.GetItemRectMax().X);
 
         private static void Grey(string text)
         {
