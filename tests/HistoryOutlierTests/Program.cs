@@ -32,6 +32,7 @@ internal static class Program
         CheapestOrdinaryListing();
         SpecialPeerListingIsExcluded();
         HeldSaleFallsBackToConsensus();
+        OutlierSaleIsReplacedByConsensus();
         NobodySellingFallsBack();
 
         Console.WriteLine($"HISTORYOUTLIER_DONE pass={passes} fail={failures}");
@@ -199,23 +200,70 @@ internal static class Program
     /// <summary>軟銀錠優質格：板上沒人，最近成交是普通品 450（11-22），普通品共識價 2,700（最新 20 筆）。</summary>
     private static void HeldSaleFallsBackToConsensus()
     {
-        var sale = RelistPricing.FromSale(450, Now.AddHours(-4), -1, -1, Now, 7, Guard, 2_700, -1, 2_700);
         CheckBool("ingot sale followed with the N=10 consensus",
-            RelistPricing.FromSale(450, Now.AddHours(-4), -1, -1, Now, 7, Guard, 2_100, -1, 2_100).IsUsable, true);
-        CheckBool("ingot sale held (anomaly-hist)", sale.HeldByAnomaly && sale.Anomaly.Baseline == AnomalyBaseline.History, true);
+            RelistPricing.FromSale(450, Now.AddHours(-4), -1, -1, Now, 7, Guard, 2_100, -1, 2_100).Source
+            == PriceSourceTag.Sale, true);
+        var sale = RelistPricing.FromSale(450, Now.AddHours(-4), -1, -1, Now, 7, Guard, 2_700, -1, 2_700);
+        CheckBool("ingot sale replaced by consensus 2700", sale.Source == PriceSourceTag.Consensus && sale.Target == 2_700
+                                                          && sale.Anomaly.Baseline == AnomalyBaseline.History, true);
+        CheckBool("replaced sale is not held", sale.HeldByAnomaly, false);
         var decision = RelistPricing.Decide(PriceCandidate.None, sale, false);
-        CheckBool("relist keeps Hold", decision.Outcome == RelistOutcome.Hold, true);
+        CheckBool("ingot priced at consensus", decision.Outcome == RelistOutcome.Price && decision.Price == 2_700, true);
 
-        var inputs = new RelistPricing.FallbackInputs(PriceConsensus.Compute([2_800, 3_000, 2_500, 1_750, 2_000, 2_800], 10, Ratio),
-            false, -1, -1, 0, 450);
-        var fallback = RelistPricing.WithNewListingFallback(decision, false, RelistPricing.FallbackCandidate(inputs, Undercut, Ratio));
-        CheckBool("new listing uses consensus", fallback.Outcome == RelistOutcome.Price && fallback.Price == 2_600
+        // 石砌內牆：板上 66,666（共識價 10,000，偏高被排除），最近成交 18,999 已過期 ⇒ 重掛 Hold、新上架走共識價。
+        var high = RelistPricing.FromListing(66_666, -1, -1, PriceSourceTag.Live, Now, Undercut, Guard, 10_000, -1, 10_000);
+        var stale = RelistPricing.FromSale(18_999, Now.AddDays(-20), -1, -1, Now, 7, Guard, 10_000, 66_666, 10_000);
+        CheckBool("stale sale is not replaced", stale.Source == PriceSourceTag.Sale && !stale.IsUsable, true);
+        var held = RelistPricing.Decide(high, stale, false);
+        CheckBool("high listing + stale sale: relist Hold", held.Outcome == RelistOutcome.Hold, true);
+
+        var inputs = new RelistPricing.FallbackInputs(PriceConsensus.Compute([9_800, 10_000, 10_500, 9_500, 10_200], 20, Ratio),
+            false, -1, -1, 0, 18_999);
+        var fallback = RelistPricing.WithNewListingFallback(held, false, RelistPricing.FallbackCandidate(inputs, Undercut, Ratio));
+        CheckBool("new listing uses consensus", fallback.Outcome == RelistOutcome.Price && fallback.Price == 10_000
                                                 && fallback.Winner.Source == PriceSourceTag.Consensus, true);
 
-        var dcOnly = new RelistPricing.FallbackInputs(ConsensusResult.None, false, 1_500, 2_000, 4, 450);
+        var dcOnly = new RelistPricing.FallbackInputs(ConsensusResult.None, false, 1_500, 2_000, 4, 18_999);
         CheckBool("held without consensus stays Hold",
-            RelistPricing.WithNewListingFallback(decision, false, RelistPricing.FallbackCandidate(dcOnly, Undercut, Ratio)).Outcome
+            RelistPricing.WithNewListingFallback(held, false, RelistPricing.FallbackCandidate(dcOnly, Undercut, Ratio)).Outcome
             == RelistOutcome.Hold, true);
+    }
+
+    /// <summary>
+    /// 最近成交被共識價判成離群、板上 L 又能用：S 改用共識價再取低，不再直接跟遠高於共識價的 L。
+    /// 負對照是上一版：S 只被擋下、沒有替代 ⇒ 照 L 掛。
+    /// </summary>
+    private static void OutlierSaleIsReplacedByConsensus()
+    {
+        CheckOutlierSale("leather shoes", 60_000, 2_000, 12_500, 12_500);
+        CheckOutlierSale("hyacinth headdress", 24_999, 1_500, 8_425, 8_400);
+        CheckOutlierSale("survivor shirt", 8_000, 600, 3_000, 3_000);
+        CheckOutlierSale("florist gate", 29_999, 2_500, 18_830, 18_800);
+
+        // 共識價高於 L：照取 L。
+        var listing = RelistPricing.FromListing(5_000, -1, -1, PriceSourceTag.Live, Now, Undercut, Guard, 8_000, -1, 8_000);
+        var sale = RelistPricing.FromSale(500, Now.AddHours(-2), -1, -1, Now, 7, Guard, 8_000, 5_000, 8_000);
+        var d = RelistPricing.Decide(listing, sale, false);
+        CheckBool("consensus above L: L wins", d.Price == 5_000 && d.Winner.Source == PriceSourceTag.Live, true);
+
+        // 自家掛價判的是原始成交單價：S 換成共識價後不再「因為自家而跳過」。
+        var own = RelistPricing.Decide(
+            RelistPricing.FromListing(60_000, -1, -1, PriceSourceTag.Live, Now, Undercut, Guard, 12_500, -1, 12_500),
+            RelistPricing.FromSale(2_000, Now.AddHours(-2), -1, -1, Now, 7, Guard, 12_500, 60_000, 12_500), true);
+        CheckBool("own-sale skip does not apply to consensus", own.Price == 12_500 && !own.OwnSaleSkipped, true);
+    }
+
+    private static void CheckOutlierSale(string name, long lowest, long lastSale, long consensus, long want)
+    {
+        var listing = RelistPricing.FromListing(lowest, -1, -1, PriceSourceTag.Live, Now, Undercut, Guard, consensus, -1,
+            consensus);
+        var sale = RelistPricing.FromSale(lastSale, Now.AddHours(-2), -1, -1, Now, 7, Guard, consensus, lowest, consensus);
+        var d = RelistPricing.Decide(listing, sale, false);
+        CheckBool(name + ": consensus " + want, d.Outcome == RelistOutcome.Price && d.Price == want
+                                                && d.Winner.Source == PriceSourceTag.Consensus, true);
+        var legacySale = new PriceCandidate(lastSale, -1, PriceSourceTag.Sale,
+            new PriceAnomaly(AnomalyBaseline.History, lastSale, consensus), Now.AddHours(-2), false);
+        CheckLong(name + ": legacy follows L", RelistPricing.Decide(listing, legacySale, false).Price, lowest);
     }
 
     /// <summary>海盜手套：板上沒人，最近成交 2,500 是 20 天前（過期）。</summary>

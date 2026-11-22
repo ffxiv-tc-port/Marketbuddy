@@ -832,7 +832,7 @@ namespace Marketbuddy
                         "From the cross-world survey taken ??: the cheapest listing on your own world was ?? gil. Used because the live market data is not available."
                             .Loc(when, reference),
                     PriceSourceTag.Consensus =>
-                        "Nobody else is selling this on your own world and there is no recent sale, so this is the consensus of the latest sales on your data centre (?? gil, odd one-off prices left out), rounded down to 100 gil."
+                        "The consensus of the latest sales on your data centre (?? gil, odd one-off prices left out), rounded down to 100 gil. Used when the last sale looked like an odd one-off, or when nobody else is selling this on your own world and there is no recent sale."
                             .Loc(reference),
                     PriceSourceTag.DcListing =>
                         "Nobody else is selling this on your own world and there are not enough recent sales, so this is the cheapest ordinary listing on another world of your data centre (?? gil), with your undercut applied."

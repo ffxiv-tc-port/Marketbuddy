@@ -58,8 +58,8 @@ namespace Marketbuddy
         /// <summary>這個候選可以拿來定價。</summary>
         public bool IsUsable => Target >= Configuration.MIN_PRICE;
 
-        /// <summary>這個候選被異常價保護擋下來了（而且不是因為太舊被丟掉）。</summary>
-        public bool HeldByAnomaly => Anomaly.IsAnomalous && !Stale;
+        /// <summary>這個候選被異常價保護擋下來了（而且不是因為太舊被丟掉，也沒有被共識價取代）。</summary>
+        public bool HeldByAnomaly => Anomaly.IsAnomalous && !Stale && !IsUsable;
     }
 
     /// <summary>「這一格該怎麼辦」的三態。</summary>
@@ -304,6 +304,11 @@ namespace Marketbuddy
         /// <param name="historyMedian">近期成交共識價（這筆成交的品質）；-1＝沒有。</param>
         /// <param name="listingWitness">這一輪看到的板上別人最低價（自家最低時也照填）；-1＝沒有。</param>
         /// <param name="peerReference">同 <see cref="FromListing"/>。</param>
+        /// <remarks>
+        /// 🔑 新鮮的成交被共識價判成離群（偏低或偏高）時，改用共識價（捨去到百位、來源 <see cref="PriceSourceTag.Consensus"/>）
+        /// 當這個候選：特殊交易排除後，「實際成交價」就是剩下多筆的共識。<see cref="PriceCandidate.Anomaly"/> 留著原判定給 log。
+        /// 過期的成交不換（那是新上架退路的事）。
+        /// </remarks>
         internal static PriceCandidate FromSale(
             long unitPrice, DateTime soldAtUtc, long peerBaseline, long ownListedPrice,
             DateTime nowUtc, int maxAgeDays, AnomalyRule anomaly,
@@ -318,6 +323,10 @@ namespace Marketbuddy
             var verdict = PriceAnomalyGuard.Evaluate(
                 unitPrice, peerBaseline, ownListedPrice, anomaly, historyMedian, peerReference,
                 [peerBaseline, listingWitness], [peerBaseline, listingWitness]);
+
+            if (!stale && verdict.IsHistory && historyMedian > 0)
+                return new PriceCandidate(historyMedian, LastSoldPriceSource.RoundDownToHundred(historyMedian),
+                    PriceSourceTag.Consensus, verdict, DateTime.MinValue, false);
 
             return new PriceCandidate(
                 unitPrice,
@@ -363,6 +372,8 @@ namespace Marketbuddy
         /// </param>
         internal static RelistDecision Decide(PriceCandidate listing, PriceCandidate sale, bool saleIsOwnPrice)
         {
+            // 自家掛價判的是原始成交單價；S 已經被共識價取代時那個判斷不適用。
+            saleIsOwnPrice &= sale.Source == PriceSourceTag.Sale;
             var listingOk = listing.IsUsable;
             var saleOk = sale.IsUsable;
 

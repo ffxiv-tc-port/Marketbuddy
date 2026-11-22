@@ -369,7 +369,7 @@ namespace Marketbuddy
                 case PriceSourceTag.Consensus:
                     ImGui.TextUnformatted("sales consensus".Loc());
                     Tooltip(
-                        "Only for slots still parked at the price cap: nobody else is selling this on your own world and there is no recent sale, so the relist engine would use the consensus of the latest sales on your data centre (odd one-off prices left out), rounded down to 100 gil."
+                        "The consensus of the latest sales on your data centre (odd one-off prices left out), rounded down to 100 gil. The relist engine uses it in place of a last sale that looked like an odd one-off, and for slots still parked at the price cap when nobody else is selling and there is no recent sale."
                             .Loc());
                     return;
                 case PriceSourceTag.DcListing:

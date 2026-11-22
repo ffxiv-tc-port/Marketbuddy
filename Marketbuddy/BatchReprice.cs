@@ -1710,21 +1710,23 @@ namespace Marketbuddy
             if (listing.IsObserved)
             {
                 var dir = HistoryOutlier.Deviation(listing.Reference, listingMedian, rule.Ratio, rule.HistoryMinMedian);
-                LogHistoryOutlier(job, "L", job.IsHq, listing, dir, listingMedian,
+                LogHistoryOutlier(job, "L", job.IsHq, listing, listing.Reference, dir, listingMedian,
                     dir == HistoryVerdict.High ? $"sale:{saleWitness}" : $"peer:{peerBaseline},sale:{saleWitness}", rule);
             }
 
             // 過期的 S 本來就不用，不是被這一道擋掉的。
             if (sale.IsObserved && !sale.Stale)
             {
-                var dir = HistoryOutlier.Deviation(sale.Reference, saleMedian, rule.Ratio, rule.HistoryMinMedian);
-                LogHistoryOutlier(job, "S", job.SaleHq, sale, dir, saleMedian,
+                // S 被共識價取代時 Reference 已經是共識價，原始成交單價在判定結果裡。
+                var value = sale.Source == PriceSourceTag.Consensus ? sale.Anomaly.Reference : sale.Reference;
+                var dir = HistoryOutlier.Deviation(value, saleMedian, rule.Ratio, rule.HistoryMinMedian);
+                LogHistoryOutlier(job, "S", job.SaleHq, sale, value, dir, saleMedian,
                     $"worldMin:{job.SalePeerBaseline},board:{competitor}", rule);
             }
         }
 
-        private void LogHistoryOutlier(SlotJob job, string side, bool hq, PriceCandidate candidate, HistoryVerdict dir,
-            long median, string witnesses, RelistPricing.AnomalyRule rule)
+        private void LogHistoryOutlier(SlotJob job, string side, bool hq, PriceCandidate candidate, long value,
+            HistoryVerdict dir, long median, string witnesses, RelistPricing.AnomalyRule rule)
         {
             if (dir is not (HistoryVerdict.Low or HistoryVerdict.High))
                 return;
@@ -1733,15 +1735,17 @@ namespace Marketbuddy
             var ignored = candidate.Anomaly.IsHistory;
             var high = dir == HistoryVerdict.High;
             var ratio = new PriceAnomaly(high ? AnomalyBaseline.HistoryHigh : AnomalyBaseline.History,
-                candidate.Reference, median).RatioText;
+                value, median).RatioText;
             var what = side == "L" ? "板上最低價" : "最近成交價";
             var consensus = LastSoldPriceSource.ConsensusOf(job.ItemId, hq);
             var basis = $"近 {conf.PriceConsensusWindowDays} 天最新 {consensus.Used} 筆成交共識價";
-            var tail = ignored
-                ? $"{what}比{basis}{(high ? "高" : "低")} {ratio} 倍、沒有佐證，不採用。"
-                : $"{what}比{basis}{(high ? "高" : "低")} {ratio} 倍，但有佐證，照常採用。";
+            var tail = !ignored
+                ? $"{what}比{basis}{(high ? "高" : "低")} {ratio} 倍，但有佐證，照常採用。"
+                : candidate.Source == PriceSourceTag.Consensus
+                    ? $"{what}比{basis}{(high ? "高" : "低")} {ratio} 倍、沒有佐證，改用共識價 {candidate.Target} 當成交價候選。"
+                    : $"{what}比{basis}{(high ? "高" : "低")} {ratio} 倍、沒有佐證，不採用。";
             Log.Information(
-                $"{Diag} HIST-OUTLIER item={job.ItemId} '{job.Name}' hq={hq} side={side} value={candidate.Reference} " +
+                $"{Diag} HIST-OUTLIER item={job.ItemId} '{job.Name}' hq={hq} side={side} value={value} " +
                 $"consensus={median} n={consensus.Used}/{consensus.Considered} dropped={consensus.DroppedText} " +
                 $"ratio={ratio}x dir={(high ? "high" : "low")} " +
                 $"ignored={(ignored ? "yes" : "no")} corroborated={(ignored ? "no" : "yes")} witness={witnesses} " +
