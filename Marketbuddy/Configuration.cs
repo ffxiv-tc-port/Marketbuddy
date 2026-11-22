@@ -87,6 +87,12 @@ namespace Marketbuddy
         public bool TidyRoundEnabled = false;
 
         /// <summary>
+        /// 不自動上架的道具（道具 id，NQ／HQ 一起）：批次上架、全僱員補上架、整理一輪的補上架都跳過。<b>預設空。</b>
+        /// 只讓自動上架少做；手動與快速上架不受影響。改動一律經 <see cref="BatchListExclusions"/>。
+        /// </summary>
+        public HashSet<uint> BatchListExcludedItems = [];
+
+        /// <summary>
         /// 異常低價保護：別人手滑少打一個 0 的時候，不要跟著把自己的東西降到那個價。
         /// <b>預設開啟。</b>
         /// </summary>
@@ -681,6 +687,7 @@ namespace Marketbuddy
                 conf.DelistTourSkipRetainers ??= [];
                 conf.ReplenishPicks ??= [];
                 conf.ReplenishPicks.RemoveAll(p => p == null);
+                conf.BatchListExcludedItems ??= [];
                 conf.QuickListSkipDismissed ??= [];
                 conf.QuickListSkipDismissed.RemoveAll(d => d == null);
                 conf.QuickListSkipDays = Math.Clamp(conf.QuickListSkipDays, 0, 3650);

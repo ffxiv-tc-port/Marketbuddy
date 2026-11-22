@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Marketbuddy;
 
 // 情境測試：批次上架把定價決策換成「上架／改賣商店／跳過」的結論，以及連續被遊戲拒絕的停止條件。
@@ -24,6 +25,9 @@ internal static class Program
         ClampsToCap();
         RefusalStreak();
         Listable();
+        Exclusions();
+        ExclusionGatesReplenish();
+        TooltipCap();
 
         Console.WriteLine($"BATCHLIST_DONE pass={passes} fail={failures}");
         return failures == 0 ? 0 : 1;
@@ -110,6 +114,53 @@ internal static class Program
         Check("不可交易：不列", !BatchListRules.IsListable(true, 44, false, false), "");
         Check("市場分類 0：不列", !BatchListRules.IsListable(false, 0, false, false), "");
         Check("收藏品：不列", !BatchListRules.IsListable(false, 44, true, false), "");
+    }
+
+    // 不自動上架：以道具 id 判，NQ／HQ 一起；開始前的最後一道過濾。
+    private static void Exclusions()
+    {
+        var set = new HashSet<uint>();
+        Check("空清單：不排除", !BatchListRules.IsExcluded(set, 5), "");
+        Check("null：不排除", !BatchListRules.IsExcluded(null, 5), "");
+        Check("加入回 true", BatchListRules.SetExcluded(set, 5, true), "");
+        Check("重複加入回 false", !BatchListRules.SetExcluded(set, 5, true), "");
+        Check("加入後排除", BatchListRules.IsExcluded(set, 5) && !BatchListRules.IsExcluded(set, 6), "");
+
+        // (道具 id, HQ)：HQ 那一疊也要被擋。
+        var picks = new List<(uint Id, bool Hq)> { (5, false), (6, false), (5, true), (7, true), (5, false) };
+        var removed = BatchListRules.RemoveExcluded(picks, set, static p => p.Id);
+        Check("開始前過濾：NQ、HQ 都擋下", removed == 3 && picks.Count == 2 && picks[0].Id == 6 && picks[1].Id == 7,
+            $"removed={removed} left={string.Join(",", picks)}");
+        var untouched = new List<(uint Id, bool Hq)> { (6, false) };
+        Check("沒有被排除的：不動", BatchListRules.RemoveExcluded(untouched, set, static p => p.Id) == 0 && untouched.Count == 1, "");
+        Check("移出回 true", BatchListRules.SetExcluded(set, 5, false) && !BatchListRules.IsExcluded(set, 5), "");
+        Check("移出不存在的回 false", !BatchListRules.SetExcluded(set, 5, false), "");
+    }
+
+    // 全僱員補上架要不要去這名僱員：只看沒被排除的勾選。舊判斷（只看有沒有勾選）是負對照。
+    private static void ExclusionGatesReplenish()
+    {
+        var picks = new List<(ulong Retainer, uint Id)> { (100, 5), (100, 6), (200, 5) };
+        var set = new HashSet<uint> { 5 };
+        bool Has(ulong r) => BatchListRules.HasEligiblePick(picks, r, set, static p => p.Retainer, static p => p.Id);
+        Check("還有沒被排除的勾選：要去", Has(100), "");
+        Check("勾選全被排除：不去", !Has(200), "");
+        Check("舊判斷會去（負對照）", picks.Exists(p => p.Retainer == 200), "");
+        Check("沒有勾選：不去", !Has(300), "");
+        Check("RetainerId 0：不去", !Has(0), "");
+        Check("排除清單空：照舊", BatchListRules.HasEligiblePick(picks, 200, new HashSet<uint>(), static p => p.Retainer, static p => p.Id), "");
+    }
+
+    private static void TooltipCap()
+    {
+        var lines = new List<string>();
+        for (var i = 0; i < 20; i++)
+            lines.Add($"L{i}");
+        var capped = BatchListRules.CapLines(lines, 15, static n => $"more {n}");
+        Check("超過上限：15 行＋還有幾件", capped.Count == 16 && capped[14] == "L14" && capped[15] == "more 5",
+            string.Join("|", capped));
+        var exact = BatchListRules.CapLines(lines.GetRange(0, 15), 15, static n => $"more {n}");
+        Check("剛好上限：不加尾行", exact.Count == 15 && exact[14] == "L14", "");
     }
 
     // 改前的快速上架：先掛上限價、再交給引擎；這一步本身不看門檻、查不到價也照掛。

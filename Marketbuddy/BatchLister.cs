@@ -162,6 +162,9 @@ namespace Marketbuddy
         public BatchListEnd End { get; private set; } = BatchListEnd.None;
         public string EndReason { get; private set; } = string.Empty;
 
+        /// <summary>每開始一批加一；面板據此判斷上一次結果的文字要不要重組。</summary>
+        public int RunSerial { get; private set; }
+
         /// <summary>面板上目前列得出來的道具；沒人在看時不重算。</summary>
         public IReadOnlyList<Candidate> Candidates { get; private set; } = Array.Empty<Candidate>();
 
@@ -197,13 +200,15 @@ namespace Marketbuddy
 
         public void MarkViewed() => lastViewedUtc = DateTime.UtcNow;
 
-        public bool IsTicked(Candidate c) => CandidateSource == BatchListSource.PlayerBags
-            ? playerTicks.Contains(c.Key)
-            : IsReplenishPick(BatchReprice.ActiveRetainerId(), c.Key);
+        /// <summary>畫面與開始按鈕看的勾選：被排除的道具一律當沒勾（記住的勾選本身保留，移出排除清單後恢復）。</summary>
+        public bool IsTicked(Candidate c) => !BatchListExclusions.IsExcluded(c.Key.ItemId) &&
+                                             (CandidateSource == BatchListSource.PlayerBags
+                                                 ? playerTicks.Contains(c.Key)
+                                                 : IsReplenishPick(BatchReprice.ActiveRetainerId(), c.Key));
 
         public void SetTicked(Candidate c, bool ticked)
         {
-            if (IsRunning)
+            if (IsRunning || (ticked && BatchListExclusions.IsExcluded(c.Key.ItemId)))
                 return;
             if (CandidateSource == BatchListSource.PlayerBags)
             {
@@ -239,7 +244,7 @@ namespace Marketbuddy
                 conf.Save();
         }
 
-        /// <summary>勾選面板上每一種道具；在製作清單上的（<see cref="Candidate.Protected"/>）不勾，要賣讓使用者自己勾。</summary>
+        /// <summary>勾選面板上每一種道具；在製作清單上的（<see cref="Candidate.Protected"/>）與不自動上架的不勾。</summary>
         public void TickAll()
         {
             if (IsRunning)
@@ -248,7 +253,7 @@ namespace Marketbuddy
             {
                 foreach (var c in Candidates)
                 {
-                    if (!c.Protected)
+                    if (!c.Protected && !BatchListExclusions.IsExcluded(c.Key.ItemId))
                         playerTicks.Add(c.Key);
                 }
 
@@ -261,7 +266,7 @@ namespace Marketbuddy
             var changed = false;
             foreach (var c in Candidates)
             {
-                if (c.Protected || IsReplenishPick(retainerId, c.Key))
+                if (c.Protected || BatchListExclusions.IsExcluded(c.Key.ItemId) || IsReplenishPick(retainerId, c.Key))
                     continue;
                 conf.ReplenishPicks.Add(new ReplenishPick { RetainerId = retainerId, ItemId = c.Key.ItemId, Hq = c.Key.Hq });
                 changed = true;
@@ -284,25 +289,24 @@ namespace Marketbuddy
             return false;
         }
 
+        /// <summary>這名僱員有沒有沒被排除的補上架勾選；全被排除的僱員巡迴不去補。</summary>
         internal static bool HasReplenishPicks(ulong retainerId)
         {
-            foreach (var p in Configuration.GetOrLoad().ReplenishPicks)
-            {
-                if (p.RetainerId == retainerId)
-                    return true;
-            }
-
-            return false;
+            var conf = Configuration.GetOrLoad();
+            return BatchListRules.HasEligiblePick(conf.ReplenishPicks, retainerId, conf.BatchListExcludedItems,
+                static p => p.RetainerId, static p => p.ItemId);
         }
 
         /// <summary>這一次按下開始會上架的格數（勾選的道具的每一疊）。</summary>
         public int TickedStacks()
         {
+            // 每幀由面板呼叫：用索引走訪，不配置列舉器。
             var n = 0;
-            foreach (var c in Candidates)
+            var candidates = Candidates;
+            for (var i = 0; i < candidates.Count; i++)
             {
-                if (IsTicked(c))
-                    n += c.Slots.Count;
+                if (IsTicked(candidates[i]))
+                    n += candidates[i].Slots.Count;
             }
 
             return n;
@@ -417,7 +421,8 @@ namespace Marketbuddy
             var picks = new List<Pick>();
             foreach (var c in BuildCandidates(RetainerBagTypes, new HashSet<uint>(), withEstimate: false))
             {
-                if (exclude.Contains(c.Key) || !IsReplenishPick(retainerId, c.Key))
+                if (exclude.Contains(c.Key) || BatchListExclusions.IsExcluded(c.Key.ItemId) ||
+                    !IsReplenishPick(retainerId, c.Key))
                     continue;
                 foreach (var s in c.Slots)
                     picks.Add(new Pick(s, c.Name));
@@ -509,7 +514,13 @@ namespace Marketbuddy
                 return false;
             }
 
-            if (picks.Count == 0)
+            // 每個入口都會過這裡：不自動上架的道具在這裡再擋一次，不管之前怎麼勾到的。
+            var filtered = new List<Pick>(picks);
+            var removed = BatchListRules.RemoveExcluded(filtered, conf.BatchListExcludedItems, static p => p.Slot.Key.ItemId);
+            if (removed > 0)
+                Log.Information($"[BatchList] 不自動上架清單擋下 {removed} 疊（{(forTour ? "全僱員補上架" : "使用者按鈕")}）");
+
+            if (filtered.Count == 0)
             {
                 if (!forTour)
                     ChatGui.PrintError("[Marketbuddy] Cannot start: ??".Loc("nothing is ticked to list".Loc()));
@@ -517,8 +528,9 @@ namespace Marketbuddy
             }
 
             jobs.Clear();
-            foreach (var pick in picks)
+            foreach (var pick in filtered)
                 jobs.Add(new Job { Pick = pick });
+            RunSerial++;
             jobIndex = 0;
             jobs[0].PhaseStartedUtc = DateTime.UtcNow;
             ListedCount = 0;

@@ -59,6 +59,7 @@ namespace Marketbuddy
             HelpMarker(
                 "Off by default. Tick items in the panel and press the button: each stack is priced one at a time with the same market check and the same pricing rules as the relist (no parallel queries, the server spacing is kept), and only then put up for sale at that price through the game's own right-click \"Put Up for Sale\". Anything that would sell below the NPC price or below your minimum is not listed; items nobody is selling are skipped rather than listed at the cap. Nothing starts on its own, and ESC, Cancel, a right-click, a confirm key or AutoRetainer starting stops it."
                     .Loc());
+            DrawBatchListExclusions();
         }
 
         /// <summary>「重掛定價」：一鍵重掛按鈕與它的定價參考（最近成交、巡檢備援、HQ 比價、比價資料快取）與完成通知。</summary>

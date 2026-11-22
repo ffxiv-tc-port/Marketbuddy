@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace Marketbuddy
 {
@@ -79,6 +80,66 @@ namespace Marketbuddy
         {
             streak = windowOpened ? 0 : streak + 1;
             return streak >= MaxConsecutiveRefusals;
+        }
+
+        // ---- 不自動上架的道具：以道具 id 判（NQ／HQ 一起）。null＝沒有排除清單。
+
+        internal static bool IsExcluded(IReadOnlySet<uint>? excluded, uint itemId)
+            => excluded != null && excluded.Count > 0 && excluded.Contains(itemId);
+
+        /// <summary>依勾選上架的入口在開始前都過這一道：就地移除被排除的項目，回移除了幾項。</summary>
+        internal static int RemoveExcluded<T>(List<T> picks, IReadOnlySet<uint>? excluded, Func<T, uint> itemIdOf)
+        {
+            if (excluded == null || excluded.Count == 0)
+                return 0;
+            var kept = 0;
+            for (var i = 0; i < picks.Count; i++)
+            {
+                if (excluded.Contains(itemIdOf(picks[i])))
+                    continue;
+                picks[kept++] = picks[i];
+            }
+
+            var removed = picks.Count - kept;
+            picks.RemoveRange(kept, removed);
+            return removed;
+        }
+
+        /// <summary>加入或移出排除清單；回 true＝清單有變。</summary>
+        internal static bool SetExcluded(HashSet<uint> excluded, uint itemId, bool exclude)
+            => exclude ? excluded.Add(itemId) : excluded.Remove(itemId);
+
+        /// <summary>
+        /// 這名僱員有沒有「沒被排除」的補上架勾選（全僱員補上架／整理一輪據此決定要不要去他那裡補）。
+        /// 用索引走訪：每幀可能被僱員清單面板呼叫，不配置列舉器。
+        /// </summary>
+        internal static bool HasEligiblePick<T>(IReadOnlyList<T> picks, ulong retainerId, IReadOnlySet<uint>? excluded,
+            Func<T, ulong> retainerOf, Func<T, uint> itemIdOf)
+        {
+            if (retainerId == 0)
+                return false;
+            for (var i = 0; i < picks.Count; i++)
+            {
+                var p = picks[i];
+                if (retainerOf(p) == retainerId && !IsExcluded(excluded, itemIdOf(p)))
+                    return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// 滑鼠提示的逐行清單：最多 <paramref name="maxLines"/> 行，超出的最後一行換成 <paramref name="moreLine"/>（帶剩下的件數）。
+        /// </summary>
+        internal static List<string> CapLines(IReadOnlyList<string> lines, int maxLines, Func<int, string> moreLine)
+        {
+            if (lines.Count <= maxLines)
+                return new List<string>(lines);
+            var result = new List<string>(maxLines + 1);
+            for (var i = 0; i < maxLines; i++)
+                result.Add(lines[i]);
+            result.Add(moreLine(lines.Count - maxLines));
+            return result;
         }
     }
 }

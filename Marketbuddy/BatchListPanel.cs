@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Colors;
 using Dalamud.Interface.Utility.Raii;
@@ -10,13 +11,34 @@ namespace Marketbuddy
     /// <summary>
     /// 出售品視窗旁重掛面板裡的「批次上架」一段。開始是一段式（與快速上架一致）：清單上先列出每件從市場快取估的價，
     /// 真正掛出去的價在按下之後逐件查價才定。常看的放列上（件數、進度、結果數），原因放滑鼠提示。
+    /// 道具清單是固定高度、可捲動的區塊（背包滿時上百列也不把面板撐出畫面）。
     /// </summary>
     internal sealed class BatchListPanel
     {
+        /// <summary>道具清單一次看得到的列數；超過就捲動。</summary>
+        internal const int MaxVisibleRows = 10;
+
+        /// <summary>上一次結果的滑鼠提示最多列幾件被跳過的道具。</summary>
+        internal const int MaxTooltipLines = 15;
+
         private readonly BatchLister lister;
         private TextSlot<(int Current, int Total, string Name)> progressText;
         private TextSlot<(int Listed, int Vendor, int Skipped)> resultText;
         private TextSlot<int> startLabel;
+        private TextSlot<(string Result, string Reason)> lastRunText;
+
+        // 欄寬：候選清單換一份（約每秒）、排除清單變了或字型大小變了才重量；量的是全部列，捲動時欄位不跳。
+        private IReadOnlyList<BatchLister.Candidate>? layoutFor;
+        private int layoutRevision = -1;
+        private float layoutFontSize = -1f;
+        private float nameColumnWidth;
+        private float estimateColumnWidth;
+        private float toggleColumnWidth;
+        private int excludedInList;
+
+        private int skippedTipSerial = -1;
+        private int skippedTipCount = -1;
+        private string skippedTip = string.Empty;
 
         public BatchListPanel(BatchLister lister)
         {
@@ -112,55 +134,184 @@ namespace Marketbuddy
                 return;
 
             if (candidates.Count == 0)
+            {
                 Grey(lister.CandidateWindowOpen
                     ? "Nothing here can be put up for sale".Loc()
                     : "Open your inventory or the retainer's inventory".Loc());
-
-            for (var i = 0; i < candidates.Count; i++)
-            {
-                var c = candidates[i];
-                var ticked = lister.IsTicked(c);
-                if (ImGui.Checkbox($"##mbbatchlist{c.Key.ItemId}{(c.Key.Hq ? "h" : "n")}", ref ticked))
-                    lister.SetTicked(c, ticked);
-                ImGui.SameLine();
-                var estimate = c.Estimate > 0 ? "about ?? gil".Loc(c.Estimate.ToString("N0")) : "?";
-                var line = "?? x?? (?? stack(s))  ??".Loc(c.Name, c.Quantity, c.Slots.Count, estimate);
-                if (c.Estimate > 0 && !c.Protected)
-                    ImGui.TextUnformatted(line);
-                else
-                    Grey(c.Protected ? line + "  " + "(on a craft list)".Loc() : line);
-                if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip(c.Estimate > 0
-                        ? "Estimate from market data seen in the last few minutes; the real price is checked when it is its turn.".Loc()
-                        : "? = no recent market data; the price is checked when it is its turn, and it is skipped if nobody is selling it.".Loc());
+                ImGui.TreePop();
+                return;
             }
 
-            if (candidates.Count > 0)
+            UpdateLayout(candidates);
+            DrawListToolbar();
+
+            var style = ImGui.GetStyle();
+            var rowHeight = ImGui.GetFrameHeightWithSpacing();
+            var scrolls = candidates.Count > MaxVisibleRows;
+            var rowsShown = Math.Min(candidates.Count, MaxVisibleRows);
+            var tickWidth = ImGui.GetFrameHeight();
+            var gap = style.ItemSpacing.X * 2;
+            var contentWidth = tickWidth + style.ItemSpacing.X + nameColumnWidth + gap + estimateColumnWidth + gap +
+                               toggleColumnWidth;
+            var size = new Vector2(contentWidth + (style.WindowPadding.X * 2) + (scrolls ? style.ScrollbarSize : 0f),
+                (rowsShown * rowHeight) + (style.WindowPadding.Y * 2));
+
+            ImGui.BeginChild("##mbbatchlistrows", size, true);
+            var baseX = ImGui.GetCursorPosX();
+            var nameX = baseX + tickWidth + style.ItemSpacing.X;
+            var estimateX = nameX + nameColumnWidth + gap;
+            var toggleX = estimateX + estimateColumnWidth + gap;
+            var clipper = default(ImGuiListClipper);
+            clipper.Begin(candidates.Count, rowHeight);
+            try
             {
-                if (ImGui.SmallButton(DrawText.Concat("Tick all".Loc(), "##mbbatchlistall")))
-                    lister.TickAll();
-                if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Items on a craft list are not ticked - tick those yourself if you want to sell them.".Loc());
-                ImGui.SameLine();
-                if (ImGui.SmallButton(DrawText.Concat("Untick all".Loc(), "##mbbatchlistclear")))
-                    lister.ClearTicks();
+                while (clipper.Step())
+                {
+                    for (var i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
+                        DrawCandidateRow(candidates[i], i, nameX, estimateX, toggleX);
+                }
             }
+            finally
+            {
+                clipper.End();
+            }
+
+            ImGui.EndChild();
             ImGui.TreePop();
+        }
+
+        /// <summary>全部勾選／全部取消與「幾件不自動上架」，畫在清單上方（清單捲動時也看得到）。</summary>
+        private void DrawListToolbar()
+        {
+            if (ImGui.SmallButton(DrawText.Concat("Tick all".Loc(), "##mbbatchlistall")))
+                lister.TickAll();
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Items on a craft list or on your \"never auto-list\" list are not ticked - tick craft-list items yourself if you want to sell them.".Loc());
+            ImGui.SameLine();
+            if (ImGui.SmallButton(DrawText.Concat("Untick all".Loc(), "##mbbatchlistclear")))
+                lister.ClearTicks();
+            if (excludedInList == 0)
+                return;
+            ImGui.SameLine();
+            Grey(DrawText.Loc("?? never auto-listed", excludedInList));
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Items you marked with \"Don't auto-list\" stay greyed out here and are skipped by batch listing, \"Replenish all retainers\" and \"Tidy up this character\". Undo it on the row, or in /mbuddy (Listing page).".Loc());
+        }
+
+        private void DrawCandidateRow(BatchLister.Candidate c, int index, float nameX, float estimateX, float toggleX)
+        {
+            ImGui.PushID(index);
+            var excluded = BatchListExclusions.IsExcluded(c.Key.ItemId);
+            var ticked = lister.IsTicked(c);
+            if (excluded)
+                ImGui.BeginDisabled();
+            if (ImGui.Checkbox("##tick", ref ticked))
+                lister.SetTicked(c, ticked);
+            if (excluded)
+            {
+                ImGui.EndDisabled();
+                if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                    ImGui.SetTooltip("Not auto-listed: press \"Allow\" on the right to tick it again.".Loc());
+            }
+
+            var grey = excluded || c.Protected || c.Estimate <= 0;
+            ImGui.SameLine(nameX);
+            TextMaybeGrey(NameText(c, excluded), grey);
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(EstimateTooltip(c));
+            ImGui.SameLine(estimateX);
+            TextMaybeGrey(EstimateText(c), grey);
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(EstimateTooltip(c));
+
+            ImGui.SameLine(toggleX);
+            if (ImGui.SmallButton(excluded
+                    ? DrawText.Concat("Allow".Loc(), "##mbbatchlistallow")
+                    : DrawText.Concat("Don't auto-list".Loc(), "##mbbatchlistexclude")))
+                BatchListExclusions.Set(c.Key.ItemId, !excluded, c.Name);
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(excluded
+                    ? "Lets batch listing and the replenish steps use this item again. Ticks you had for it come back.".Loc()
+                    : "Batch listing, \"Replenish all retainers\" and \"Tidy up this character\" will skip this item (NQ and HQ) until you allow it again. Quick listing and listing by hand are not affected. Your existing ticks are kept.".Loc());
+            ImGui.PopID();
+        }
+
+        private static string EstimateTooltip(BatchLister.Candidate c) => c.Estimate > 0
+            ? "Estimate from market data seen in the last few minutes; the real price is checked when it is its turn.".Loc()
+            : "? = no recent market data; the price is checked when it is its turn, and it is skipped if nobody is selling it.".Loc();
+
+        private static string NameText(BatchLister.Candidate c, bool excluded)
+        {
+            var line = DrawText.Loc("?? x?? (?? stack(s))", (c.Name, c.Quantity, c.Slots.Count),
+                static (t, a) => t.Loc(a.Name, a.Quantity, a.Item3));
+            if (excluded)
+                return DrawText.Concat(line, DrawText.Concat("  ", "(never auto-listed)".Loc()));
+            return c.Protected ? DrawText.Concat(line, DrawText.Concat("  ", "(on a craft list)".Loc())) : line;
+        }
+
+        private static string EstimateText(BatchLister.Candidate c)
+            => c.Estimate > 0 ? DrawText.Loc("about ?? gil", DrawText.N0(c.Estimate)) : "?";
+
+        private void UpdateLayout(IReadOnlyList<BatchLister.Candidate> candidates)
+        {
+            var fontSize = ImGui.GetFontSize();
+            if (ReferenceEquals(candidates, layoutFor) && layoutRevision == BatchListExclusions.Revision &&
+                layoutFontSize == fontSize)
+                return;
+            layoutFor = candidates;
+            layoutRevision = BatchListExclusions.Revision;
+            layoutFontSize = fontSize;
+
+            nameColumnWidth = 0f;
+            estimateColumnWidth = 0f;
+            excludedInList = 0;
+            foreach (var c in candidates)
+            {
+                var excluded = BatchListExclusions.IsExcluded(c.Key.ItemId);
+                if (excluded)
+                    excludedInList++;
+                nameColumnWidth = MathF.Max(nameColumnWidth, ImGui.CalcTextSize(NameText(c, excluded)).X);
+                estimateColumnWidth = MathF.Max(estimateColumnWidth, ImGui.CalcTextSize(EstimateText(c)).X);
+            }
+
+            var padding = ImGui.GetStyle().FramePadding.X * 2;
+            toggleColumnWidth = MathF.Max(ImGui.CalcTextSize("Allow".Loc()).X, ImGui.CalcTextSize("Don't auto-list".Loc()).X) +
+                                padding;
         }
 
         private void DrawLastResult()
         {
             if (lister.End == BatchListEnd.None)
                 return;
-            Grey("Last run: ??".Loc(ResultLine()) +
-                 (lister.EndReason.Length > 0 ? " - " + lister.EndReason : string.Empty));
+            Grey(lastRunText.Get((ResultLine(), lister.EndReason), static k =>
+                "Last run: ??".Loc(k.Result) + (k.Reason.Length > 0 ? " - " + k.Reason : string.Empty)));
             if (lister.Skipped.Count == 0 || !ImGui.IsItemHovered())
                 return;
+            ImGui.SetTooltip(SkippedTooltip());
+        }
 
-            var lines = new List<string>(lister.Skipped.Count);
-            foreach (var (name, reason) in lister.Skipped)
+        private string SkippedTooltip()
+        {
+            var skipped = lister.Skipped;
+            if (skippedTipSerial == lister.RunSerial && skippedTipCount == skipped.Count)
+                return skippedTip;
+            skippedTipSerial = lister.RunSerial;
+            skippedTipCount = skipped.Count;
+
+            var lines = new List<string>(skipped.Count);
+            foreach (var (name, reason) in skipped)
                 lines.Add($"{name}: {reason}");
-            ImGui.SetTooltip(string.Join("\n", lines));
+            skippedTip = string.Join("\n",
+                BatchListRules.CapLines(lines, MaxTooltipLines, static n => "... and ?? more".Loc(n)));
+            return skippedTip;
+        }
+
+        private static void TextMaybeGrey(string text, bool grey)
+        {
+            if (grey)
+                Grey(text);
+            else
+                ImGui.TextUnformatted(text);
         }
 
         private static void Grey(string text)
