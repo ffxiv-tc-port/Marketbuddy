@@ -135,8 +135,8 @@ namespace Marketbuddy
                     .Loc());
             }
 
-            SameLineIfFits(240);
-            ImGui.SetNextItemWidth(240);
+            SameLineIfFits(Px(240));
+            ImGui.SetNextItemWidth(Px(240));
             if (ImGui.BeginCombo("##mbshoppingsort", ShoppingSortModeKeys[shoppingSortMode].Loc()))
             {
                 for (var i = 0; i < ShoppingSortModeKeys.Length; i++)
@@ -190,11 +190,11 @@ namespace Marketbuddy
                 return;
 
             ImGui.TableSetupScrollFreeze(1, 1);
-            ImGui.TableSetupColumn("Item".Loc(), ImGuiTableColumnFlags.WidthFixed, 220);
-            ImGui.TableSetupColumn("Wanted".Loc(), ImGuiTableColumnFlags.WidthFixed, 60);
+            ImGui.TableSetupColumn("Item".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(220));
+            ImGui.TableSetupColumn("Wanted".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(60));
             for (var i = 0; i < worldCount; i++)
-                ImGui.TableSetupColumn(shoppingWorlds[i].Name, ImGuiTableColumnFlags.WidthFixed, 90);
-            ImGui.TableSetupColumn("Go here".Loc(), ImGuiTableColumnFlags.WidthFixed, 150);
+                ImGui.TableSetupColumn(shoppingWorlds[i].Name, ImGuiTableColumnFlags.WidthFixed, Px(90));
+            ImGui.TableSetupColumn("Go here".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(150));
             ImGui.TableHeadersRow();
 
             foreach (var entry in shoppingEntries)

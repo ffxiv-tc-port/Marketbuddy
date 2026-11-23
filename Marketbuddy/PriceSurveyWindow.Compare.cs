@@ -50,8 +50,8 @@ namespace Marketbuddy
                     .Loc());
             }
 
-            SameLineIfFits(200);
-            ImGui.SetNextItemWidth(200);
+            SameLineIfFits(Px(200));
+            ImGui.SetNextItemWidth(Px(200));
             if (ImGui.BeginCombo("##mbsurveysort", SortModeKeys[sortMode].Loc()))
             {
                 for (var i = 0; i < SortModeKeys.Length; i++)
@@ -95,11 +95,11 @@ namespace Marketbuddy
                 return;
 
             ImGui.TableSetupScrollFreeze(1, 1);
-            ImGui.TableSetupColumn("Item".Loc(), ImGuiTableColumnFlags.WidthFixed, 220);
-            ImGui.TableSetupColumn("Your price".Loc(), ImGuiTableColumnFlags.WidthFixed, 90);
+            ImGui.TableSetupColumn("Item".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(220));
+            ImGui.TableSetupColumn("Your price".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(90));
             for (var i = 0; i < worldCount; i++)
-                ImGui.TableSetupColumn(worlds[i].Name, ImGuiTableColumnFlags.WidthFixed, 90);
-            ImGui.TableSetupColumn("Undercut".Loc(), ImGuiTableColumnFlags.WidthFixed, 110);
+                ImGui.TableSetupColumn(worlds[i].Name, ImGuiTableColumnFlags.WidthFixed, Px(90));
+            ImGui.TableSetupColumn("Undercut".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(110));
             ImGui.TableHeadersRow();
 
             foreach (var entry in entries)

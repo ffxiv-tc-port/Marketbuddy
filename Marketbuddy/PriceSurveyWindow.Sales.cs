@@ -193,13 +193,13 @@ namespace Marketbuddy
 
             NoteScrollTable(SalesTableSlot);
             ImGui.TableSetupScrollFreeze(0, 1);
-            ImGui.TableSetupColumn("When".Loc(), ImGuiTableColumnFlags.WidthFixed, 120);
-            ImGui.TableSetupColumn("Retainer".Loc(), ImGuiTableColumnFlags.WidthFixed, 110);
-            ImGui.TableSetupColumn("Item".Loc(), ImGuiTableColumnFlags.WidthFixed, 220);
-            ImGui.TableSetupColumn("Qty".Loc(), ImGuiTableColumnFlags.WidthFixed, 50);
-            ImGui.TableSetupColumn("Unit price".Loc(), ImGuiTableColumnFlags.WidthFixed, 90);
-            ImGui.TableSetupColumn("Received".Loc(), ImGuiTableColumnFlags.WidthFixed, 90);
-            ImGui.TableSetupColumn("Confidence".Loc(), ImGuiTableColumnFlags.WidthFixed, 170);
+            ImGui.TableSetupColumn("When".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(120));
+            ImGui.TableSetupColumn("Retainer".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(110));
+            ImGui.TableSetupColumn("Item".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(220));
+            ImGui.TableSetupColumn("Qty".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(50));
+            ImGui.TableSetupColumn("Unit price".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(90));
+            ImGui.TableSetupColumn("Received".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(90));
+            ImGui.TableSetupColumn("Confidence".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(170));
             ImGui.TableHeadersRow();
 
             // Begin 把這個區域變數的位址記進 ImGui（全部插件共用）；離開迴圈的每一條路都要 End，否則留下指到失效堆疊的指標。
@@ -401,7 +401,7 @@ namespace Marketbuddy
             }
 
             ImGui.Spacing();
-            ImGui.SetNextItemWidth(300);
+            ImGui.SetNextItemWidth(Px(300));
             if (ImGui.BeginCombo("##mbsalesitemsort", SalesItemSortKeys[salesItemSortMode].Loc()))
             {
                 for (var i = 0; i < SalesItemSortKeys.Length; i++)
@@ -448,12 +448,12 @@ namespace Marketbuddy
 
             NoteScrollTable(SalesItemTableSlot);
             ImGui.TableSetupScrollFreeze(0, 1);
-            ImGui.TableSetupColumn("Item".Loc(), ImGuiTableColumnFlags.WidthFixed, 240);
-            ImGui.TableSetupColumn("Sold".Loc(), ImGuiTableColumnFlags.WidthFixed, 60);
-            ImGui.TableSetupColumn("Received".Loc(), ImGuiTableColumnFlags.WidthFixed, 100);
-            ImGui.TableSetupColumn("Delisted".Loc(), ImGuiTableColumnFlags.WidthFixed, 70);
-            ImGui.TableSetupColumn("Gone - unknown".Loc(), ImGuiTableColumnFlags.WidthFixed, 100);
-            ImGui.TableSetupColumn("Last sold".Loc(), ImGuiTableColumnFlags.WidthFixed, 120);
+            ImGui.TableSetupColumn("Item".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(240));
+            ImGui.TableSetupColumn("Sold".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(60));
+            ImGui.TableSetupColumn("Received".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(100));
+            ImGui.TableSetupColumn("Delisted".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(70));
+            ImGui.TableSetupColumn("Gone - unknown".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(100));
+            ImGui.TableSetupColumn("Last sold".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(120));
             ImGui.TableHeadersRow();
 
             // Begin 把這個區域變數的位址記進 ImGui（全部插件共用）；離開迴圈的每一條路都要 End，否則留下指到失效堆疊的指標。

@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.Text;
 using Dalamud.Interface.Colors;
+using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Lumina.Excel.Sheets;
 using Marketbuddy.Common;
@@ -212,7 +213,10 @@ namespace Marketbuddy
             if (!visible)
                 return;
 
-            ImGui.SetNextWindowSizeConstraints(new Vector2(560, 320), new Vector2(float.MaxValue, float.MaxValue));
+            // 高度上限＝螢幕可用範圍：舊版存下的自動撐高尺寸可能比螢幕還高，表格本來就在表內捲動。
+            var minSize = new Vector2(Px(560), Px(320));
+            ImGui.SetNextWindowSize(new Vector2(Px(900), Px(600)), ImGuiCond.FirstUseEver);
+            ImGui.SetNextWindowSizeConstraints(minSize, Vector2.Max(minSize, ImGui.GetMainViewport().WorkSize));
             if (!ImGui.Begin(DrawText.Concat("Cross-world price survey".Loc(), "###MarketbuddyPriceSurvey"), ref visible,
                     ImGuiWindowFlags.NoCollapse))
             {
@@ -416,6 +420,9 @@ namespace Marketbuddy
             if ((uint)slot < (uint)scrollTableHasBarX.Length)
                 scrollTableHasBarX[slot] = ImGui.GetScrollMaxX() > 0;
         }
+
+        /// <summary>設計寬度（100% 介面縮放下的像素）換成目前縮放下的像素。</summary>
+        private static float Px(float designPixels) => designPixels * ImGuiHelpers.GlobalScale;
 
         /// <summary>銷售兩張表的列高：每一格都是一行文字。</summary>
         private static float SalesRowHeight() => ImGui.GetTextLineHeight() + (ImGui.GetStyle().CellPadding.Y * 2);

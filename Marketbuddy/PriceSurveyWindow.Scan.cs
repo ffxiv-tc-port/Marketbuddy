@@ -68,14 +68,14 @@ namespace Marketbuddy
 
             using (Disabled(running || paused))
             {
-                ImGui.SetNextItemWidth(200);
+                ImGui.SetNextItemWidth(Px(200));
                 if (ImGui.SliderInt("Skip items already surveyed within (hours)".Loc(), ref conf.PriceSurveySkipHours, 0, 168))
                     conf.Save();
                 TooltipInDisabled(
                     "Items this world already answered within that many hours are skipped, so an interrupted survey can carry on. 0 = never skip, always ask again. Refusals and timeouts do not count as surveyed and are always asked again next round."
                         .Loc());
 
-                ImGui.SetNextItemWidth(200);
+                ImGui.SetNextItemWidth(Px(200));
                 if (ImGui.SliderInt("Market cache that may be reused (seconds)".Loc(), ref conf.PriceSurveyCacheSeconds, 0, 3600))
                     conf.Save();
                 TooltipInDisabled(
@@ -286,7 +286,7 @@ namespace Marketbuddy
             if (travelChoice >= targets.Count)
                 travelChoice = 0;
 
-            ImGui.SetNextItemWidth(260);
+            ImGui.SetNextItemWidth(Px(260));
             if (ImGui.BeginCombo("##mbsurveyworld", WorldLabel(targets[travelChoice])))
             {
                 for (var i = 0; i < targets.Count; i++)
@@ -350,7 +350,7 @@ namespace Marketbuddy
             {
                 using (Disabled(armed))
                 {
-                    ImGui.SetNextItemWidth(200);
+                    ImGui.SetNextItemWidth(Px(200));
                     if (ImGui.SliderInt("At most this many worlds per round".Loc(),
                             ref conf.PriceSurveyAutoTourMaxWorlds, 1, Configuration.MAX_TOUR_WORLDS))
                         conf.Save();
@@ -365,7 +365,7 @@ namespace Marketbuddy
                 var canArm = survey.CanArmTour(out var why);
                 using (Disabled(!canArm))
                 {
-                    if (ImGui.Button("Arm one round".Loc(), new Vector2(180, 0)))
+                    if (ImGui.Button("Arm one round".Loc(), new Vector2(Px(180), 0)))
                         survey.RequestArmTour();
                 }
 
@@ -379,7 +379,7 @@ namespace Marketbuddy
             }
             else
             {
-                if (ImGui.Button("Disarm".Loc(), new Vector2(180, 0)))
+                if (ImGui.Button("Disarm".Loc(), new Vector2(Px(180), 0)))
                     survey.RequestDisarmTour("Disarmed by the user".Loc());
 
                 ImGui.SameLine();
@@ -438,7 +438,7 @@ namespace Marketbuddy
             var canStart = survey.CanStart(out var why);
             using (Disabled(!canStart))
             {
-                if (ImGui.Button("Scan this world".Loc(), new Vector2(180, 0)))
+                if (ImGui.Button("Scan this world".Loc(), new Vector2(Px(180), 0)))
                     survey.RequestStart();
             }
 
@@ -575,12 +575,12 @@ namespace Marketbuddy
             var canResume = survey.CanResume(out var why);
             using (Disabled(!canResume))
             {
-                if (ImGui.Button("Continue the survey".Loc(), new Vector2(180, 0)))
+                if (ImGui.Button("Continue the survey".Loc(), new Vector2(Px(180), 0)))
                     survey.RequestResume();
             }
 
             ImGui.SameLine();
-            if (ImGui.Button("Stop and discard".Loc(), new Vector2(180, 0)))
+            if (ImGui.Button("Stop and discard".Loc(), new Vector2(Px(180), 0)))
                 survey.RequestStop("The paused round was discarded".Loc());
 
             Tooltip(
@@ -627,7 +627,7 @@ namespace Marketbuddy
             //    給一顆按下去等於停止的「暫停」比沒有那顆更糟。
             using (Disabled(preparing))
             {
-                if (ImGui.Button("Pause".Loc(), new Vector2(180, 0)))
+                if (ImGui.Button("Pause".Loc(), new Vector2(Px(180), 0)))
                     survey.RequestPause("Paused by the user".Loc());
             }
 
@@ -636,7 +636,7 @@ namespace Marketbuddy
                     .Loc());
 
             ImGui.SameLine();
-            if (ImGui.Button("Stop the price survey".Loc(), new Vector2(180, 0)))
+            if (ImGui.Button("Stop the price survey".Loc(), new Vector2(Px(180), 0)))
                 survey.RequestStop("Stopped by the user".Loc());
 
             ImGui.Spacing();

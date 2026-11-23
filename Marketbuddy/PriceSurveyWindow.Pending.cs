@@ -208,12 +208,12 @@ namespace Marketbuddy
 
             NoteScrollTable((int)kind);
             ImGui.TableSetupScrollFreeze(0, 1);
-            ImGui.TableSetupColumn("Item".Loc(), ImGuiTableColumnFlags.WidthFixed, 220);
-            ImGui.TableSetupColumn("Retainer / slot".Loc(), ImGuiTableColumnFlags.WidthFixed, 150);
-            ImGui.TableSetupColumn("Now".Loc(), ImGuiTableColumnFlags.WidthFixed, 90);
-            ImGui.TableSetupColumn("Suggested".Loc(), ImGuiTableColumnFlags.WidthFixed, 90);
-            ImGui.TableSetupColumn("Source".Loc(), ImGuiTableColumnFlags.WidthFixed, 180);
-            ImGui.TableSetupColumn("Actions".Loc(), ImGuiTableColumnFlags.WidthFixed, 170);
+            ImGui.TableSetupColumn("Item".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(220));
+            ImGui.TableSetupColumn("Retainer / slot".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(150));
+            ImGui.TableSetupColumn("Now".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(90));
+            ImGui.TableSetupColumn("Suggested".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(90));
+            ImGui.TableSetupColumn("Source".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(180));
+            ImGui.TableSetupColumn("Actions".Loc(), ImGuiTableColumnFlags.WidthFixed, Px(170));
             ImGui.TableHeadersRow();
 
             // Begin 把這個區域變數的位址記進 ImGui（全部插件共用）；離開迴圈的每一條路都要 End，否則留下指到失效堆疊的指標。
