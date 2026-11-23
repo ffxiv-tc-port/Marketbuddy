@@ -54,6 +54,11 @@ internal static class Program
         Check("門檻關著時照樣上架", off == PriceProbeOutcome.List, $"o={off}");
         var noVendor = Classify(100, vendor: 0, tax: 5, belowVendor: true);
         Check("商店不收（0）不比", noVendor == PriceProbeOutcome.List, $"o={noVendor}");
+
+        // 遊戲的算法稅額捨去：2,399 稅 5% 實拿 2,280（錢包實測），等於 NPC 收購 2,280 ⇒ 照樣上架；舊算法 2,279 會改賣商店。
+        var edge = Classify(2399, vendor: 2280, tax: 5, belowVendor: true);
+        Check("扣稅後剛好等於 NPC 收購價：上架", edge == PriceProbeOutcome.List, $"o={edge}");
+        Check("同一筆舊算法判成低於收購價（負對照）", 2399L * 95 / 100 < 2280, "");
     }
 
     private static void BelowMinIsNotListed()

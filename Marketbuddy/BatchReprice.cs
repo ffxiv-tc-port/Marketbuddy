@@ -1464,7 +1464,7 @@ namespace Marketbuddy
                     ? SourceNoteFor(decision, sale).Trim()
                     : "(matched your own lowest listing ?? gil)".Loc(price.ToString("N0")),
                 PriceProbeOutcome.BelowVendor => "market net ?? < NPC ?? gil".Loc(
-                    price * (100L - taxPercent) / 100L, job.VendorUnitPrice),
+                    MarketTax.NetAfterTax(price, taxPercent), job.VendorUnitPrice),
                 PriceProbeOutcome.BelowMin => "price ?? below your minimum ??".Loc(price, conf.BatchMinPrice),
                 PriceProbeOutcome.Hold => decision.Winner.Anomaly.IsHistory
                     ? "?? gil is ??x off the recent sale median ?? gil".Loc(
@@ -1813,7 +1813,7 @@ namespace Marketbuddy
             if (conf.BatchDelistBelowVendor && job.VendorUnitPrice > 0)
             {
                 var taxPercent = CurrentTaxPercent();
-                var netUnit = newPrice * (100L - taxPercent) / 100L;
+                var netUnit = MarketTax.NetAfterTax(newPrice, taxPercent);
                 if (netUnit < job.VendorUnitPrice)
                 {
                     DelistSlot(job, inventoryManager, slot,
@@ -2130,7 +2130,7 @@ namespace Marketbuddy
                 if (itemSheet != null && itemSheet.TryGetRow(itemId, out var row) && row.PriceLow > 0)
                 {
                     var vendorUnit = isHq ? row.PriceLow + 1u : row.PriceLow;
-                    var netUnit = price * (100L - CurrentTaxPercent()) / 100L;
+                    var netUnit = MarketTax.NetAfterTax(price, CurrentTaxPercent());
                     if (netUnit < vendorUnit)
                     {
                         reason = "market net ?? < NPC ?? gil".Loc(netUnit, vendorUnit);

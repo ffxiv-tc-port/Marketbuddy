@@ -858,7 +858,8 @@ namespace Marketbuddy
                 gross += Expected(candidate, taxPercent, "gross");
             }
 
-            // 容差：每一筆的扣稅都是整數除法，逐筆最多各差 1 gil。
+            // 容差刻意留著：同價位的幾筆掛單在 Group 裡併成一件候選、只捨去一次稅額，
+            // 實際分開成交時各自捨去，進帳會多出最多（筆數－1）gil；稅是逐件還是逐筆算也還沒實測。
             var tolerance = candidates.Count + 1;
             if (Math.Abs(gilDelta - net) <= tolerance)
                 return "net";
@@ -872,8 +873,7 @@ namespace Marketbuddy
             var gross = candidate.UnitPrice * candidate.Quantity;
             if (basis != "net")
                 return gross;
-            var tax = Math.Clamp(taxPercent, 0, 25);
-            return gross * (100 - tax) / 100;
+            return MarketTax.NetAfterTax(gross, Math.Clamp(taxPercent, 0, 25));
         }
 
         /// <summary>把掛單清單整理成 (道具, 品質) → 各價位各幾件。</summary>

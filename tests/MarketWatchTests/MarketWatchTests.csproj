@@ -11,5 +11,6 @@
     </PropertyGroup>
     <ItemGroup>
         <Compile Include="../../Marketbuddy/MarketWatchMath.cs" Link="MarketWatchMath.cs" />
+        <Compile Include="../../Marketbuddy/MarketTax.cs" Link="MarketTax.cs" />
     </ItemGroup>
 </Project>

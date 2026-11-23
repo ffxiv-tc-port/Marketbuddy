@@ -12,16 +12,12 @@ namespace Marketbuddy
         /// <summary>Universalis 的資料超過這麼久沒人上傳，整列淡色顯示。</summary>
         internal static readonly TimeSpan StaleAfter = TimeSpan.FromHours(24);
 
-        /// <summary>
-        /// 整堆賣完扣稅後實拿；單價或數量不知道回 -1。
-        /// 稅額捨去、實拿＝總價－稅額：僱員錢包實測 2,399 gil 稅 5% 進帳 2,280（先扣再捨去會得 2,279）。
-        /// </summary>
+        /// <summary>整堆賣完扣稅後實拿（<see cref="MarketTax.NetAfterTax"/>）；單價或數量不知道回 -1。</summary>
         internal static long NetTotal(long unitPrice, long quantity, uint taxPercent)
         {
             if (unitPrice <= 0 || quantity <= 0)
                 return -1;
-            var gross = unitPrice * quantity;
-            return gross - (gross * Math.Min(taxPercent, 25u) / 100);
+            return MarketTax.NetAfterTax(unitPrice * quantity, Math.Min(taxPercent, 25u));
         }
 
         /// <summary>

@@ -62,7 +62,7 @@ namespace Marketbuddy
             price = (uint)target;
 
             var tax = Math.Min(taxPercent, 100u);
-            if (delistBelowVendor && vendorUnitPrice > 0 && target * (100L - tax) / 100L < vendorUnitPrice)
+            if (delistBelowVendor && vendorUnitPrice > 0 && MarketTax.NetAfterTax(target, tax) < vendorUnitPrice)
                 return PriceProbeOutcome.BelowVendor;
             if (minPrice > 0 && target < minPrice)
                 return PriceProbeOutcome.BelowMin;

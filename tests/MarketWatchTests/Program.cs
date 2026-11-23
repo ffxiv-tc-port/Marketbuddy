@@ -14,6 +14,8 @@ internal static class Program
     private static int Main()
     {
         NetMatchesWallet();
+        MultiSaleEventsMatchWallet();
+        MarketTaxEdges();
         LegacyNetIsOffByOne();
         NetUnknownIsNotZero();
         CheaperCountsStrictlyLower();
@@ -40,6 +42,43 @@ internal static class Program
             Check($"net {v.Unit}x{v.Qty}@{v.Tax}%", MarketWatchMath.NetTotal(v.Unit, v.Qty, v.Tax) == v.Received);
         Check("net stack 450x5@5%", MarketWatchMath.NetTotal(450, 5, 5) == 2250 - 112);
         Check("net tax clamp 30%->25%", MarketWatchMath.NetTotal(100, 1, 30) == 75);
+    }
+
+    /// <summary>
+    /// 一次看到好幾件同時賣掉：錢包增量＝各件 <see cref="MarketTax.NetAfterTax"/> 相加（零容差）。
+    /// 這四組舊算法（總價×95÷100 捨去）各少 1～2 gil，是錢包比對要靠容差才對得上的原因。
+    /// </summary>
+    private static void MultiSaleEventsMatchWallet()
+    {
+        (long Unit, long Qty)[][] events =
+        [
+            [(6900, 2), (43800, 1), (18800, 1), (6666, 1), (50996, 1), (1200, 1)],
+            [(4997, 1), (15000, 1)],
+            [(1000, 1), (4888, 1)],
+            [(500000, 1), (5990, 1), (2000, 1)],
+        ];
+        long[] wallet = [128500, 18998, 5594, 482591];
+        for (var i = 0; i < events.Length; i++)
+        {
+            long sum = 0, legacy = 0;
+            foreach (var (unit, qty) in events[i])
+            {
+                sum += MarketTax.NetAfterTax(unit * qty, 5);
+                legacy += unit * qty * 95 / 100;
+            }
+
+            Check($"multi-sale event {i} exact", sum == wallet[i]);
+            Check($"multi-sale event {i} legacy off (negative control)", legacy != wallet[i]);
+        }
+    }
+
+    private static void MarketTaxEdges()
+    {
+        Check("tax 0%", MarketTax.NetAfterTax(2399, 0) == 2399);
+        Check("tax clamp >100", MarketTax.NetAfterTax(100, 150) == 0);
+        Check("tax clamp <0", MarketTax.NetAfterTax(100, -5) == 100);
+        Check("gross 0 stays 0", MarketTax.NetAfterTax(0, 5) == 0);
+        Check("tax 3% (live rate seen in sales log)", MarketTax.NetAfterTax(2399, 3) == 2399 - 71);
     }
 
     private static void LegacyNetIsOffByOne()
