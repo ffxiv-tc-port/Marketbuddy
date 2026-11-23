@@ -36,6 +36,15 @@ namespace Marketbuddy
         private float toggleColumnWidth;
         private int excludedInList;
 
+        // 彙整表：每一批收尾換一份新的清單，換了才重組文字。
+        private IReadOnlyList<BatchListSummaryRow>? summaryFor;
+        private readonly List<string[]> summaryCells = new();
+        private int summaryHandledCount;
+        private int summaryPendingCount;
+        private string summaryHeader = string.Empty;
+        private string handledHeader = string.Empty;
+        private string pendingHeader = string.Empty;
+
         private int skippedTipSerial = -1;
         private int skippedTipCount = -1;
         private string skippedTip = string.Empty;
@@ -109,7 +118,7 @@ namespace Marketbuddy
             if (disabled)
                 ImGui.BeginDisabled();
             if (ImGuiEx.MarketActionButton(startLabel.Get(stacks, static n => "List ?? ticked stack(s)".Loc(n) + "##mbbatchliststart"), "mbbatchliststart"))
-                lister.Start(lister.TickedPicks(), lister.CandidateSource, false);
+                lister.Start(lister.TickedPicks(), lister.CandidateSource, false, forceRequery: ImGui.GetIO().KeyCtrl);
             if (disabled)
             {
                 ImGui.EndDisabled();
@@ -123,6 +132,8 @@ namespace Marketbuddy
             {
                 ImGui.SetTooltip(
                     "Starts right away. Each stack is checked again right before it goes up; the price shown in the list is only an estimate from recent market data."
+                        .Loc() + "\n" +
+                    "Items whose check came out below your threshold in the last few days are not checked again (see /mbuddy); hold Ctrl while pressing to check everything again."
                         .Loc());
             }
         }
@@ -285,9 +296,118 @@ namespace Marketbuddy
                 return;
             Grey(lastRunText.Get((ResultLine(), lister.EndReason), static k =>
                 "Last run: ??".Loc(k.Result) + (k.Reason.Length > 0 ? " - " + k.Reason : string.Empty)));
-            if (lister.Skipped.Count == 0 || !ImGui.IsItemHovered())
+            if (lister.Skipped.Count > 0 && ImGui.IsItemHovered())
+                ImGui.SetTooltip(SkippedTooltip());
+            DrawSummary();
+        }
+
+        private void DrawSummary()
+        {
+            var rows = lister.Summary;
+            if (rows.Count == 0)
                 return;
-            ImGui.SetTooltip(SkippedTooltip());
+            if (!ReferenceEquals(rows, summaryFor))
+                RebuildSummary(rows);
+            if (!ImGui.TreeNode(summaryHeader))
+                return;
+
+            DrawSummarySection(rows, handled: true, handledHeader, ImGuiColors.HealerGreen);
+            DrawSummarySection(rows, handled: false, pendingHeader, ImGuiColors.DalamudOrange);
+            ImGui.TreePop();
+        }
+
+        private void RebuildSummary(IReadOnlyList<BatchListSummaryRow> rows)
+        {
+            summaryFor = rows;
+            summaryCells.Clear();
+            int handled = 0, pending = 0;
+            foreach (var row in rows)
+            {
+                if (row.Handled)
+                    handled++;
+                else
+                    pending++;
+                summaryCells.Add(SummaryCells(row));
+            }
+
+            summaryHandledCount = handled;
+            summaryPendingCount = pending;
+            summaryHeader = "Summary of the last run: ?? done, ?? still to deal with".Loc(handled, pending) +
+                            "##mbbatchlistsummary";
+            handledHeader = "Done (??)".Loc(handled);
+            pendingHeader = "Still to deal with (??)".Loc(pending);
+        }
+
+        private static string[] SummaryCells(BatchListSummaryRow row)
+        {
+            var name = row.Stacks > 1 ? "?? (?? stacks)".Loc(row.Name, row.Stacks) : row.Name;
+            var result = row.Kind switch
+            {
+                BatchListResultKind.Listed => "listed".Loc(),
+                BatchListResultKind.ShopList => "added to the shop list".Loc(),
+                BatchListResultKind.KeptBelow => "below your threshold, left where it is".Loc(),
+                BatchListResultKind.Skipped => "skipped".Loc(),
+                _ => "not done".Loc(),
+            };
+            if (row.FromMemory)
+                result += " " + "(remembered, not checked)".Loc();
+            return
+            [
+                name,
+                row.Quantity.ToString("N0"),
+                row.Price > 0 ? row.Price.ToString("N0") : "?",
+                row.MinPrice > 0 ? row.MinPrice.ToString("N0") : "-",
+                row.VendorUnitPrice > 0 ? row.VendorUnitPrice.ToString("N0") : "-",
+                result,
+                row.Note,
+            ];
+        }
+
+        private void DrawSummarySection(IReadOnlyList<BatchListSummaryRow> rows, bool handled, string header, Vector4 colour)
+        {
+            var count = handled ? summaryHandledCount : summaryPendingCount;
+            ImGui.TextColored(colour, header);
+            if (count == 0)
+            {
+                ImGui.SameLine();
+                Grey(handled ? "nothing".Loc() : "nothing - all done".Loc());
+                return;
+            }
+
+            var flags = ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerH;
+            var size = Vector2.Zero;
+            if (count > MaxVisibleRows)
+            {
+                flags |= ImGuiTableFlags.ScrollY;
+                size = new Vector2(0, (MaxVisibleRows + 1) * ImGui.GetFrameHeightWithSpacing());
+            }
+
+            if (!ImGui.BeginTable(handled ? "##mbbatchlistdone" : "##mbbatchlisttodo", 6, flags, size))
+                return;
+            ImGui.TableSetupScrollFreeze(0, 1);
+            ImGui.TableSetupColumn("Item".Loc());
+            ImGui.TableSetupColumn("Qty".Loc());
+            ImGui.TableSetupColumn("Price".Loc());
+            ImGui.TableSetupColumn("Minimum".Loc());
+            ImGui.TableSetupColumn("NPC price".Loc());
+            ImGui.TableSetupColumn("Result".Loc());
+            ImGui.TableHeadersRow();
+            for (var i = 0; i < rows.Count; i++)
+            {
+                if (rows[i].Handled != handled)
+                    continue;
+                var cells = summaryCells[i];
+                ImGui.TableNextRow();
+                for (var c = 0; c < 6; c++)
+                {
+                    ImGui.TableNextColumn();
+                    ImGui.TextUnformatted(cells[c]);
+                    if (c == 5 && cells[6].Length > 0 && ImGui.IsItemHovered())
+                        ImGui.SetTooltip(cells[6]);
+                }
+            }
+
+            ImGui.EndTable();
         }
 
         private string SkippedTooltip()

@@ -151,6 +151,14 @@ namespace Marketbuddy
         /// <summary>使用者從跳過清單移除的道具與時間。</summary>
         public List<QuickListSkipDismissal> QuickListSkipDismissed = [];
 
+        /// <summary>
+        /// 批次上架記住查價「低於門檻」的道具，<see cref="BatchListBelowThresholdDays"/> 天內不再查價、直接當成低於門檻。<b>預設開。</b>
+        /// 照現在的門檻已經不算低於門檻的不跳過；開始時按住 Ctrl＝這一批全部重查。規則見 <see cref="BelowThresholdRule"/>。
+        /// </summary>
+        public bool BatchListRememberBelowThreshold = true;
+
+        public int BatchListBelowThresholdDays = BelowThresholdRule.DefaultDays;
+
         /// <summary>近期成交共識價低於這個數（gil）就不用它判。</summary>
         public int AnomalyHistoryMinMedian = 1000;
 
@@ -726,6 +734,8 @@ namespace Marketbuddy
                 conf.QuickListSkipDismissed ??= [];
                 conf.QuickListSkipDismissed.RemoveAll(d => d == null);
                 conf.QuickListSkipDays = Math.Clamp(conf.QuickListSkipDays, 0, 3650);
+                conf.BatchListBelowThresholdDays =
+                    Math.Clamp(conf.BatchListBelowThresholdDays, 1, BelowThresholdRule.MaxDays);
                 conf.MarketTaxPercent = Math.Clamp(conf.MarketTaxPercent, 0, 25);
                 conf.MarketDataCacheSeconds = Math.Clamp(conf.MarketDataCacheSeconds, 0, 3600);
                 conf.PriceSurveyCacheSeconds = Math.Clamp(conf.PriceSurveyCacheSeconds, 0, 3600);

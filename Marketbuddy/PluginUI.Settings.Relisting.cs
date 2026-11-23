@@ -59,7 +59,50 @@ namespace Marketbuddy
             HelpMarker(
                 "Off by default. Tick items in the panel and press the button: each stack is priced one at a time with the same market check and the same pricing rules as the relist (no parallel queries, the server spacing is kept), and only then put up for sale at that price through the game's own right-click \"Put Up for Sale\". Anything that would sell below the NPC price or below your minimum is not listed; items nobody is selling are skipped rather than listed at the cap. Nothing starts on its own, and ESC, Cancel, a right-click, a confirm key or AutoRetainer starting stops it."
                     .Loc());
+            DrawBelowThresholdMemory();
             DrawBatchListExclusions();
+        }
+
+        /// <summary>批次上架的「低於門檻」記憶：開關、天數、目前記住幾種與全部清除。</summary>
+        private void DrawBelowThresholdMemory()
+        {
+            DrawNestIndicator(1);
+            if (ImGui.Checkbox("Remember items whose price check came out below your threshold".Loc(),
+                    ref conf.BatchListRememberBelowThreshold))
+                conf.Save();
+            HelpMarker(
+                "On by default. When batch listing (or \"Replenish all retainers\") checks an item and it comes out below the NPC price or below your minimum, that is remembered; for the next few days the item is not checked again and is treated as below your threshold straight away (from your bags it goes on the sell-to-shop list, from a retainer it stays where it is). An item is checked again as soon as its remembered price would pass your current thresholds (for example after you lower your minimum), once the days run out, or when you hold Ctrl while pressing the batch listing button. It drops out of the memory as soon as a check finds a price it can be listed at. Nothing is listed or sold because of it."
+                    .Loc());
+            if (!conf.BatchListRememberBelowThreshold)
+                return;
+
+            DrawNestIndicator(2);
+            var rowX = ImGui.GetCursorPosX();
+            ImGui.TextWrapped("remember for".Loc());
+            var daysLabel = DrawText.Concat("days (1-30)".Loc(), "##mbbelowdays");
+            SameLineOrBelow(rowX, LabeledItemWidth(FontPx(60), daysLabel));
+            ImGui.SetNextItemWidth(FontPx(60));
+            if (ImGui.InputInt(daysLabel, ref conf.BatchListBelowThresholdDays, 0))
+            {
+                conf.BatchListBelowThresholdDays =
+                    Math.Clamp(conf.BatchListBelowThresholdDays, 1, BelowThresholdRule.MaxDays);
+                conf.Save();
+            }
+
+            DrawNestIndicator(2);
+            if (!BelowThresholdLedger.Loaded)
+            {
+                ImGui.TextDisabled("Reading the record...".Loc());
+                return;
+            }
+
+            ImGui.TextUnformatted(DrawText.Loc("?? item(s) remembered", BelowThresholdLedger.Count));
+            ImGui.SameLine();
+            if (ImGui.SmallButton("Forget all".Loc() + "##mbbelowclear"))
+            {
+                Common.Dalamud.Log.Information($"[BatchList] 低於門檻記憶：使用者全部清除 {BelowThresholdLedger.Count} 種");
+                BelowThresholdLedger.Clear();
+            }
         }
 
         /// <summary>「重掛定價」：一鍵重掛按鈕與它的定價參考（最近成交、巡檢備援、HQ 比價、比價資料快取）與完成通知。</summary>

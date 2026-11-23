@@ -12,5 +12,7 @@
     <ItemGroup>
         <Compile Include="../../Marketbuddy/BatchListRules.cs" Link="BatchListRules.cs" />
         <Compile Include="../../Marketbuddy/MarketTax.cs" Link="MarketTax.cs" />
+        <Compile Include="../../Marketbuddy/BelowThresholdMemory.cs" Link="BelowThresholdMemory.cs" />
+        <Compile Include="../../Marketbuddy/VendorSellPlan.cs" Link="VendorSellPlan.cs" />
     </ItemGroup>
 </Project>

@@ -159,6 +159,18 @@ namespace Marketbuddy
         /// <summary>這一次（或上一次）跳過的道具與原因。</summary>
         public List<(string Name, string Reason)> Skipped { get; } = new();
 
+        /// <summary>這一次（或上一次）每一疊的結果；跑完由 <see cref="Summary"/> 合併成彙整表。</summary>
+        private readonly List<BatchListResultEntry> results = new();
+
+        /// <summary>上一次跑完（或停下）的彙整表；跑的途中是空的。</summary>
+        public IReadOnlyList<BatchListSummaryRow> Summary { get; private set; } = Array.Empty<BatchListSummaryRow>();
+
+        /// <summary>這一批開始時按住 Ctrl：不看「低於門檻」記憶，全部重查。</summary>
+        public bool ForcedRequery { get; private set; }
+
+        /// <summary>這一次靠「低於門檻」記憶、沒查價就當成低於門檻的疊數。</summary>
+        public int MemorySkippedStacks { get; private set; }
+
         public BatchListEnd End { get; private set; } = BatchListEnd.None;
         public string EndReason { get; private set; } = string.Empty;
 
@@ -504,7 +516,8 @@ namespace Marketbuddy
         }
 
         /// <summary>開始一批。回 false＝沒開始（原因已印在聊天視窗，巡迴驅動時不印）。</summary>
-        public bool Start(IReadOnlyList<Pick> picks, BatchListSource source, bool forTour)
+        /// <param name="forceRequery">不看「低於門檻」記憶，每一件都查價（使用者按住 Ctrl 按開始）。</param>
+        public bool Start(IReadOnlyList<Pick> picks, BatchListSource source, bool forTour, bool forceRequery = false)
         {
             if (!CanStart(source, forTour, out var reason))
             {
@@ -537,6 +550,10 @@ namespace Marketbuddy
             VendorQueuedCount = 0;
             BelowThresholdKept = 0;
             Skipped.Clear();
+            results.Clear();
+            Summary = Array.Empty<BatchListSummaryRow>();
+            ForcedRequery = forceRequery;
+            MemorySkippedStacks = 0;
             End = BatchListEnd.None;
             EndReason = string.Empty;
             WaitingFor = string.Empty;
@@ -554,7 +571,8 @@ namespace Marketbuddy
 
             Log.Information(
                 $"[BatchList] 開始：{jobs.Count} 疊，來源={(source == BatchListSource.PlayerBags ? "玩家背包" : "僱員物品欄")}，" +
-                $"{(forTour ? "全僱員補上架" : "使用者按鈕")}，僱員={BatchReprice.RetainerNameOf(runRetainerId)}");
+                $"{(forTour ? "全僱員補上架" : "使用者按鈕")}，僱員={BatchReprice.RetainerNameOf(runRetainerId)}" +
+                (forceRequery ? "，按住 Ctrl：不看低於門檻記憶、全部重查" : string.Empty));
             if (!forTour)
                 ChatGui.Print("[Marketbuddy] Batch listing ?? stack(s)...".Loc(jobs.Count));
             return true;
@@ -713,9 +731,22 @@ namespace Marketbuddy
                     $"（當時算出 {(skipRecord.LastTargetPrice > 0 ? skipRecord.LastTargetPrice.ToString() : "?")}）、" +
                     $"跳過天數={conf.QuickListSkipDays}，不查價，當成低於門檻");
                 // 不查價，當成這一次也查到低於門檻：玩家背包的照樣進賣給商店的清單。
-                HandleBelowThreshold(job, new PriceProbeResult(0, PriceProbeOutcome.BelowMin, 0,
+                HandleBelowThreshold(job, new PriceProbeResult(0, PriceProbeOutcome.BelowMin, skipRecord.LastTargetPrice,
                     "delisted ?? time(s) for a low price, last ??".Loc(skipRecord.Count,
                         RelistPricing.FormatAt(skipRecord.LastDelistUtc))));
+                return;
+            }
+
+            if (TryRememberedBelow(key, now, out var remembered))
+            {
+                // 不查價、不逐件寫 log：跑完由 LogMemorySkips 合成一行。
+                MemorySkippedStacks++;
+                var outcome = conf.BatchMinPrice > 0 && remembered.Price < conf.BatchMinPrice
+                    ? PriceProbeOutcome.BelowMin
+                    : PriceProbeOutcome.BelowVendor;
+                HandleBelowThreshold(job, new PriceProbeResult(0, outcome, remembered.Price,
+                    "?? gil when checked ??, still below your threshold".Loc(remembered.Price.ToString("N0"),
+                        RelistPricing.FormatAt(remembered.LastAtUtc))), fromMemory: true);
                 return;
             }
 
@@ -742,6 +773,7 @@ namespace Marketbuddy
 
             Log.Information(
                 $"[BatchList] 查價：{Describe(job)} 結論={result.Outcome} 價={result.Price} 說明={result.Note}");
+            NoteMemory(job, result);
             switch (result.Outcome)
             {
                 case PriceProbeOutcome.List:
@@ -762,27 +794,74 @@ namespace Marketbuddy
             }
         }
 
+        /// <summary>「低於門檻」記憶：查到能上架就拿掉，查到低於門檻就記下（記憶關著時只拿不記）。</summary>
+        private void NoteMemory(Job job, PriceProbeResult result)
+        {
+            var key = job.Pick.Slot.Key;
+            switch (result.Outcome)
+            {
+                case PriceProbeOutcome.List:
+                    if (BelowThresholdLedger.Forget(key))
+                        Log.Information($"[BatchList] 低於門檻記憶：{Describe(job)} 這次查到 {result.Price} 可以上架，從記憶拿掉");
+                    return;
+                case PriceProbeOutcome.BelowVendor:
+                case PriceProbeOutcome.BelowMin:
+                    if (conf.BatchListRememberBelowThreshold)
+                        BelowThresholdLedger.Note(key, result.Price, VendorUnitOf(key));
+                    return;
+            }
+        }
+
+        private bool TryRememberedBelow(VendorSellKey key, DateTime nowUtc, out BelowThresholdRecord record)
+        {
+            record = default;
+            return conf.BatchListRememberBelowThreshold && !ForcedRequery && BelowThresholdLedger.Loaded &&
+                   BelowThresholdLedger.TryGet(key, out record) &&
+                   BelowThresholdRule.ShouldSkip(record, nowUtc, conf.BatchListBelowThresholdDays, ForcedRequery,
+                       engine.CurrentTaxPercent(), conf.BatchDelistBelowVendor, conf.BatchMinPrice);
+        }
+
+        private static uint VendorUnitOf(VendorSellKey key)
+        {
+            var sheet = DataManager.GetExcelSheet<Item>();
+            var priceLow = sheet != null && sheet.TryGetRow(key.ItemId, out var row) ? row.PriceLow : 0u;
+            return priceLow == 0 ? 0u : key.Hq ? priceLow + 1 : priceLow;
+        }
+
         /// <summary>低於門檻：不上架。玩家背包的交給賣給商店的清單（只加進清單，不開始賣）；僱員物品欄的留著、只記摘要。</summary>
-        private void HandleBelowThreshold(Job job, PriceProbeResult result)
+        private void HandleBelowThreshold(Job job, PriceProbeResult result, bool fromMemory = false)
         {
             var p = job.Pick.Slot;
+            var vendorUnit = VendorUnitOf(p.Key);
             if (Source == BatchListSource.PlayerBags && vendorSeller != null)
             {
-                var sheet = DataManager.GetExcelSheet<Item>();
-                var priceLow = sheet != null && sheet.TryGetRow(p.Key.ItemId, out var row) ? row.PriceLow : 0u;
-                var vendorUnit = priceLow == 0 ? 0u : p.Key.Hq ? priceLow + 1 : priceLow;
                 if (vendorSeller.AddSortPicks([new VendorSeller.SortPick(p, job.Pick.Name, vendorUnit)]) > 0)
                 {
                     VendorQueuedCount++;
-                    Log.Information($"[BatchList] {Describe(job)} 低於門檻（{result.Note}），加進賣給商店的清單");
+                    if (!fromMemory)
+                        Log.Information($"[BatchList] {Describe(job)} 低於門檻（{result.Note}），加進賣給商店的清單");
+                    AddResult(job, BatchListResultKind.ShopList, result.Price, vendorUnit, fromMemory, result.Note);
                     Advance();
                     return;
                 }
             }
 
             BelowThresholdKept++;
-            Skip(job, "below your threshold (??), left where it is".Loc(result.Note));
+            AddResult(job, BatchListResultKind.KeptBelow, result.Price, vendorUnit, fromMemory, result.Note);
+            var why = "below your threshold (??), left where it is".Loc(result.Note);
+            if (fromMemory)
+            {
+                Skipped.Add((job.Pick.Name, why));
+                Advance();
+                return;
+            }
+
+            Skip(job, why, record: false);
         }
+
+        private void AddResult(Job job, BatchListResultKind kind, uint price, uint vendorUnit, bool fromMemory, string note)
+            => results.Add(new BatchListResultEntry(job.Pick.Slot.Key, job.Pick.Name, job.Pick.Slot.Quantity, kind, price,
+                conf.BatchMinPrice, vendorUnit, fromMemory, note));
 
         private void TickOpen(Job job, DateTime now)
         {
@@ -930,6 +1009,7 @@ namespace Marketbuddy
                 price == job.Price)
             {
                 ListedCount++;
+                AddResult(job, BatchListResultKind.Listed, job.Price, VendorUnitOf(job.Pick.Slot.Key), false, string.Empty);
                 SetPhase(job, Phase.Settle, now);
                 return;
             }
@@ -1026,8 +1106,11 @@ namespace Marketbuddy
             ? VendorSeller.GetInventoryAddonId()
             : VendorSeller.GetRetainerInventoryAddonId();
 
-        private void Skip(Job job, string why)
+        /// <param name="record">false＝呼叫端已經記了彙整表的那一筆。</param>
+        private void Skip(Job job, string why, bool record = true)
         {
+            if (record)
+                AddResult(job, BatchListResultKind.Skipped, job.Price, VendorUnitOf(job.Pick.Slot.Key), false, why);
             Skipped.Add((job.Pick.Name, why));
             Log.Information($"[BatchList] 跳過 {Describe(job)}：{why}");
             Advance();
@@ -1053,6 +1136,7 @@ namespace Marketbuddy
             EndReason = string.Empty;
             ReleaseSuppressionIfHeld();
             Log.Information($"[BatchList] 完成：上架 {ListedCount}、改賣商店 {VendorQueuedCount}、跳過 {SkippedCount}");
+            Summarize();
             if (!drivenByTour)
                 ChatGui.Print("[Marketbuddy] Batch listing finished: ?? listed, ?? added to the shop list, ?? skipped"
                     .Loc(ListedCount, VendorQueuedCount, SkippedCount));
@@ -1074,6 +1158,19 @@ namespace Marketbuddy
             var left = Math.Max(0, jobs.Count - jobIndex);
             Log.Information(
                 $"[BatchList] 停止（{reason}，{end}）：上架 {ListedCount}、改賣商店 {VendorQueuedCount}、跳過 {SkippedCount}、剩 {left} 疊沒處理");
+            for (var i = jobIndex; i < jobs.Count; i++)
+            {
+                var job = jobs[i];
+                if (i == jobIndex && job.Phase == Phase.Settle)
+                    continue; // 已經核對過價格、記成上架了。
+                // 停在半路的那一件可能其實已經上架了，彙整表照實說「不確定」。
+                var note = i == jobIndex && job.Phase >= Phase.WaitListing
+                    ? "stopped while it was being listed - check the sell list".Loc()
+                    : "not reached before it stopped".Loc();
+                AddResult(job, BatchListResultKind.NotProcessed, job.Price, VendorUnitOf(job.Pick.Slot.Key), false, note);
+            }
+
+            Summarize();
             if (end == BatchListEnd.MarketFull)
             {
                 if (!drivenByTour)
@@ -1084,6 +1181,47 @@ namespace Marketbuddy
 
             ChatGui.PrintError("[Marketbuddy] Batch listing stopped: ?? (?? listed, ?? added to the shop list, ?? skipped)"
                 .Loc(reason, ListedCount, VendorQueuedCount, SkippedCount));
+        }
+
+        /// <summary>每一批收尾一次：合成彙整表，記憶跳過的合成一行 log（不逐件寫）。</summary>
+        private void Summarize()
+        {
+            var rows = BatchListSummary.Summarize(results);
+            Summary = rows;
+            int handled = 0, pending = 0;
+            foreach (var row in rows)
+            {
+                if (row.Handled)
+                    handled++;
+                else
+                    pending++;
+            }
+
+            Log.Information($"[BatchList] 彙整：已處理 {handled} 種、還要處理 {pending} 種（記憶跳過 {MemorySkippedStacks} 疊）");
+            LogMemorySkips(rows);
+        }
+
+        private const int MaxMemorySkipNamesLogged = 20;
+
+        private void LogMemorySkips(List<BatchListSummaryRow> rows)
+        {
+            if (MemorySkippedStacks == 0)
+                return;
+            var names = new List<string>();
+            var kinds = 0;
+            foreach (var row in rows)
+            {
+                if (!row.FromMemory)
+                    continue;
+                kinds++;
+                if (names.Count < MaxMemorySkipNamesLogged)
+                    names.Add($"{row.Name}(#{row.Key.ItemId})x{row.Quantity}@{row.Price}");
+            }
+
+            var more = kinds > names.Count ? $" 等 {kinds} 種" : string.Empty;
+            Log.Information(
+                $"[BatchList] 低於門檻記憶跳過 {MemorySkippedStacks} 疊、{kinds} 種（記憶 {conf.BatchListBelowThresholdDays} 天，" +
+                $"最低價={conf.BatchMinPrice}，NPC 門檻={(conf.BatchDelistBelowVendor ? "開" : "關")}）：{string.Join("、", names)}{more}");
         }
 
         private void ReleaseSuppressionIfHeld()

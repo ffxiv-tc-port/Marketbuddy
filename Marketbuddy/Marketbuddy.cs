@@ -220,6 +220,7 @@ namespace Marketbuddy
 
                 // 低價下架紀錄在執行緒池上讀檔；背包分揀只訂閱 Framework.Update、按了按鈕才做事。
                 LowPriceDelistLedger.BeginLoad();
+                BelowThresholdLedger.BeginLoad();
                 BagSorter = new BagSorter(VendorSeller);
 
                 PluginUi = new PluginUI(this);
