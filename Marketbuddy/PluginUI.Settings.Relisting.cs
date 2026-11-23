@@ -63,6 +63,23 @@ namespace Marketbuddy
             DrawBatchListExclusions();
         }
 
+        /// <summary>賣給商店：併入原有堆疊也整疊賣（預設關，只在上一層開著時可勾）。</summary>
+        private void DrawVendorSellMergedStacks()
+        {
+            var parentOn = conf.VendorSellAfterDelist;
+            DrawNestIndicator(1);
+            if (!parentOn)
+                ImGui.BeginDisabled();
+            if (ImGui.Checkbox("Also sell the whole stack when it merged into one you already had".Loc(),
+                    ref conf.VendorSellMergedStacks))
+                conf.Save();
+            if (!parentOn)
+                ImGui.EndDisabled();
+            HelpMarker(
+                "Off by default. Selling to a shop cannot be undone, and this sells the WHOLE stack - including what you already had in it, not just the delisted part. With it on, a delisted item that merged into a stack you already had is offered for sale only when that item had already been delisted for a low price before this round (it is in the low-price delist record), it is not on an InventoryTools craft list, the old stack changed in nothing but its amount, and the amount it grew by is exactly what was delisted. The list shows how many of your own are sold along with it. It is only sold when you press \"Sell to the shop\" yourself; \"Tidy up this character\" never sells these. Everything else that merged is still listed as \"by hand\"."
+                    .Loc());
+        }
+
         /// <summary>批次上架的「低於門檻」記憶：開關、天數、目前記住幾種與全部清除。</summary>
         private void DrawBelowThresholdMemory()
         {
@@ -257,6 +274,7 @@ namespace Marketbuddy
             HelpMarker(
                 "Off by default. Only the two automatic delists above are recorded, and only when they go back into your own bags (\"Delist destination\" is Player inventory). Nothing is ever sold on its own: once something has been delisted a \"Sell to the shop\" button appears next to the sell list, and pressing it (twice, to confirm) has the retainer sell the ticked stacks through the game's own right-click \"Have Retainer Sell Items\", one at a time. A stack is only sold if it turned up in a slot of its own this round and holds exactly the delisted amount; anything that merged into a stack you already had, or no longer matches, is listed as \"by hand\" and left alone."
                     .Loc());
+            DrawVendorSellMergedStacks();
 
             ImGui.Spacing();
             if (ImGui.Checkbox("Do not follow a price that looks mistyped".Loc(),

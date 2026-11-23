@@ -146,6 +146,9 @@ namespace Marketbuddy
         InArmory,
     }
 
+    /// <summary>併進原有堆疊、而且允許整疊賣的那一格：<see cref="Existing"/>＝這一輪之前就在那一格的量（會一起賣掉）。</summary>
+    internal readonly record struct VendorSellMergedStack(VendorSellSlot Slot, int Existing);
+
     internal sealed class VendorSellVerdict
     {
         public required VendorSellKey Key { get; init; }
@@ -153,8 +156,14 @@ namespace Marketbuddy
         public required VendorSellState State { get; init; }
         public VendorSellManualReason Reason { get; init; }
 
-        /// <summary>這一輪才出現的格子；只有 <see cref="VendorSellState.Sellable"/> 時才可以拿去賣。</summary>
+        /// <summary>
+        /// 這一輪要賣的格子；只有 <see cref="VendorSellState.Sellable"/> 時才可以拿去賣。
+        /// 允許整疊賣時也含 <see cref="MergedStacks"/> 那幾格（整格賣，連原有的量）。
+        /// </summary>
         public required IReadOnlyList<VendorSellSlot> NewSlots { get; init; }
+
+        /// <summary>只在允許整疊賣、判成可賣時有值。</summary>
+        public IReadOnlyList<VendorSellMergedStack> MergedStacks { get; init; } = Array.Empty<VendorSellMergedStack>();
 
         public required int Delisted { get; init; }
         public required int Sold { get; init; }
@@ -170,7 +179,20 @@ namespace Marketbuddy
 
         public int Remaining => Delisted - Sold;
 
-        public long EstimatedGil => (long)Arrived * VendorUnitPrice;
+        /// <summary>整疊賣時一起賣掉的原有量。</summary>
+        public int MergedExisting
+        {
+            get
+            {
+                // 每幀由面板加總：用索引走訪，不配置列舉器。
+                var n = 0;
+                for (var i = 0; i < MergedStacks.Count; i++)
+                    n += MergedStacks[i].Existing;
+                return n;
+            }
+        }
+
+        public long EstimatedGil => (long)(Arrived + MergedExisting) * VendorUnitPrice;
     }
 
     /// <summary>一份計畫的摘要（診斷記錄用）；「種」＝<see cref="VendorSellKey"/>，<see cref="VendorSellState.Done"/> 不算。</summary>
@@ -247,6 +269,21 @@ namespace Marketbuddy
             IReadOnlyDictionary<VendorSellKey, int> sold,
             DateTime nowUtc,
             TimeSpan settleWindow)
+            => Evaluate(beforeOf, now, delists, sold, nowUtc, settleWindow, null, null);
+
+        /// <param name="mergeAllowed">
+        /// 併進原有堆疊時，這種道具可不可以整疊賣；null＝一律不可以（舊行為）。只在真的有併入時才會被呼叫。
+        /// </param>
+        /// <param name="soldExisting">這一輪已經整疊賣掉的原有格子：它們的「下架前」內容不再算數。</param>
+        public static List<VendorSellVerdict> Evaluate(
+            Func<VendorSellKey, VendorSellSnapshot> beforeOf,
+            VendorSellSnapshot now,
+            IReadOnlyList<VendorSellDelist> delists,
+            IReadOnlyDictionary<VendorSellKey, int> sold,
+            DateTime nowUtc,
+            TimeSpan settleWindow,
+            Func<VendorSellKey, bool>? mergeAllowed,
+            IReadOnlySet<(uint Container, short Slot)>? soldExisting)
         {
             var order = new List<VendorSellKey>();
             var byKey = new Dictionary<VendorSellKey, List<VendorSellDelist>>();
@@ -266,7 +303,8 @@ namespace Marketbuddy
             foreach (var key in order)
             {
                 var soldQty = sold.TryGetValue(key, out var s) ? s : 0;
-                result.Add(EvaluateKey(key, byKey[key], beforeOf(key), now, soldQty, nowUtc, settleWindow));
+                result.Add(EvaluateKey(key, byKey[key], beforeOf(key), now, soldQty, nowUtc, settleWindow, mergeAllowed,
+                    soldExisting));
             }
 
             return result;
@@ -279,7 +317,9 @@ namespace Marketbuddy
             VendorSellSnapshot now,
             int soldQty,
             DateTime nowUtc,
-            TimeSpan settleWindow)
+            TimeSpan settleWindow,
+            Func<VendorSellKey, bool>? mergeAllowed,
+            IReadOnlySet<(uint Container, short Slot)>? soldExisting)
         {
             var delisted = 0;
             var last = DateTime.MinValue;
@@ -303,10 +343,13 @@ namespace Marketbuddy
             var existingBefore = 0;
             var existingNow = 0;
             var merged = false;
+            var mergedClean = true;
+            var mergedStacks = new List<VendorSellMergedStack>();
+            var growth = 0;
             var changed = false;
             foreach (var b in before.Slots)
             {
-                if (b.Key != key)
+                if (b.Key != key || IsSoldExisting(soldExisting, b))
                     continue;
                 existingBefore += b.Quantity;
                 if (now.Get(b.Container, b.Slot) is not { } cur || cur.Key != key)
@@ -317,9 +360,22 @@ namespace Marketbuddy
 
                 existingNow += cur.Quantity;
                 if (cur.Quantity > b.Quantity)
+                {
                     merged = true;
+                    mergedClean &= cur.Detail == b.Detail;
+                    mergedStacks.Add(new VendorSellMergedStack(cur, b.Quantity));
+                    growth += cur.Quantity - b.Quantity;
+                }
                 else if (cur.Quantity < b.Quantity || cur.Detail != b.Detail)
                     changed = true;
+            }
+
+            // 🔴 整疊賣不可逆：只有呼叫端點頭、而且原有那幾格除了數量變多之外一模一樣，才把併入當成可賣。
+            var sellMerged = merged && mergedClean && mergeAllowed?.Invoke(key) == true;
+            if (!sellMerged)
+            {
+                mergedStacks.Clear();
+                growth = 0;
             }
 
             // 開頭時裝著別的東西、後來空出來又被下架品填進去的格子，一樣算新格子：
@@ -339,12 +395,15 @@ namespace Marketbuddy
                     continue;
                 }
 
-                if (before.Get(n.Container, n.Slot) is { } prev && prev.Key == key)
+                if (before.Get(n.Container, n.Slot) is { } prev && prev.Key == key && !IsSoldExisting(soldExisting, prev))
                     continue;
                 newSlots.Add(n);
                 arrived += n.Quantity;
             }
 
+            var roundArrived = arrived + growth;
+            foreach (var m in mergedStacks)
+                newSlots.Add(m.Slot);
             newSlots.Sort((a, b) => a.Container != b.Container
                 ? a.Container.CompareTo(b.Container)
                 : a.Slot.CompareTo(b.Slot));
@@ -356,20 +415,20 @@ namespace Marketbuddy
                 state = VendorSellState.Done;
             else if (totalNow == 0) // 背包裡一件都沒有：還在路上，或使用者已經自己處理掉了。
                 state = nowUtc - last < settleWindow ? VendorSellState.Waiting : VendorSellState.Done;
-            else if (merged)
+            else if (merged && !sellMerged)
                 (state, reason) = (VendorSellState.Manual, VendorSellManualReason.MergedIntoExistingStack);
             else if (changed)
                 (state, reason) = (VendorSellState.Manual, VendorSellManualReason.ExistingStackChanged);
             else if (unknown)
                 (state, reason) = (VendorSellState.Manual, VendorSellManualReason.UnknownContainer);
-            else if (arrived > remaining)
+            else if (roundArrived > remaining)
                 (state, reason) = (VendorSellState.Manual, VendorSellManualReason.QuantityMismatch);
-            else if (arrived < remaining)
+            else if (roundArrived < remaining)
             {
                 if (nowUtc - last < settleWindow)
                     state = VendorSellState.Waiting;
                 else
-                    (state, reason) = (VendorSellState.Manual, arrived == 0
+                    (state, reason) = (VendorSellState.Manual, roundArrived == 0
                         ? VendorSellManualReason.NotArrived
                         : VendorSellManualReason.QuantityMismatch);
             }
@@ -380,6 +439,15 @@ namespace Marketbuddy
             else if (newSlots.Exists(x => x.Armory))
                 (state, reason) = (VendorSellState.Manual, VendorSellManualReason.InArmory);
 
+            if (state != VendorSellState.Sellable)
+            {
+                // 只有可賣時才把併入的格子交出去；其餘狀態維持舊的輸出（新格子、只算新格子的量）。
+                foreach (var m in mergedStacks)
+                    newSlots.Remove(m.Slot);
+                mergedStacks.Clear();
+                roundArrived = arrived;
+            }
+
             return new VendorSellVerdict
             {
                 Key = key,
@@ -387,9 +455,10 @@ namespace Marketbuddy
                 State = state,
                 Reason = reason,
                 NewSlots = newSlots,
+                MergedStacks = mergedStacks,
                 Delisted = delisted,
                 Sold = soldQty,
-                Arrived = arrived,
+                Arrived = roundArrived,
                 ExistingBefore = existingBefore,
                 ExistingNow = existingNow,
                 VendorUnitPrice = vendorUnit,
@@ -397,6 +466,9 @@ namespace Marketbuddy
                 LastDelistUtc = last,
             };
         }
+
+        private static bool IsSoldExisting(IReadOnlySet<(uint Container, short Slot)>? soldExisting, VendorSellSlot slot)
+            => soldExisting != null && soldExisting.Contains((slot.Container, slot.Slot));
 
         /// <summary>把一個值混進格子指紋（FNV-1a 形狀，只要求「不同內容大概率不同值」）。</summary>
         public static ulong MixDetail(ulong hash, ulong value)

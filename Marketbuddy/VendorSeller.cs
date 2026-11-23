@@ -63,7 +63,19 @@ namespace Marketbuddy
             public readonly Dictionary<VendorSellKey, int> Sold = new();
             public readonly HashSet<VendorSellKey> Excluded = new();
 
-            /// <summary>動到 <see cref="Delists"/> 或 <see cref="Sold"/> 就 +1（重算判斷「輸入有沒有變」用）。</summary>
+            /// <summary>
+            /// 這一輪第一次下架這種道具之前，它已經在 <see cref="LowPriceDelistLedger"/> 裡（以前就被低價下架過）：
+            /// 併入的原有堆疊才有資格整疊賣（<see cref="Configuration.VendorSellMergedStacks"/>）。
+            /// </summary>
+            public readonly HashSet<VendorSellKey> LedgerBeforeRound = new();
+
+            /// <summary>這一輪已經整疊賣掉的原有格子（容器、格號）；之後那一格的「下架前」內容不再算數。</summary>
+            public readonly HashSet<(uint Container, short Slot)> SoldExisting = new();
+
+            /// <summary>InventoryTools 製作清單上的道具 id；第一次真的要判整疊賣時才讀，一輪讀一次。</summary>
+            public HashSet<uint>? ProtectedIds;
+
+            /// <summary>動到 <see cref="Delists"/>、<see cref="Sold"/> 或 <see cref="SoldExisting"/> 就 +1（重算判斷「輸入有沒有變」用）。</summary>
             public int Version;
         }
 
@@ -81,6 +93,9 @@ namespace Marketbuddy
 
             /// <summary>來自背包分揀（使用者勾的背包原有堆疊），不是這一輪下架回來的。</summary>
             public bool FromSort { get; init; }
+
+            /// <summary>&gt;0＝併入原有堆疊、整疊賣的那一格，值是一起賣掉的原有量。</summary>
+            public int MergedExisting { get; init; }
 
             public JobPhase Phase = JobPhase.Open;
             public DateTime PhaseStartedUtc;
@@ -108,6 +123,7 @@ namespace Marketbuddy
         private int evaluatedVersion;
         private List<VendorSellVerdict>? evaluatedPlan;
         private DateTime evaluatedUtc;
+        private bool evaluatedMergeOn;
 
         // 重算時的「現在」那一份背包；Evaluate 不留住它，所以每次重算沿用同一份。
         private readonly VendorSellSnapshot liveRead = new();
@@ -327,6 +343,11 @@ namespace Marketbuddy
             }
 
             round!.Baselines.Stage(key, baselineLoaded, baselineSlots);
+            // 一定要在這一次下架記進帳本之前看：之後帳本裡就一定有它，分不出是不是以前就有。
+            if (LowPriceDelistLedger.Loaded && LowPriceDelistLedger.TryGet(key, out _))
+                round.LedgerBeforeRound.Add(key);
+            else
+                round.LedgerBeforeRound.Remove(key);
             return true;
         }
 
@@ -402,6 +423,21 @@ namespace Marketbuddy
             }
 
             return (stacks, gil);
+        }
+
+        /// <summary>勾選中、要整疊賣（併入原有堆疊）的格數與一起賣掉的原有量；每幀由面板呼叫，不配置。</summary>
+        public (int Stacks, int Existing) MergedSellSummary()
+        {
+            int stacks = 0, existing = 0;
+            foreach (var v in plan)
+            {
+                if (v.State != VendorSellState.Sellable || IsExcluded(v.Key))
+                    continue;
+                stacks += v.MergedStacks.Count;
+                existing += v.MergedExisting;
+            }
+
+            return (stacks, existing);
         }
 
         public int CountState(VendorSellState state)
@@ -530,13 +566,23 @@ namespace Marketbuddy
             RefreshPlan();
             jobs.Clear();
             var gil = 0L;
+            var mergedJobs = 0;
             foreach (var v in plan)
             {
                 if (v.State != VendorSellState.Sellable || IsExcluded(v.Key))
                     continue;
                 foreach (var slot in v.NewSlots)
                 {
-                    jobs.Add(new SellJob { Planned = slot, Name = v.Name, VendorUnitPrice = v.VendorUnitPrice });
+                    var existing = MergedExistingOf(v, slot);
+                    // 整疊賣（連原有的一起）只在使用者自己按這顆按鈕時做；整理一輪不做。
+                    if (existing > 0 && !includeSortPicks)
+                        continue;
+                    if (existing > 0)
+                        mergedJobs++;
+                    jobs.Add(new SellJob
+                    {
+                        Planned = slot, Name = v.Name, VendorUnitPrice = v.VendorUnitPrice, MergedExisting = existing,
+                    });
                     gil += (long)slot.Quantity * v.VendorUnitPrice;
                 }
             }
@@ -578,7 +624,8 @@ namespace Marketbuddy
             suppressionHeld = true;
 
             Log.Information(
-                $"[Marketbuddy] VendorSell: 開始交給僱員賣給商店，{jobs.Count} 格（其中背包分揀 {fromSort} 格），預估 {gil:N0} gil");
+                $"[Marketbuddy] VendorSell: 開始交給僱員賣給商店，{jobs.Count} 格（其中背包分揀 {fromSort} 格、" +
+                $"併入原有堆疊整疊賣 {mergedJobs} 格），預估 {gil:N0} gil");
             ChatGui.Print("[Marketbuddy] Having the retainer sell ?? stack(s) to the shop (about ?? gil)..."
                 .Loc(jobs.Count, gil.ToString("N0")));
             return true;
@@ -643,15 +690,19 @@ namespace Marketbuddy
             Capture(inventoryManager, ArmoryContainers, true, readLoaded, readSlots);
 
             var nowUtc = DateTime.UtcNow;
+            var mergeOn = conf.VendorSellMergedStacks;
             if (!force && ReferenceEquals(plan, evaluatedPlan) && ReferenceEquals(round, evaluatedRound) &&
-                round.Version == evaluatedVersion && PastSettleWindow(round, evaluatedUtc) &&
+                round.Version == evaluatedVersion && mergeOn == evaluatedMergeOn && PastSettleWindow(round, evaluatedUtc) &&
                 PastSettleWindow(round, nowUtc) && SameRead())
                 return;
 
             liveRead.Refill(readLoaded, readSlots);
+            var r = round;
             plan = VendorSellPlanner.Evaluate(round.Baselines.BeforeOf, liveRead,
-                round.Delists, round.Sold, nowUtc, SettleWindow);
+                round.Delists, round.Sold, nowUtc, SettleWindow,
+                mergeOn ? key => MergeAllowed(r, key) : null, round.SoldExisting);
             evaluatedPlan = plan;
+            evaluatedMergeOn = mergeOn;
             evaluatedRound = round;
             evaluatedVersion = round.Version;
             evaluatedUtc = nowUtc;
@@ -676,6 +727,18 @@ namespace Marketbuddy
             Log.Information(
                 $"[Marketbuddy] VendorSell: 賣給商店的清單：可賣 {summary.Sellable} 種（{summary.Stacks} 格，約 {summary.Gil:N0} gil）、" +
                 $"需要手動 {summary.Manual} 種{top}");
+        }
+
+        /// <summary>
+        /// 併入原有堆疊的這種道具可不可以整疊賣：這一輪之前就在低價下架帳本裡，而且不在 InventoryTools 的製作清單上。
+        /// 開關本身由呼叫端判（關著時根本不傳這個判斷進去）。
+        /// </summary>
+        private static bool MergeAllowed(Round r, VendorSellKey key)
+        {
+            if (!r.LedgerBeforeRound.Contains(key))
+                return false;
+            r.ProtectedIds ??= BagSorter.ReadProtectedIds(out _);
+            return !r.ProtectedIds.Contains(key.ItemId);
         }
 
         /// <summary>Evaluate 裡唯一看時鐘的判斷是「離該件最後一次下架未滿等待期」；全部都滿了，換哪個時刻算結果都一樣。</summary>
@@ -792,7 +855,8 @@ namespace Marketbuddy
                     job.Phase = JobPhase.WaitSale;
                     job.PhaseStartedUtc = now;
                     Log.Information(
-                        $"[Marketbuddy] VendorSell: 已選「委託僱員出售物品」：{DescribeSlot(p)} {job.Name} x{p.Quantity}");
+                        $"[Marketbuddy] VendorSell: 已選「委託僱員出售物品」：{DescribeSlot(p)} {job.Name} x{p.Quantity}" +
+                        (job.MergedExisting > 0 ? $"（併入原有堆疊整疊賣，其中原有 {job.MergedExisting}）" : string.Empty));
                     return;
                 case VendorSellMenuResult.SlotMismatch:
                     Skip(job, "the slot no longer matches what was planned".Loc());
@@ -828,14 +892,19 @@ namespace Marketbuddy
                     RemoveSortPick(p);
                 else if (round != null)
                 {
-                    round.Sold[p.Key] = (round.Sold.TryGetValue(p.Key, out var s) ? s : 0) + p.Quantity;
+                    // 整疊賣的那一格：只有這一輪下架回來的量算進「已賣」，原有的量另記成那一格已經用掉。
+                    var roundPortion = p.Quantity - job.MergedExisting;
+                    round.Sold[p.Key] = (round.Sold.TryGetValue(p.Key, out var s) ? s : 0) + roundPortion;
+                    if (job.MergedExisting > 0)
+                        round.SoldExisting.Add((p.Container, p.Slot));
                     round.Version++;
                     round.LastActivityUtc = now;
                 }
 
                 SoldStacks++;
                 SoldGil += (long)p.Quantity * job.VendorUnitPrice;
-                Log.Information($"[Marketbuddy] VendorSell: 已賣出 {DescribeSlot(p)} {job.Name} x{p.Quantity}");
+                Log.Information($"[Marketbuddy] VendorSell: 已賣出 {DescribeSlot(p)} {job.Name} x{p.Quantity}" +
+                                (job.MergedExisting > 0 ? $"（整疊，其中原有 {job.MergedExisting}）" : string.Empty));
                 Advance();
                 return;
             }
@@ -876,7 +945,8 @@ namespace Marketbuddy
 
                 foreach (var slot in v.NewSlots)
                 {
-                    if (slot == p)
+                    // 整疊賣的那一格還要原有量一致：重算時同一格不再是整疊賣（或原有量變了）就不賣。
+                    if (slot == p && MergedExistingOf(v, slot) == job.MergedExisting)
                         return true;
                 }
 
@@ -885,6 +955,17 @@ namespace Marketbuddy
 
             why = "the slot no longer matches what was planned".Loc();
             return false;
+        }
+
+        private static int MergedExistingOf(VendorSellVerdict v, VendorSellSlot slot)
+        {
+            foreach (var m in v.MergedStacks)
+            {
+                if (m.Slot == slot)
+                    return m.Existing;
+            }
+
+            return 0;
         }
 
         private void RemoveSortPick(VendorSellSlot slot)

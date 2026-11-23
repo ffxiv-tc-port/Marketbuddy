@@ -71,6 +71,12 @@ namespace Marketbuddy
         /// </remarks>
         public bool VendorSellAfterDelist = false;
 
+        /// <summary>
+        /// 下架品併進背包原有的同款堆疊時，若那種道具這一輪之前就在低價下架帳本裡，也列成可賣、<b>整疊</b>賣（連原有的量）。<b>預設關閉。</b>
+        /// 🔴 賣給商店不可逆；只在使用者按「賣給商店」那顆按鈕時賣，整理一輪不賣；規則見 <see cref="VendorSellPlanner"/>。
+        /// </summary>
+        public bool VendorSellMergedStacks = false;
+
         /// <summary>出售品視窗旁的「批次上架」面板。<b>預設關閉。</b>🔴 市場紅線：開著也只是多一個面板，要按開始才動。</summary>
         public bool BatchListEnabled = false;
 

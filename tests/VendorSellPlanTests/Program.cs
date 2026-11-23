@@ -66,6 +66,15 @@ internal static class Program
         CommitOfAnotherItemIsRefused();
         SummaryCountsAndTopReason();
 
+        MergedSellableOnlyWhenAllowed();
+        MergedNotCleanStaysManual();
+        MergedGrowthMismatchIsManual();
+        MergedOverflowSellsBothSlots();
+        MergedSoldThenNewSlotStillSellable();
+        MergedSoldSlotRefilledCountsAsNew();
+        MergedOnlyTheGrownStackIsSold();
+        MergedNeedsConfirmationIsManual();
+
         Console.WriteLine($"PASS {passes} / FAIL {failures}");
         return failures == 0 ? 0 : 1;
     }
@@ -574,6 +583,115 @@ internal static class Program
     private static VendorSellDelist D(VendorSellKey key, int qty,
         VendorSellCause cause = VendorSellCause.BelowVendor, uint vendorUnit = 20)
         => new(key, qty, cause, vendorUnit, false, $"item{key.ItemId}{(key.Hq ? "HQ" : "")}", T0);
+
+    // 併入原有堆疊、整疊賣：只有呼叫端點頭才可賣；不點頭（含舊的多載）照舊是需要手動。
+    private static void MergedSellableOnlyWhenAllowed()
+    {
+        var before = Snap(S(Inv1, 3, Ruby, 50));
+        var now = Snap(S(Inv1, 3, Ruby, 78));
+        var v = Merge(before, now, [D(Ruby, 28)], allow: true);
+        Expect("併入、允許：整疊可賣", v.State == VendorSellState.Sellable && v.NewSlots.Count == 1 &&
+            v.NewSlots[0].Slot == 3 && v.NewSlots[0].Quantity == 78 && v.MergedStacks.Count == 1 &&
+            v.MergedExisting == 50 && v.Arrived == 28 && v.EstimatedGil == 78 * 20, v);
+        var old = One(before, now, [D(Ruby, 28)]);
+        Expect("同一份輸入走舊多載：需要手動（負對照）", old.State == VendorSellState.Manual &&
+            old.Reason == VendorSellManualReason.MergedIntoExistingStack && old.MergedStacks.Count == 0, old);
+        var no = Merge(before, now, [D(Ruby, 28)], allow: false);
+        Expect("併入、不允許：需要手動", no.State == VendorSellState.Manual &&
+            no.Reason == VendorSellManualReason.MergedIntoExistingStack && no.NewSlots.Count == 0 && no.Arrived == 0, no);
+    }
+
+    private static void MergedNotCleanStaysManual()
+    {
+        var before = Snap(S(Inv1, 3, Ruby, 50, detail: 7));
+        var now = Snap(S(Inv1, 3, Ruby, 78, detail: 8));
+        var v = Merge(before, now, [D(Ruby, 28)], allow: true);
+        Expect("併入而且指紋變了：允許也不賣", v.State == VendorSellState.Manual &&
+            v.Reason == VendorSellManualReason.MergedIntoExistingStack, v);
+    }
+
+    private static void MergedGrowthMismatchIsManual()
+    {
+        var before = Snap(S(Inv1, 3, Ruby, 50));
+        var now = Snap(S(Inv1, 3, Ruby, 80));
+        var v = Merge(before, now, [D(Ruby, 28)], allow: true);
+        Expect("併入後多出來的量不等於下架量：需要手動", v.State == VendorSellState.Manual &&
+            v.Reason == VendorSellManualReason.QuantityMismatch && v.MergedStacks.Count == 0, v);
+
+        var settling = Merge(before, Snap(S(Inv1, 3, Ruby, 60)), [D(Ruby, 28)], allow: true);
+        Expect("只到了一部分、還在等待期：等", settling.State == VendorSellState.Waiting, settling);
+    }
+
+    private static void MergedOverflowSellsBothSlots()
+    {
+        var before = Snap(S(Inv1, 3, Ruby, 990));
+        var now = Snap(S(Inv1, 3, Ruby, 999), S(Inv1, 4, Ruby, 11));
+        var v = Merge(before, now, [D(Ruby, 20)], allow: true);
+        Expect("部分併入、溢出到新格子，允許：兩格都賣", v.State == VendorSellState.Sellable &&
+            v.NewSlots.Count == 2 && v.MergedExisting == 990 && v.Arrived == 20, v);
+    }
+
+    // 賣掉整疊之後：那一格記成已用掉、只把這一輪的量算進已賣，剩下的新格子照樣可賣。
+    private static void MergedSoldThenNewSlotStillSellable()
+    {
+        var before = Snap(S(Inv1, 3, Ruby, 990));
+        var now = Snap(S(Inv1, 4, Ruby, 11));
+        var soldExisting = new HashSet<(uint, short)> { (Inv1, 3) };
+        var sold = new Dictionary<VendorSellKey, int> { [Ruby] = 9 };
+        var v = Merge(before, now, [D(Ruby, 20)], allow: true, sold: sold, soldExisting: soldExisting);
+        Expect("整疊賣掉後剩下的新格子：可賣", v.State == VendorSellState.Sellable && v.NewSlots.Count == 1 &&
+            v.NewSlots[0].Slot == 4 && v.Remaining == 11 && v.MergedStacks.Count == 0, v);
+        var naive = Merge(before, now, [D(Ruby, 20)], allow: true, sold: sold);
+        Expect("不記已用掉的格子：被當成舊堆疊不見了（負對照）", naive.State == VendorSellState.Manual &&
+            naive.Reason == VendorSellManualReason.ExistingStackChanged, naive);
+
+        var newFirst = Merge(before, Snap(S(Inv1, 3, Ruby, 999)), [D(Ruby, 20)], allow: true,
+            sold: new Dictionary<VendorSellKey, int> { [Ruby] = 11 });
+        Expect("先賣掉新格子、剩下整疊：可賣", newFirst.State == VendorSellState.Sellable &&
+            newFirst.NewSlots.Count == 1 && newFirst.NewSlots[0].Slot == 3 && newFirst.MergedExisting == 990, newFirst);
+
+        var done = Merge(before, Snap(), [D(Ruby, 20)], allow: true,
+            sold: new Dictionary<VendorSellKey, int> { [Ruby] = 20 }, soldExisting: soldExisting);
+        Expect("兩格都賣完：結束", done.State == VendorSellState.Done, done);
+    }
+
+    private static void MergedSoldSlotRefilledCountsAsNew()
+    {
+        var before = Snap(S(Inv1, 3, Ruby, 50));
+        var now = Snap(S(Inv1, 3, Ruby, 5));
+        var soldExisting = new HashSet<(uint, short)> { (Inv1, 3) };
+        var v = Merge(before, now, [D(Ruby, 28)], allow: true,
+            sold: new Dictionary<VendorSellKey, int> { [Ruby] = 28 }, soldExisting: soldExisting);
+        Expect("賣掉的格子又放進同款：不是舊堆疊，這一輪已賣完⇒結束", v.State == VendorSellState.Done, v);
+    }
+
+    private static void MergedOnlyTheGrownStackIsSold()
+    {
+        var before = Snap(S(Inv1, 3, Ruby, 50), S(Inv2, 7, Ruby, 99));
+        var now = Snap(S(Inv1, 3, Ruby, 78), S(Inv2, 7, Ruby, 99));
+        var v = Merge(before, now, [D(Ruby, 28)], allow: true);
+        Expect("另一疊原有的沒變：不賣它", v.State == VendorSellState.Sellable && v.NewSlots.Count == 1 &&
+            v.NewSlots[0].Container == Inv1 && v.ExistingBefore == 149, v);
+    }
+
+    private static void MergedNeedsConfirmationIsManual()
+    {
+        var before = Snap(S(Inv1, 3, Ruby, 50, needsConfirmation: true));
+        var now = Snap(S(Inv1, 3, Ruby, 78, needsConfirmation: true));
+        var v = Merge(before, now, [D(Ruby, 28)], allow: true);
+        Expect("整疊會跳確認框：需要手動", v.State == VendorSellState.Manual &&
+            v.Reason == VendorSellManualReason.NeedsConfirmation && v.MergedStacks.Count == 0, v);
+    }
+
+    private static VendorSellVerdict Merge(VendorSellSnapshot before, VendorSellSnapshot now, VendorSellDelist[] delists,
+        bool allow, Dictionary<VendorSellKey, int>? sold = null, HashSet<(uint, short)>? soldExisting = null)
+    {
+        var all = VendorSellPlanner.Evaluate(_ => before, now, delists, sold ?? new Dictionary<VendorSellKey, int>(),
+            T0.AddSeconds(1), Settle, _ => allow, soldExisting);
+        if (all.Count != 1)
+            throw new InvalidOperationException($"expected exactly one verdict, got {all.Count}");
+        return all[0];
+    }
 
     private static VendorSellVerdict One(VendorSellSnapshot before, VendorSellSnapshot now,
         VendorSellDelist[] delists, DateTime? at = null, Dictionary<VendorSellKey, int>? sold = null)

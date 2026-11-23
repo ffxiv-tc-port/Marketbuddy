@@ -107,6 +107,19 @@ namespace Marketbuddy
             else
             {
                 DrawArmedButton(stacks, gil);
+                var (mergedStacks, mergedExisting) = seller.MergedSellSummary();
+                if (mergedStacks > 0)
+                {
+                    ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudOrange);
+                    ImGui.TextUnformatted(DrawText.Loc("Includes ?? whole stack(s) with ?? of your own in them",
+                        (mergedStacks, mergedExisting), static (t, a) => t.Loc(a.Item1, a.Item2)));
+                    ImGui.PopStyleColor();
+                    if (ImGui.IsItemHovered())
+                        ImGui.SetTooltip(
+                            "These delisted items merged into stacks you already had. Selling to a shop cannot be undone and the whole stack goes, including what you already had. Untick the item in the list below to keep it."
+                                .Loc());
+                }
+
                 if (waiting > 0)
                     Grey(DrawText.Loc("?? more still on the way back to your bags", waiting));
             }
@@ -245,7 +258,9 @@ namespace Marketbuddy
                     ImGui.TextUnformatted(RowText(v).Line);
                     Measure();
                     if (ImGui.IsItemHovered())
-                        ImGui.SetTooltip(ManualReasonLong(v));
+                        ImGui.SetTooltip(v.Reason == VendorSellManualReason.MergedIntoExistingStack
+                            ? ManualReasonLong(v) + "\n" + MergedHint()
+                            : ManualReasonLong(v));
                 }
             }
 
@@ -354,8 +369,10 @@ namespace Marketbuddy
             var where = new List<string>(v.NewSlots.Count);
             foreach (var slot in v.NewSlots)
                 where.Add(VendorSeller.DescribeSlot(slot) + " x" + slot.Quantity);
-            ImGui.SetTooltip("Sells: ??\nNPC price: ?? gil each".Loc(string.Join(", ", where),
-                v.VendorUnitPrice.ToString("N0")));
+            var tip = "Sells: ??\nNPC price: ?? gil each".Loc(string.Join(", ", where), v.VendorUnitPrice.ToString("N0"));
+            if (v.MergedExisting > 0)
+                tip += "\n" + "Whole stack: ?? of these were already yours before the delist.".Loc(v.MergedExisting);
+            ImGui.SetTooltip(tip);
         }
 
         private (string Id, string Line) RowText(VendorSellVerdict v)
@@ -369,10 +386,17 @@ namespace Marketbuddy
         {
             VendorSellState.Sellable => ($"##mbvendorsell{v.Key.ItemId}{(v.Key.Hq ? "h" : "n")}",
                 "?? x??  ??  about ?? gil".Loc(v.Name, v.Arrived, VendorSeller.CauseText(v.Causes),
-                    v.EstimatedGil.ToString("N0"))),
+                    v.EstimatedGil.ToString("N0")) +
+                (v.MergedExisting > 0 ? "  " + "(whole stack: +?? of yours)".Loc(v.MergedExisting) : string.Empty)),
             VendorSellState.Waiting => (string.Empty, "?? ??/?? - still on its way back".Loc(v.Name, v.Arrived, v.Remaining)),
             _ => (string.Empty, "?? x??: ??".Loc(v.Name, v.Remaining, VendorSeller.ManualReasonShort(v.Reason, v.State))),
         };
+
+        private static string MergedHint() => Configuration.GetOrLoad().VendorSellMergedStacks
+            ? "Not offered as a whole stack: this item was not in the low-price delist record before this round, it is on a craft list, or the old stack changed in more than its amount."
+                .Loc()
+            : "If the stack you already had is also left over from earlier low-price delists, /mbuddy can let such stacks be sold whole (off by default)."
+                .Loc();
 
         private static string ManualReasonLong(VendorSellVerdict v) => v.Reason switch
         {
