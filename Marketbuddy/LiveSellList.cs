@@ -658,7 +658,7 @@ namespace Marketbuddy
 
             // 高度上限扣掉同一欄被另一塊吃掉的垂直空間；200 px 地板，否則重掛面板很高時這裡會被壓到看不見。
             ImGui.SetNextWindowPos(placement.Position, ImGuiCond.Always, placement.Pivot);
-            var scale = ImGuiHelpers.GlobalScale;
+            var scale = ImGuiEx.FontPx(1f);
             ImGui.SetNextWindowSizeConstraints(
                 new Vector2(220, 80) * scale,
                 new Vector2(float.MaxValue, PanelPlacementMath.ListMaxHeight(nativeSize.Y, column, placement, 200f * scale)));

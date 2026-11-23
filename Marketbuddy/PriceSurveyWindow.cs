@@ -6,7 +6,6 @@ using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.Text;
 using Dalamud.Interface.Colors;
-using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Lumina.Excel.Sheets;
 using Marketbuddy.Common;
@@ -421,8 +420,7 @@ namespace Marketbuddy
                 scrollTableHasBarX[slot] = ImGui.GetScrollMaxX() > 0;
         }
 
-        /// <summary>設計寬度（100% 介面縮放下的像素）換成目前縮放下的像素。</summary>
-        private static float Px(float designPixels) => designPixels * ImGuiHelpers.GlobalScale;
+        private static float Px(float designPixels) => FontPx(designPixels);
 
         /// <summary>銷售兩張表的列高：每一格都是一行文字。</summary>
         private static float SalesRowHeight() => ImGui.GetTextLineHeight() + (ImGui.GetStyle().CellPadding.Y * 2);

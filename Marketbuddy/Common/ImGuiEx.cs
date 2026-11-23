@@ -17,6 +17,12 @@ public static class ImGuiEx
         }
     }
 
+    // Dalamud 出廠字級（InterfaceManager.DefaultFontSizePx）；不用 UiBuilder.DefaultFontSizePx：那是使用者改過的字級，當分母會抵銷放大。
+    private const float DalamudFactoryFontSizePx = 12f * 4f / 3f;
+
+    /// <summary>出廠字級下的設計像素換成目前字級的像素；GetFontSize() 已含全域縮放，所以不再乘 GlobalScale。</summary>
+    internal static float FontPx(float designPixels) => designPixels * ImGui.GetFontSize() / DalamudFactoryFontSizePx;
+
     /// <summary>
     /// 寬 <paramref name="nextWidth"/> 的下一個項目接在上一個項目右邊還放得下才 SameLine（回 true），
     /// 否則讓它從下一行開始（回 false）。放得下時與直接 SameLine 相同；放不下時直接 SameLine 會把它推出視窗右邊。
