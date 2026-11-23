@@ -510,6 +510,22 @@ namespace Marketbuddy
         public bool LiveSellListSalesHistoryColumn = true;
 
         /// <summary>
+        /// 「即時出售品清單」的看盤欄位總開關：扣稅後實拿、板上比我便宜的件數、預估幾天賣完。
+        /// </summary>
+        /// <remarks>
+        /// 🔴 <b>預設關閉、純顯示</b>：不會因為任何數字自動改價、上架或下架。
+        /// 後兩欄的資料只在使用者按下面板上的「查日銷」時才向 Universalis 查（<c>LastSoldPriceSource.RequestWatch</c>），
+        /// 沒按過的列畫灰色的 <c>?</c>，不畫 0。
+        /// </remarks>
+        public bool LiveSellListWatchColumns = false;
+
+        /// <summary>看盤三欄各自的開關；只在 <see cref="LiveSellListWatchColumns"/> 開著時作用。</summary>
+        public bool LiveSellListShowNet = true;
+
+        public bool LiveSellListShowCheaper = true;
+        public bool LiveSellListShowDaysToSell = true;
+
+        /// <summary>
         /// 「這一趟買到哪了」：在市場板搜尋結果視窗旁畫一塊面板，顯示本趟已買的件數與金額，
         /// 以及「最便宜的前 K 列加起來是幾件、多少錢」。
         /// </summary>

@@ -1965,14 +1965,25 @@ namespace Marketbuddy
         /// </summary>
         internal uint CurrentTaxPercent()
         {
+            TryLiveTaxPercent(out var percent);
+            return percent;
+        }
+
+        /// <summary>
+        /// 同 <see cref="CurrentTaxPercent"/>；回傳 false＝這個數字是設定裡的退回值，不是遊戲這週告訴我們的稅率。
+        /// 只從 framework 執行緒呼叫（讀目前互動中的僱員）。
+        /// </summary>
+        internal bool TryLiveTaxPercent(out uint percent)
+        {
             var fallback = (uint)Math.Clamp(conf.MarketTaxPercent, 0, 25);
+            percent = fallback;
             if (taxRates == null || taxRates.ValidUntil <= DateTime.UtcNow)
-                return fallback;
+                return false;
 
             var retainerManager = RetainerManager.Instance();
             var active = retainerManager == null ? null : retainerManager->GetActiveRetainer();
             if (active == null)
-                return fallback;
+                return false;
 
             uint? rate = active->Town switch
             {
@@ -1985,7 +1996,10 @@ namespace Marketbuddy
                 RetainerManager.RetainerTown.OldSharlayan => taxRates.SharlayanTax,
                 _ => null,
             };
-            return rate is null or > 25 ? fallback : rate.Value;
+            if (rate is null or > 25)
+                return false;
+            percent = rate.Value;
+            return true;
         }
 
         /// <summary>

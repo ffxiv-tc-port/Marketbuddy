@@ -117,6 +117,35 @@ namespace Marketbuddy
 
             /// <summary>同一個道具的<b>另一個品質</b>有沒有紀錄（只給滑鼠提示補一句用）。</summary>
             public bool HistoryOtherQuality { get; init; }
+
+            /// <summary>整堆賣完扣稅後實拿；≤0＝單價讀不到（畫 <c>?</c>）。</summary>
+            public long NetTotal { get; init; }
+
+            public uint TaxPercent { get; init; }
+
+            /// <summary>false＝稅率是設定裡的退回值，列上標「約」。</summary>
+            public bool TaxLive { get; init; }
+
+            /// <summary>看盤資料的狀態；不是 Ready 時下面幾個看盤欄位沒有意義。</summary>
+            public LastSoldState WatchState { get; init; }
+
+            /// <summary>自己世界同品質比我便宜的件數；-1＝算不出來。</summary>
+            public long Cheaper { get; init; }
+
+            public bool CheaperLowerBound { get; init; }
+
+            /// <summary>最近 7 天每日成交件數（這個品質、自己的世界）；NaN＝不知道。</summary>
+            public double UnitsPerDay { get; init; }
+
+            /// <summary>預估幾天賣完；NaN＝不知道，正無限大＝窗內沒有成交。</summary>
+            public double DaysToSell { get; init; }
+
+            public DateTime WatchUploadedUtc { get; init; }
+
+            public DateTime WatchFetchedUtc { get; init; }
+
+            /// <summary>看盤資料太舊（見 <see cref="MarketWatchMath.StaleAfter"/>）⇒ 整列淡色。</summary>
+            public bool WatchStale { get; init; }
         }
 
         /// <summary>「賣出/下架」那一欄的資料基礎處在什麼狀態。四種在畫面上都要分得出來。</summary>
@@ -142,6 +171,12 @@ namespace Marketbuddy
         private DateTime lastPrefetchAt = DateTime.MinValue;
 
         private static readonly TimeSpan PrefetchEvery = TimeSpan.FromSeconds(1);
+
+        /// <summary>太舊的列的透明度（文字與數字一起淡掉；滑鼠提示照樣全亮）。</summary>
+        private const float StaleRowAlpha = 0.45f;
+
+        /// <summary>使用者按了「查日銷」；下一次 framework tick 收走並排查詢（容器只在那裡讀）。</summary>
+        private volatile bool watchRequested;
 
         private readonly MarketGuiEventHandler gui;
         private readonly BatchReprice engine;
@@ -204,6 +239,15 @@ namespace Marketbuddy
             if (conf.RelistUseLastSoldPrice && gui.IsRetainerSellListOpen)
                 PrefetchLastSoldPrices();
 
+            // 看盤資料只在使用者按了「查日銷」時才問（唯讀 HTTP，不碰遊戲內市場）。
+            if (watchRequested)
+            {
+                watchRequested = false;
+                if (gui.IsRetainerSellListOpen && CollectListedItemIds())
+                    LastSoldPriceSource.RequestWatch(
+                        PlayerState.ContentId == 0 ? 0u : PlayerState.CurrentWorld.RowId, prefetchIds);
+            }
+
             // 巡檢記錄的記憶體索引（市場查詢被拒絕時的補位來源），讀檔在執行緒池上。
             // 刻意在載入後第一幀就踢、不等出售品視窗：讀檔配置引發的 GC 落在開遊戲／更新插件時，
             // 不會和第一次開出售品視窗的 JIT 疊成看得見的卡頓。不必登入；檔案不存在＝0 列。
@@ -257,14 +301,24 @@ namespace Marketbuddy
                 return;
             lastPrefetchAt = now;
 
+            if (!CollectListedItemIds())
+                return;
+
+            var worldId = PlayerState.ContentId == 0 ? 0u : PlayerState.CurrentWorld.RowId;
+            LastSoldPriceSource.Request(worldId, prefetchIds);
+        }
+
+        /// <summary>把這位僱員掛著的道具 id 收進 <see cref="prefetchIds"/>；一件都沒有（或容器還沒載入）回 false。只在 framework 執行緒呼叫。</summary>
+        private bool CollectListedItemIds()
+        {
+            prefetchIds.Clear();
             var inventoryManager = InventoryManager.Instance();
             var container = inventoryManager == null
                 ? null
                 : inventoryManager->GetInventoryContainer(InventoryType.RetainerMarket);
             if (container == null || !container->IsLoaded)
-                return;
+                return false;
 
-            prefetchIds.Clear();
             var slotCount = Math.Min((int)container->Size, MaxMarketSlots);
             for (var i = 0; i < slotCount; i++)
             {
@@ -274,11 +328,7 @@ namespace Marketbuddy
                 prefetchIds.Add(slot->ItemId);
             }
 
-            if (prefetchIds.Count == 0)
-                return;
-
-            var worldId = PlayerState.ContentId == 0 ? 0u : PlayerState.CurrentWorld.RowId;
-            LastSoldPriceSource.Request(worldId, prefetchIds);
+            return prefetchIds.Count > 0;
         }
 
         private void RebuildRows()
@@ -335,6 +385,15 @@ namespace Marketbuddy
                     ? SalesHistoryState.NoBaseline
                     : SalesHistoryState.Ready;
             }
+
+            // 看盤欄位的共用輸入：稅率（這位僱員所在城市；不知道就退回設定值並標「約」）與看盤資料的世界。
+            var watchOn = conf.LiveSellListWatchColumns;
+            var taxLive = false;
+            var taxPercent = 0u;
+            if (watchOn)
+                taxLive = engine.TryLiveTaxPercent(out taxPercent);
+            var watchWorldId = PlayerState.ContentId == 0 ? 0u : PlayerState.CurrentWorld.RowId;
+            var nowUtc = DateTime.UtcNow;
 
             var inventoryManager = InventoryManager.Instance();
             var container = inventoryManager == null
@@ -487,12 +546,36 @@ namespace Marketbuddy
                                    anyQuality.OffBoardEvents > itemHistory.OffBoardEvents;
                 }
 
-                rows.Add(new Row(
-                    (short)i,
-                    name,
-                    (uint)Math.Max(0, slot->Quantity),
-                    RetainerMarketPrice.TryGet(inventoryManager, i, out var rowPrice) ? (uint)rowPrice : 0u)
+                var quantity = (uint)Math.Max(0, slot->Quantity);
+                var unitPrice = RetainerMarketPrice.TryGet(inventoryManager, i, out var rowPrice) ? (uint)rowPrice : 0u;
+                var watch = watchOn
+                    ? LastSoldPriceSource.WatchOf(slot->ItemId, watchWorldId, isHq)
+                    : default;
+                var cheaper = -1L;
+                var cheaperLowerBound = false;
+                var daysToSell = double.NaN;
+                var watchStale = false;
+                if (watch.State == LastSoldState.Ready && watch.Listings is { } watchListings)
                 {
+                    cheaper = MarketWatchMath.CheaperQuantity(watchListings.Prices, watchListings.Quantities,
+                        unitPrice, watch.CapPrice, out cheaperLowerBound);
+                    daysToSell = MarketWatchMath.DaysToSell(cheaper, quantity, watch.UnitsPerDay);
+                    watchStale = MarketWatchMath.IsStale(watch.UploadedUtc, nowUtc, MarketWatchMath.StaleAfter);
+                }
+
+                rows.Add(new Row((short)i, name, quantity, unitPrice)
+                {
+                    NetTotal = watchOn ? MarketWatchMath.NetTotal(unitPrice, quantity, taxPercent) : -1,
+                    TaxPercent = taxPercent,
+                    TaxLive = taxLive,
+                    WatchState = watch.State,
+                    Cheaper = cheaper,
+                    CheaperLowerBound = cheaperLowerBound,
+                    UnitsPerDay = watch.UnitsPerDay,
+                    DaysToSell = daysToSell,
+                    WatchUploadedUtc = watch.UploadedUtc,
+                    WatchFetchedUtc = watch.FetchedUtc,
+                    WatchStale = watchStale,
                     SoldState = soldState,
                     // 🔴 與 soldState 一起抄進這一幀的快照，不要留到畫的時候才去讀
                     //    conf：那會讓「這個 Unknown 是暫時的還是永久的」與它算出來的
@@ -604,11 +687,23 @@ namespace Marketbuddy
             // 標題撐成兩行，白白吃掉本來要留給清單的垂直空間。移進滑鼠提示。
             ImGui.TextUnformatted("Live listings".Loc());
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Re-read every frame - always shows the current prices".Loc());
+                ShowTooltip("Re-read every frame - always shows the current prices".Loc());
             if (retainerLabel.Length > 0 && conf.LiveSellListShowRetainerName)
             {
                 ImGui.SameLine();
                 ImGui.TextColored(ImGuiColors.DalamudOrange, retainerLabel);
+            }
+
+            // 🔴 看盤資料只在這裡按了才查：不在開面板、換僱員或任何事件上自動查。
+            if (conf.LiveSellListWatchColumns && (conf.LiveSellListShowCheaper || conf.LiveSellListShowDaysToSell))
+            {
+                ImGui.SameLine();
+                if (ImGui.SmallButton(DrawText.Concat("Look up sales".Loc(), "##mblivesellistwatch")))
+                    watchRequested = true;
+                if (ImGui.IsItemHovered())
+                    ShowTooltip(
+                        "Asks Universalis, once, what is listed on your world right now and how much of each item sold there in the last 7 days, for everything this retainer has listed. Pressing it again within 30 minutes does not ask again. Read-only: nothing is listed, repriced or bought because of it."
+                            .Loc());
             }
 
             // 與 /mbuddy「面板」分頁同一份選項（同一個方法畫），在這裡開是為了邊看邊調。
@@ -616,7 +711,7 @@ namespace Marketbuddy
             if (ImGui.SmallButton(DrawText.Concat("Options".Loc(), "##mblivesellistopts")))
                 ImGui.OpenPopup("##mblivesellistoptspopup");
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Choose which columns are shown and where this panel sits".Loc());
+                ShowTooltip("Choose which columns are shown and where this panel sits".Loc());
             if (ImGui.BeginPopup("##mblivesellistoptspopup"))
             {
                 PluginUI.DrawLiveSellListDisplayOptions(conf);
@@ -633,7 +728,7 @@ namespace Marketbuddy
             }
 
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Hide this panel (re-enable it in /mbuddy)".Loc());
+                ShowTooltip("Hide this panel (re-enable it in /mbuddy)".Loc());
         }
 
         private void DrawTable()
@@ -673,7 +768,12 @@ namespace Marketbuddy
             var showLastSale = showMarket && conf.LiveSellListShowLastSale;
             var showAge = showMarket && conf.LiveSellListShowListedFor;
             var showHistory = conf.LiveSellListSalesHistoryColumn;
+            var showWatch = conf.LiveSellListWatchColumns;
+            var showNet = showWatch && conf.LiveSellListShowNet;
+            var showCheaper = showWatch && conf.LiveSellListShowCheaper;
+            var showDays = showWatch && conf.LiveSellListShowDaysToSell;
             var columns = 1 + (showQty ? 1 : 0) + (showUnit ? 1 : 0) + (showTotal ? 1 : 0) +
+                          (showNet ? 1 : 0) + (showCheaper ? 1 : 0) + (showDays ? 1 : 0) +
                           (showLowWorld ? 1 : 0) + (showLowDc ? 1 : 0) + (showLastSale ? 1 : 0) + (showAge ? 1 : 0) +
                           (showHistory ? 1 : 0) + (showRelist ? 1 : 0);
 
@@ -688,6 +788,14 @@ namespace Marketbuddy
                 ImGui.TableSetupColumn("Unit price".Loc());
             if (showTotal)
                 ImGui.TableSetupColumn("Total".Loc());
+
+            // 順序照看盤的讀法：單價 → 扣稅實拿 → 前面還排著幾件 → 幾天賣完。
+            if (showNet)
+                ImGui.TableSetupColumn("Net".Loc());
+            if (showCheaper)
+                ImGui.TableSetupColumn("Cheaper".Loc());
+            if (showDays)
+                ImGui.TableSetupColumn("Sells in".Loc());
             if (showLowWorld)
                 ImGui.TableSetupColumn("Lowest here".Loc());
             if (showLowDc)
@@ -709,6 +817,11 @@ namespace Marketbuddy
             {
                 ImGui.TableNextRow();
 
+                // 看盤資料太舊：整列淡色。只在看盤那兩欄有畫出來時才淡（淡色的理由就寫在那兩欄的提示裡）。
+                var faded = row.WatchStale && (showCheaper || showDays);
+                if (faded)
+                    ImGui.PushStyleVar(ImGuiStyleVar.Alpha, StaleRowAlpha);
+
                 // 進行中的那一列：整列底色 + 道具名改成琥珀色。
                 // 目前處理中的道具**不在**這張表裡時（例如快速上架還沒把它掛上去、
                 // 或引擎的目標格已經空掉）就什麼都不亮——刻意不退而求其次去比對名稱，
@@ -725,11 +838,13 @@ namespace Marketbuddy
                     ImGui.TextUnformatted(row.Name);
                     ImGui.PopStyleColor();
                     if (ImGui.IsItemHovered())
-                        ImGui.SetTooltip("Working on this one right now".Loc());
+                        ShowTooltip("Working on this one right now".Loc());
                 }
                 else
                 {
                     ImGui.TextUnformatted(row.Name);
+                    if (faded && ImGui.IsItemHovered())
+                        ShowTooltip(WatchFreshness(row));
                 }
 
                 if (showQty)
@@ -751,7 +866,7 @@ namespace Marketbuddy
                         ImGui.TextUnformatted(DrawText.N0(row.UnitPrice));
                         ImGui.PopStyleColor();
                         if (ImGui.IsItemHovered())
-                            ImGui.SetTooltip("Repriced by Marketbuddy: ?? → ??".Loc(
+                            ShowTooltip("Repriced by Marketbuddy: ?? → ??".Loc(
                                 changes[row.Slot].OldPrice.ToString("N0"), row.UnitPrice.ToString("N0")));
                     }
                     else
@@ -764,6 +879,24 @@ namespace Marketbuddy
                 {
                     ImGui.TableNextColumn();
                     ImGui.TextUnformatted(DrawText.N0((long)row.UnitPrice * row.Quantity));
+                }
+
+                if (showNet)
+                {
+                    ImGui.TableNextColumn();
+                    DrawNetCell(row);
+                }
+
+                if (showCheaper)
+                {
+                    ImGui.TableNextColumn();
+                    DrawCheaperCell(row);
+                }
+
+                if (showDays)
+                {
+                    ImGui.TableNextColumn();
+                    DrawDaysCell(row);
                 }
 
                 if (showLowWorld)
@@ -801,9 +934,147 @@ namespace Marketbuddy
                     ImGui.TableNextColumn();
                     DrawRelistCell(row);
                 }
+
+                if (faded)
+                    ImGui.PopStyleVar();
             }
 
             ImGui.EndTable();
+        }
+
+        /// <summary>
+        /// 「扣稅後實拿」：整堆賣完拿到多少。稅率不是遊戲這週告訴我們的（退回設定值）時前面標「約」。
+        /// </summary>
+        private static void DrawNetCell(in Row row)
+        {
+            if (row.NetTotal <= 0)
+            {
+                Grey("?");
+                Tooltip("The price of this slot could not be read, so there is nothing to work out.".Loc());
+                return;
+            }
+
+            ImGui.TextUnformatted(row.TaxLive ? DrawText.N0(row.NetTotal) : DrawText.N0("~".Loc(), row.NetTotal));
+            if (!ImGui.IsItemHovered())
+                return;
+
+            var unitNet = MarketWatchMath.NetTotal(row.UnitPrice, 1, row.TaxPercent);
+            ShowTooltip(row.TaxLive
+                ? "All ?? sold at ?? gil each: you receive ?? gil after this retainer's city's market tax of ??% (?? gil per item)."
+                    .Loc(row.Quantity.ToString("N0"), row.UnitPrice.ToString("N0"), row.NetTotal.ToString("N0"),
+                        row.TaxPercent, unitNet.ToString("N0"))
+                : "Approximate: the game has not sent this week's market tax rates yet, so this uses the ??% set in /mbuddy. All ?? sold at ?? gil each: about ?? gil (?? gil per item)."
+                    .Loc(row.TaxPercent, row.Quantity.ToString("N0"), row.UnitPrice.ToString("N0"),
+                        row.NetTotal.ToString("N0"), unitNet.ToString("N0")));
+        }
+
+        /// <summary>「自己世界同品質比我便宜的在售件數」；後面加 + 表示只看到前一百筆掛單、實際可能更多。</summary>
+        private static void DrawCheaperCell(in Row row)
+        {
+            if (!DrawWatchMissing(row))
+                return;
+
+            if (row.Cheaper < 0)
+            {
+                Grey("?");
+                Tooltip("The price of this slot could not be read, so there is nothing to compare.".Loc());
+                return;
+            }
+
+            ImGui.TextUnformatted(row.CheaperLowerBound
+                ? DrawText.Concat(DrawText.N0(row.Cheaper), "+")
+                : DrawText.N0(row.Cheaper));
+            if (!ImGui.IsItemHovered())
+                return;
+
+            var text = "On your world, ?? item(s) of this quality are listed for less than your ?? gil. Your own other retainers count too - theirs sell before this one as well."
+                .Loc(row.Cheaper.ToString("N0"), row.UnitPrice.ToString("N0"));
+            if (row.CheaperLowerBound)
+                text += "\n" + "Universalis only returned the cheapest 100 listings, so there may be more.".Loc();
+            ShowTooltip(text + "\n" + WatchFreshness(row));
+        }
+
+        /// <summary>「預估幾天賣完」＝（比我便宜的件數＋這一堆）÷ 最近 7 天每日成交件數。無條件進位到整天。</summary>
+        private static void DrawDaysCell(in Row row)
+        {
+            if (!DrawWatchMissing(row))
+                return;
+
+            if (double.IsNaN(row.DaysToSell))
+            {
+                Grey("?");
+                Tooltip("Not enough to go on: the price of this slot could not be read, or Universalis gave no sales figure.".Loc());
+                return;
+            }
+
+            if (double.IsPositiveInfinity(row.DaysToSell))
+            {
+                Grey("No sales".Loc());
+                if (ImGui.IsItemHovered())
+                    ShowTooltip("Nothing of this quality sold on your world in the last 7 days, as far as Universalis knows, so there is no estimate.\n??"
+                        .Loc(WatchFreshness(row)));
+                return;
+            }
+
+            const int maxDays = 999;
+            var days = row.DaysToSell < 1 ? 0 : (int)Math.Min(maxDays, Math.Ceiling(row.DaysToSell));
+            var text = days == 0 ? "<1d".Loc() : DrawText.Loc("??d", days);
+            if (row.CheaperLowerBound || row.DaysToSell > maxDays)
+                text = DrawText.Concat(text, "+");
+            ImGui.TextUnformatted(text);
+            if (!ImGui.IsItemHovered())
+                return;
+
+            ShowTooltip(
+                "About ?? item(s) of this quality sold per day on your world over the last 7 days. ?? listed cheaper plus your ?? = about ?? day(s) to sell out, if buyers keep coming at that rate and nobody lists below you.\n??"
+                    .Loc(row.UnitsPerDay.ToString("0.#"), row.Cheaper.ToString("N0"), row.Quantity.ToString("N0"),
+                        row.DaysToSell.ToString("0.#"), WatchFreshness(row)));
+        }
+
+        /// <summary>
+        /// 看盤資料不是 Ready 時畫對應的灰色記號並回 false。「沒按過」「查詢中」「連不上」「沒有資料」四種都要分得出來，一個都不畫 0。
+        /// </summary>
+        private static bool DrawWatchMissing(in Row row)
+        {
+            switch (row.WatchState)
+            {
+                case LastSoldState.Ready:
+                    return true;
+
+                case LastSoldState.Loading:
+                    Grey("...");
+                    Tooltip("Asking Universalis...".Loc());
+                    return false;
+
+                case LastSoldState.Failed:
+                    Grey("!");
+                    Tooltip("Universalis could not be reached. Press \"Look up sales\" again in a moment.".Loc());
+                    return false;
+
+                case LastSoldState.NoData:
+                    Grey("?");
+                    Tooltip("Universalis has nothing on this item for your world: nobody has uploaded it yet, or it cannot be sold on the market board.".Loc());
+                    return false;
+
+                default:
+                    Grey("?");
+                    Tooltip("Not looked up yet. Press \"Look up sales\" at the top of this panel - nothing is asked until you do.".Loc());
+                    return false;
+            }
+        }
+
+        /// <summary>資料多新：Universalis 上一次有人上傳這件（自己的世界）的時間，以及我們什麼時候問的。只在滑鼠指到時組。</summary>
+        private static string WatchFreshness(in Row row)
+        {
+            var ago = DateTime.UtcNow - row.WatchUploadedUtc;
+            if (ago < TimeSpan.Zero)
+                ago = TimeSpan.Zero;
+            var text = "Universalis data for your world was uploaded ?? (?? ago); looked up ??."
+                .Loc(BatchReprice.FormatSoldAt(row.WatchUploadedUtc), FormatSpan(ago),
+                    BatchReprice.FormatSoldAt(row.WatchFetchedUtc));
+            return row.WatchStale
+                ? text + "\n" + "That is more than ?? hours old, so this row is faded.".Loc((int)MarketWatchMath.StaleAfter.TotalHours)
+                : text;
         }
 
         /// <summary>
@@ -823,7 +1094,7 @@ namespace Marketbuddy
 
                 var reference = row.RelistReference < 0 ? "?" : row.RelistReference.ToString("N0");
                 var when = BatchReprice.FormatSoldAt(row.RelistAtUtc);
-                ImGui.SetTooltip(row.RelistSource switch
+                ShowTooltip(row.RelistSource switch
                 {
                     PriceSourceTag.Sale =>
                         "Last sold for ?? gil (??), rounded down to ?? gil. That is lower than the cheapest listing on your own world, or there is none."
@@ -910,7 +1181,7 @@ namespace Marketbuddy
                     ? "the whole data centre".Loc()
                     : "this world".Loc();
                 var where = string.IsNullOrEmpty(value.World) ? "?" : value.World;
-                ImGui.SetTooltip(
+                ShowTooltip(
                     "Lowest listing on ?? for this quality: ?? gil (??). Universalis data - only as fresh as the last upload."
                         .Loc(scope, value.UnitPrice.ToString("N0"), where));
                 return;
@@ -945,7 +1216,7 @@ namespace Marketbuddy
                 return;
 
             var world = string.IsNullOrEmpty(row.SoldWorld) ? "?" : row.SoldWorld;
-            ImGui.SetTooltip(
+            ShowTooltip(
                 "Sold for ?? gil on ?? (??, ??). This is the sale time Universalis recorded, not the moment we noticed it."
                     .Loc(row.SoldUnitPrice.ToString("N0"), BatchReprice.FormatSoldAt(row.SoldAtUtc),
                         row.SoldHq ? "HQ".Loc() : "NQ".Loc(), world));
@@ -978,14 +1249,14 @@ namespace Marketbuddy
             {
                 ImGui.TextUnformatted(text);
                 if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Listed since ?? (Marketbuddy watched it go up).".Loc(
+                    ShowTooltip("Listed since ?? (Marketbuddy watched it go up).".Loc(
                         age.SinceUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")));
                 return;
             }
 
             Grey(DrawText.Concat("~", text));
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip(
+                ShowTooltip(
                     "Approximate: it was already listed when Marketbuddy first looked, so the clock starts from when the plugin loaded (??), not from when you actually listed it."
                         .Loc(age.SinceUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")));
         }
@@ -1033,7 +1304,7 @@ namespace Marketbuddy
 
                 Grey("—");
                 if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip(
+                    ShowTooltip(
                         "Nothing has happened to this item in the records kept since ??: it has just been sitting on the board."
                             .Loc(FormatHistoryCoverage()));
                 return;
@@ -1055,7 +1326,7 @@ namespace Marketbuddy
             Grey(DrawText.N0(" / ", history.OffBoardEvents));
             ImGui.EndGroup();
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip(BuildHistoryTooltip(row));
+                ShowTooltip(BuildHistoryTooltip(row));
         }
 
         /// <summary>「賣出/下架」那一格的滑鼠提示。長說明放這裡，列上只留掃視得出來的兩個數字。</summary>
@@ -1177,7 +1448,15 @@ namespace Marketbuddy
         private static void Tooltip(string text)
         {
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip(text);
+                ShowTooltip(text);
+        }
+
+        /// <summary>滑鼠提示一律全亮：淡色的列（看盤資料太舊）裡的說明也要讀得清楚。</summary>
+        private static void ShowTooltip(string text)
+        {
+            ImGui.PushStyleVar(ImGuiStyleVar.Alpha, 1f);
+            ImGui.SetTooltip(text);
+            ImGui.PopStyleVar();
         }
     }
 }

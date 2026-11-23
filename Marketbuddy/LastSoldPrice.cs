@@ -64,7 +64,7 @@ namespace Marketbuddy
     /// （它們會讀遊戲資料表）；HTTP 與解析全在執行緒池上，<b>續行不會回到 framework 執行緒，
     /// 所以那一段不碰任何遊戲狀態</b>——世界名稱是在 framework 執行緒先建好的唯讀字典。
     /// </summary>
-    internal static class LastSoldPriceSource
+    internal static partial class LastSoldPriceSource
     {
         /// <summary>一次 HTTP 請求最多帶幾件道具（aggregated 端點吃逗號分隔的清單）。</summary>
         private const int BatchSize = 60;
@@ -323,6 +323,8 @@ namespace Marketbuddy
             Volatile.Write(ref successLogged, 0);
             Volatile.Write(ref medianFailureLogged, 0);
             Volatile.Write(ref dcListingFailureLogged, 0);
+            Volatile.Write(ref watchFailureLogged, 0);
+            Volatile.Write(ref watchSuccessLogged, 0);
         }
 
         internal static void Shutdown()
@@ -347,9 +349,11 @@ namespace Marketbuddy
             lock (Gate)
             {
                 Queue.Clear();
+                WatchQueue.Clear();
             }
 
             Cache.Clear();
+            WatchCache.Clear();
             UnknownWorlds.Clear();
             dcWorlds = null;
             dcWorldsForWorld = 0;
@@ -736,14 +740,25 @@ namespace Marketbuddy
                 {
                     uint worldId;
                     List<uint> batch;
+                    var watch = false;
                     lock (Gate)
                     {
+                        // 看盤查詢是使用者按了才排的，排在最近成交價後面：重掛每一格都在等那一條。
                         if (Queue.Count == 0)
-                            break;
-                        worldId = queueWorldId;
-                        batch = Queue.Take(BatchSize).ToList();
-                        foreach (var itemId in batch)
-                            Queue.Remove(itemId);
+                        {
+                            var watchBatch = TakeWatchBatchLocked(out worldId);
+                            if (watchBatch == null)
+                                break;
+                            batch = watchBatch;
+                            watch = true;
+                        }
+                        else
+                        {
+                            worldId = queueWorldId;
+                            batch = Queue.Take(BatchSize).ToList();
+                            foreach (var itemId in batch)
+                                Queue.Remove(itemId);
+                        }
                     }
 
                     try
@@ -754,13 +769,19 @@ namespace Marketbuddy
                     }
                     catch (OperationCanceledException)
                     {
-                        Mark(batch, LastSoldState.Failed);
+                        if (watch)
+                            MarkWatch(batch, worldId, LastSoldState.Failed);
+                        else
+                            Mark(batch, LastSoldState.Failed);
                         break;
                     }
 
                     // FetchAsync 自己吞掉所有例外，而且保證把 batch 裡的每一件都標上結果，
                     // 不然它們會永遠停在「查詢中」。
-                    await FetchAsync(worldId, batch, token).ConfigureAwait(false);
+                    if (watch)
+                        await FetchWatchAsync(worldId, batch, token).ConfigureAwait(false);
+                    else
+                        await FetchAsync(worldId, batch, token).ConfigureAwait(false);
                 }
             }
             catch (Exception e)
@@ -783,7 +804,7 @@ namespace Marketbuddy
                 var again = false;
                 lock (Gate)
                 {
-                    again = Queue.Count > 0;
+                    again = Queue.Count > 0 || WatchQueue.Count > 0;
                 }
 
                 if (again)

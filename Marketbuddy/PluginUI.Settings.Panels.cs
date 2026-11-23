@@ -128,6 +128,25 @@ namespace Marketbuddy
             if (!marketOn) ImGui.EndDisabled();
 
             DrawNestIndicator(2);
+            changed |= ImGui.Checkbox("Also show what you receive, how much is cheaper and how long it takes to sell".Loc(),
+                ref conf.LiveSellListWatchColumns);
+            HelpMarker(
+                "Up to three extra columns, purely informational. What you receive is the whole stack after the market tax of the retainer's city - marked with a ~ when the game has not sent this week's rates yet and the fallback tax set under Price safeguards is used instead. How many items of the same quality are listed for less than yours on your own world, and how many days the cheaper ones plus yours take to sell at the last 7 days' pace, both come from Universalis - but only after you press \"Look up sales\" on the panel; until then the cells show a grey question mark, never a zero. Rows whose Universalis data is more than a day old are faded. Nothing is ever listed, repriced or bought because of these numbers."
+                    .Loc());
+
+            var watchOn = conf.LiveSellListWatchColumns;
+            if (!watchOn) ImGui.BeginDisabled();
+            DrawNestIndicator(3);
+            changed |= ImGui.Checkbox(DrawText.Concat("Net".Loc(), "##mblsnet"), ref conf.LiveSellListShowNet);
+            ImGui.SameLine();
+            changed |= ImGui.Checkbox(DrawText.Concat("Cheaper".Loc(), "##mblscheaper"),
+                ref conf.LiveSellListShowCheaper);
+            ImGui.SameLine();
+            changed |= ImGui.Checkbox(DrawText.Concat("Sells in".Loc(), "##mblsdays"),
+                ref conf.LiveSellListShowDaysToSell);
+            if (!watchOn) ImGui.EndDisabled();
+
+            DrawNestIndicator(2);
             changed |= ImGui.Checkbox("Also show how often each item has actually sold".Loc(),
                 ref conf.LiveSellListSalesHistoryColumn);
             HelpMarker(
