@@ -539,6 +539,9 @@ namespace Marketbuddy
         public bool LiveSellListShowCheaper = true;
         public bool LiveSellListShowDaysToSell = true;
 
+        /// <summary>「多半一次被買幾個」：同一次「查日銷」帶回的最近成交件數眾數；沒按過或沒有成交畫灰色的 <c>?</c>。</summary>
+        public bool LiveSellListShowTypicalBuy = true;
+
         /// <summary>
         /// 「這一趟買到哪了」：在市場板搜尋結果視窗旁畫一塊面板，顯示本趟已買的件數與金額，
         /// 以及「最便宜的前 K 列加起來是幾件、多少錢」。

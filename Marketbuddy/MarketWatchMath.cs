@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace Marketbuddy
 {
@@ -62,5 +64,37 @@ namespace Marketbuddy
         /// <summary>上傳時間不知道（<see cref="DateTime.MinValue"/>）也算太舊。</summary>
         internal static bool IsStale(DateTime uploadedUtc, DateTime nowUtc, TimeSpan maxAge)
             => uploadedUtc == DateTime.MinValue || nowUtc - uploadedUtc > maxAge;
+
+        /// <summary>「多半一次被買幾個」最多看最近幾筆成交。</summary>
+        internal const int BuySizeSales = 50;
+
+        /// <summary>
+        /// 最近成交每一筆的件數 → 眾數與分布。<paramref name="newestFirst"/> 由新到舊，只取前 <paramref name="maxSales"/> 筆正數。
+        /// 一筆都沒有回 null（＝不知道，不是「買 0 個」）。同票取件數較小的：拆小堆比拆大堆不會卡住。
+        /// </summary>
+        internal static BuySizes? SummarizeBuySizes(ReadOnlySpan<int> newestFirst, int maxSales)
+        {
+            var counts = new Dictionary<int, int>();
+            var sales = 0;
+            foreach (var q in newestFirst)
+            {
+                if (sales >= maxSales)
+                    break;
+                if (q <= 0)
+                    continue;
+                counts[q] = counts.TryGetValue(q, out var c) ? c + 1 : 1;
+                sales++;
+            }
+
+            if (sales == 0)
+                return null;
+
+            var ranked = counts.Select(kv => (Size: kv.Key, Sales: kv.Value))
+                .OrderByDescending(b => b.Sales).ThenBy(b => b.Size).ToArray();
+            return new BuySizes(ranked[0].Size, ranked[0].Sales, sales, ranked);
+        }
     }
+
+    /// <summary>一個品質最近成交的件數分布。<see cref="Ranked"/> 依筆數多到少、同筆數依件數小到大。</summary>
+    internal sealed record BuySizes(int Mode, int ModeSales, int Sales, (int Size, int Sales)[] Ranked);
 }

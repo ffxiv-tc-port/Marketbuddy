@@ -12,7 +12,7 @@ using static Marketbuddy.Common.Dalamud;
 namespace Marketbuddy
 {
     /// <summary>
-    /// 即時掛單面板「看盤」欄位的資料：自己世界現在的掛單（單價＋件數）與最近 7 天的每日成交件數。
+    /// 即時掛單面板「看盤」欄位的資料：自己世界現在的掛單（單價＋件數）、最近 7 天的每日成交件數與每筆成交的件數分布。
     /// 🔴 只在使用者按下面板上的「查日銷」時才排進佇列；與最近成交價共用同一個 HttpClient、同一條單一飛行的查詢迴圈
     /// 與同一份請求間隔／退避，最近成交價的佇列優先。純唯讀 HTTP，不送任何遊戲內市場查詢。
     /// </summary>
@@ -42,7 +42,8 @@ namespace Marketbuddy
             DateTime UploadedUtc,
             double UnitsPerDay,
             WatchListings? Listings,
-            long CapPrice);
+            long CapPrice,
+            BuySizes? Buys);
 
         private sealed class WatchEntry
         {
@@ -54,6 +55,8 @@ namespace Marketbuddy
             public double HqPerDay = double.NaN;
             public WatchListings? Nq;
             public WatchListings? Hq;
+            public BuySizes? NqBuys;
+            public BuySizes? HqBuys;
 
             /// <summary>回傳筆數碰到上限時那一批裡最貴的單價；沒碰到是 <see cref="long.MaxValue"/>。</summary>
             public long CapPrice = long.MaxValue;
@@ -133,9 +136,10 @@ namespace Marketbuddy
         internal static WatchView WatchOf(uint itemId, uint worldId, bool hq)
         {
             if (!WatchCache.TryGetValue(itemId, out var e) || e.WorldId != worldId)
-                return new WatchView(LastSoldState.Unknown, DateTime.MinValue, DateTime.MinValue, double.NaN, null, long.MaxValue);
+                return new WatchView(LastSoldState.Unknown, DateTime.MinValue, DateTime.MinValue, double.NaN, null, long.MaxValue,
+                    null);
             return new WatchView(e.State, e.StampUtc, e.UploadedUtc, hq ? e.HqPerDay : e.NqPerDay, hq ? e.Hq : e.Nq,
-                e.CapPrice);
+                e.CapPrice, hq ? e.HqBuys : e.NqBuys);
         }
 
         /// <summary>從佇列取下一批（呼叫端持有 <see cref="Gate"/>）；佇列空回 null。</summary>
@@ -171,11 +175,14 @@ namespace Marketbuddy
             try
             {
                 // 多件與單件的回應形狀不同（單件沒有 items 那一層），fields 兩種都列。
+                // 成交紀錄只拿件數／品質／時間（算「多半一次買幾個」）；速度仍由 entries 決定，與 fields 無關。
                 const string fields =
                     "items.lastUploadTime,items.nqSaleVelocity,items.hqSaleVelocity," +
                     "items.listings.pricePerUnit,items.listings.quantity,items.listings.hq," +
+                    "items.recentHistory.quantity,items.recentHistory.hq,items.recentHistory.timestamp," +
                     "lastUploadTime,nqSaleVelocity,hqSaleVelocity," +
-                    "listings.pricePerUnit,listings.quantity,listings.hq,unresolvedItems";
+                    "listings.pricePerUnit,listings.quantity,listings.hq," +
+                    "recentHistory.quantity,recentHistory.hq,recentHistory.timestamp,unresolvedItems";
                 var url = "https://universalis.app/api/v2/" + worldId + "/" + string.Join(",", batch) +
                           "?listings=" + WatchListingsPerItem + "&entries=" + WatchEntriesPerItem +
                           "&entriesWithin=" + WatchWindowSeconds + "&fields=" + fields;
@@ -278,7 +285,21 @@ namespace Marketbuddy
                 Nq = ListingsOf(listings, false),
                 Hq = ListingsOf(listings, true),
                 CapPrice = capPrice,
+                NqBuys = BuysOf(dto.recentHistory, false),
+                HqBuys = BuysOf(dto.recentHistory, true),
             };
+        }
+
+        /// <summary>這個品質最近成交的件數分布；窗內一筆都沒有回 null。</summary>
+        private static BuySizes? BuysOf(List<WatchSaleDto>? history, bool hq)
+        {
+            if (history == null || history.Count == 0)
+                return null;
+            var newestFirst = history.Where(h => h.hq == hq && h.quantity is > 0)
+                .OrderByDescending(h => h.timestamp ?? 0)
+                .Select(h => h.quantity!.Value)
+                .ToArray();
+            return MarketWatchMath.SummarizeBuySizes(newestFirst, MarketWatchMath.BuySizeSales);
         }
 
         private static double Velocity(double? value)
@@ -312,7 +333,15 @@ namespace Marketbuddy
             public double? nqSaleVelocity { get; set; }
             public double? hqSaleVelocity { get; set; }
             public List<WatchListingDto>? listings { get; set; }
+            public List<WatchSaleDto>? recentHistory { get; set; }
             public Dictionary<string, WatchDto>? items { get; set; }
+        }
+
+        internal sealed class WatchSaleDto
+        {
+            public int? quantity { get; set; }
+            public bool hq { get; set; }
+            public long? timestamp { get; set; }
         }
 
         internal sealed class WatchListingDto

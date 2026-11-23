@@ -144,6 +144,12 @@ namespace Marketbuddy
             ImGui.SameLine();
             changed |= ImGui.Checkbox(DrawText.Concat("Sells in".Loc(), "##mblsdays"),
                 ref conf.LiveSellListShowDaysToSell);
+            ImGui.SameLine();
+            changed |= ImGui.Checkbox(DrawText.Concat("Usually buys".Loc(), "##mblstypicalbuy"),
+                ref conf.LiveSellListShowTypicalBuy);
+            HelpMarker(
+                "How many items buyers on your own world most often took in one purchase, over the latest sales of the same quality - a hint for how big to make your stacks. Comes back with the same \"Look up sales\" request; until you press it, or when nothing sold in the last 7 days, the cell shows a grey question mark, never a zero."
+                    .Loc());
             if (!watchOn) ImGui.EndDisabled();
 
             DrawNestIndicator(2);

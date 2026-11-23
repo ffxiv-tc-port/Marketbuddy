@@ -1,7 +1,8 @@
 using System;
+using System.Linq;
 using Marketbuddy;
 
-// 情境測試：即時掛單看盤欄位（扣稅後實拿、比我便宜的件數、預估幾天賣完、資料新不新）。
+// 情境測試：即時掛單看盤欄位（扣稅後實拿、比我便宜的件數、預估幾天賣完、資料新不新、多半一次買幾個）。
 // 實拿向量取自僱員錢包實際進帳；掛單與每日成交取自 Universalis 台服一個世界的實際回應。
 // 負對照：舊的「先乘 (100-稅) 再捨去」算法在 2,399 gil 那一筆會差 1 gil。
 // 執行：dotnet run -c Release --project tests/MarketWatchTests/MarketWatchTests.csproj（0＝全過、1＝有失敗）
@@ -23,6 +24,8 @@ internal static class Program
         DaysToSellFromRealVelocity();
         DaysToSellEdgeCases();
         StaleRules();
+        BuySizesFromRealHistory();
+        BuySizesEdgeCases();
 
         Console.WriteLine($"MARKETWATCH_DONE pass={passes} fail={failures}");
         return failures == 0 ? 0 : 1;
@@ -138,6 +141,36 @@ internal static class Program
         Check("never uploaded is stale", MarketWatchMath.IsStale(DateTime.MinValue, now, MarketWatchMath.StaleAfter));
         Check("23h is fresh", !MarketWatchMath.IsStale(now.AddHours(-23), now, MarketWatchMath.StaleAfter));
         Check("25h is stale", MarketWatchMath.IsStale(now.AddHours(-25), now, MarketWatchMath.StaleAfter));
+    }
+
+    /// <summary>台服一個世界同一件道具 7 天內的實際成交件數（由新到舊，普通／優質分開）。</summary>
+    private static void BuySizesFromRealHistory()
+    {
+        int[] nq = [23, 5, 3, 1, 1, 4, 2, 1, 3, 1, 2, 49, 28, 1, 1, 2, 2, 1, 2, 3, 2, 2, 11, 3, 2];
+        int[] hq = [3, 1, 2, 2, 1, 3, 99, 99, 1, 3, 8, 1, 1, 2, 1, 5];
+
+        var n = MarketWatchMath.SummarizeBuySizes(nq, MarketWatchMath.BuySizeSales);
+        Check("nq mode 2 (8 of 25)", n is { Mode: 2, ModeSales: 8, Sales: 25 });
+        Check("nq runner-up 1 (7)", n != null && n.Ranked[1] == (1, 7));
+
+        var h = MarketWatchMath.SummarizeBuySizes(hq, MarketWatchMath.BuySizeSales);
+        Check("hq mode 1 (6 of 16)", h is { Mode: 1, ModeSales: 6, Sales: 16 });
+        Check("hq tie 2 and 3 (3 each): smaller first", h != null && h.Ranked[1] == (2, 3) && h.Ranked[2] == (3, 3));
+        Check("hq ranked covers every sale", h != null && h.Ranked.Sum(b => b.Sales) == 16);
+
+        // 只看最新 5 筆：23, 5, 3, 1, 1 ⇒ 1（2 筆）；看全部是 2。
+        var recent = MarketWatchMath.SummarizeBuySizes(nq, 5);
+        Check("cap to newest 5 -> mode 1", recent is { Mode: 1, ModeSales: 2, Sales: 5 });
+    }
+
+    private static void BuySizesEdgeCases()
+    {
+        Check("no sales -> null, not 0", MarketWatchMath.SummarizeBuySizes([], 50) == null);
+        Check("only bad quantities -> null", MarketWatchMath.SummarizeBuySizes([0, -1], 50) == null);
+        Check("tie picks smaller", MarketWatchMath.SummarizeBuySizes([5, 1, 5, 1], 50) is { Mode: 1, ModeSales: 2 });
+        Check("bad quantities do not use up the cap",
+            MarketWatchMath.SummarizeBuySizes([0, -1, 3], 1) is { Mode: 3, Sales: 1 });
+        Check("single sale", MarketWatchMath.SummarizeBuySizes([7], 50) is { Mode: 7, ModeSales: 1, Sales: 1 });
     }
 
     private static void Check(string name, bool ok)

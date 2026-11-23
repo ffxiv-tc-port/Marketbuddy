@@ -146,6 +146,9 @@ namespace Marketbuddy
 
             /// <summary>看盤資料太舊（見 <see cref="MarketWatchMath.StaleAfter"/>）⇒ 整列淡色。</summary>
             public bool WatchStale { get; init; }
+
+            /// <summary>這個品質最近成交的件數分布；null＝不知道（沒查過或窗內沒有成交）。</summary>
+            public BuySizes? Buys { get; init; }
         }
 
         /// <summary>「賣出/下架」那一欄的資料基礎處在什麼狀態。四種在畫面上都要分得出來。</summary>
@@ -576,6 +579,7 @@ namespace Marketbuddy
                     WatchUploadedUtc = watch.UploadedUtc,
                     WatchFetchedUtc = watch.FetchedUtc,
                     WatchStale = watchStale,
+                    Buys = watch.State == LastSoldState.Ready ? watch.Buys : null,
                     SoldState = soldState,
                     // 🔴 與 soldState 一起抄進這一幀的快照，不要留到畫的時候才去讀
                     //    conf：那會讓「這個 Unknown 是暫時的還是永久的」與它算出來的
@@ -696,7 +700,8 @@ namespace Marketbuddy
             }
 
             // 🔴 看盤資料只在這裡按了才查：不在開面板、換僱員或任何事件上自動查。
-            if (conf.LiveSellListWatchColumns && (conf.LiveSellListShowCheaper || conf.LiveSellListShowDaysToSell))
+            if (conf.LiveSellListWatchColumns && (conf.LiveSellListShowCheaper || conf.LiveSellListShowDaysToSell ||
+                                                  conf.LiveSellListShowTypicalBuy))
             {
                 ImGui.SameLine();
                 if (ImGui.SmallButton(DrawText.Concat("Look up sales".Loc(), "##mblivesellistwatch")))
@@ -704,7 +709,8 @@ namespace Marketbuddy
                 if (ImGui.IsItemHovered())
                     ShowTooltip(
                         "Asks Universalis, once, what is listed on your world right now and how much of each item sold there in the last 7 days, for everything this retainer has listed. Pressing it again within 30 minutes does not ask again. Read-only: nothing is listed, repriced or bought because of it."
-                            .Loc());
+                            .Loc() + "\n" +
+                        "The same request also brings back how many items each of those sales took.".Loc());
             }
 
             // 與 /mbuddy「面板」分頁同一份選項（同一個方法畫），在這裡開是為了邊看邊調。
@@ -773,8 +779,9 @@ namespace Marketbuddy
             var showNet = showWatch && conf.LiveSellListShowNet;
             var showCheaper = showWatch && conf.LiveSellListShowCheaper;
             var showDays = showWatch && conf.LiveSellListShowDaysToSell;
+            var showBuys = showWatch && conf.LiveSellListShowTypicalBuy;
             var columns = 1 + (showQty ? 1 : 0) + (showUnit ? 1 : 0) + (showTotal ? 1 : 0) +
-                          (showNet ? 1 : 0) + (showCheaper ? 1 : 0) + (showDays ? 1 : 0) +
+                          (showNet ? 1 : 0) + (showCheaper ? 1 : 0) + (showDays ? 1 : 0) + (showBuys ? 1 : 0) +
                           (showLowWorld ? 1 : 0) + (showLowDc ? 1 : 0) + (showLastSale ? 1 : 0) + (showAge ? 1 : 0) +
                           (showHistory ? 1 : 0) + (showRelist ? 1 : 0);
 
@@ -797,6 +804,8 @@ namespace Marketbuddy
                 ImGui.TableSetupColumn("Cheaper".Loc());
             if (showDays)
                 ImGui.TableSetupColumn("Sells in".Loc());
+            if (showBuys)
+                ImGui.TableSetupColumn("Usually buys".Loc());
             if (showLowWorld)
                 ImGui.TableSetupColumn("Lowest here".Loc());
             if (showLowDc)
@@ -898,6 +907,12 @@ namespace Marketbuddy
                 {
                     ImGui.TableNextColumn();
                     DrawDaysCell(row);
+                }
+
+                if (showBuys)
+                {
+                    ImGui.TableNextColumn();
+                    DrawBuysCell(row);
                 }
 
                 if (showLowWorld)
@@ -1031,6 +1046,56 @@ namespace Marketbuddy
                     .Loc(row.UnitsPerDay.ToString("0.#"), row.Cheaper.ToString("N0"), row.Quantity.ToString("N0"),
                         row.DaysToSell.ToString("0.#"), WatchFreshness(row)));
         }
+
+        /// <summary>「多半一次被買幾個」：最近成交件數的眾數；提示裡列分布。窗內沒有成交畫灰色的 ?，不畫 0。</summary>
+        private static void DrawBuysCell(in Row row)
+        {
+            if (!DrawWatchMissing(row))
+                return;
+
+            if (row.Buys is not { } buys)
+            {
+                Grey("?");
+                if (ImGui.IsItemHovered())
+                    ShowTooltip("Nothing of this quality sold on your world in the last 7 days, as far as Universalis knows, so there is no telling how many people buy at a time.\n??"
+                        .Loc(WatchFreshness(row)));
+                return;
+            }
+
+            ImGui.TextUnformatted(DrawText.N0(buys.Mode));
+            if (!ImGui.IsItemHovered())
+                return;
+
+            ImGui.PushStyleVar(ImGuiStyleVar.Alpha, 1f);
+            ImGui.BeginTooltip();
+            ImGui.TextUnformatted("Of the latest ?? sale(s) of this quality on your world (last 7 days), ?? took ?? at a time."
+                .Loc(buys.Sales, buys.ModeSales, buys.Mode.ToString("N0")));
+            var barWidth = ImGuiEx.FontPx(140f);
+            var shown = Math.Min(buys.Ranked.Length, BuysTooltipRows);
+            for (var i = 0; i < shown; i++)
+            {
+                var (size, sales) = buys.Ranked[i];
+                ImGui.TextUnformatted(DrawText.Loc("x??", size));
+                ImGui.SameLine(ImGuiEx.FontPx(60f));
+                ImGui.ProgressBar((float)sales / buys.Sales, new Vector2(barWidth, 0f),
+                    DrawText.Loc("?? sale(s)", sales));
+            }
+
+            if (buys.Ranked.Length > shown)
+            {
+                var rest = 0;
+                for (var i = shown; i < buys.Ranked.Length; i++)
+                    rest += buys.Ranked[i].Sales;
+                ImGui.TextUnformatted("Other amounts: ?? sale(s)".Loc(rest));
+            }
+
+            ImGui.TextUnformatted(WatchFreshness(row));
+            ImGui.EndTooltip();
+            ImGui.PopStyleVar();
+        }
+
+        /// <summary>分布提示最多列幾種件數，其餘併成一行。</summary>
+        private const int BuysTooltipRows = 6;
 
         /// <summary>
         /// 看盤資料不是 Ready 時畫對應的灰色記號並回 false。「沒按過」「查詢中」「連不上」「沒有資料」四種都要分得出來，一個都不畫 0。
