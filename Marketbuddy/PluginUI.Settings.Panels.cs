@@ -36,7 +36,7 @@ namespace Marketbuddy
             var buyTallyOn = conf.MarketBuyTallyOverlay;
             if (!buyTallyOn) ImGui.BeginDisabled();
             DrawNestIndicator(1);
-            ImGui.SetNextItemWidth(70);
+            ImGui.SetNextItemWidth(FontPx(70));
             if (ImGui.InputInt(DrawText.Concat("rows in the running-total table".Loc(), "##mbbuytallyrows"),
                     ref conf.MarketBuyPreviewRows, 0))
             {
@@ -45,7 +45,7 @@ namespace Marketbuddy
             }
 
             DrawNestIndicator(1);
-            ImGui.SetNextItemWidth(200);
+            ImGui.SetNextItemWidth(FontPx(200));
             ImGui.DragFloat2("Buy panel position (relative to the results window's top right)".Loc(),
                 ref conf.MarketBuyPanelOffset, 1f, -4000f, 4000f, "%.0f");
             if (ImGui.IsItemDeactivatedAfterEdit())
@@ -203,7 +203,7 @@ namespace Marketbuddy
             var current = PanelPlacementMath.Normalize(anchor);
             ImGui.TextUnformatted(label);
             ImGui.SameLine();
-            ImGui.SetNextItemWidth(220);
+            ImGui.SetNextItemWidth(FontPx(220));
             if (ImGui.BeginCombo(DrawText.Concat(id, "combo"), AnchorLabelKeys[(int)current].Loc()))
             {
                 for (var i = 0; i < AnchorLabelKeys.Length; i++)
@@ -224,7 +224,7 @@ namespace Marketbuddy
                 "The panel is placed against this point of the game window and follows it every frame, whatever its position, size or scale. On the left side the panel's right edge stays against the game window however wide the panel gets, so it never covers it. Picking a different point resets the offset to a small gap; \"Fixed spot on the screen\" starts from where the panel is anchored now if that window is open."
                     .Loc(), more);
 
-            ImGui.SetNextItemWidth(200);
+            ImGui.SetNextItemWidth(FontPx(200));
             ImGui.DragFloat2(DrawText.Concat(
                     current == PanelAnchor.Screen ? "Position on the screen".Loc() : "Offset from the anchor".Loc(),
                     DrawText.Concat(id, "offset")),

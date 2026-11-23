@@ -24,7 +24,7 @@ namespace Marketbuddy
             // 三項一起構成「按下下架按鈕會發生什麼事」。
             ImGui.TextUnformatted("Delist destination".Loc());
             ImGui.SameLine();
-            ImGui.SetNextItemWidth(160);
+            ImGui.SetNextItemWidth(FontPx(160));
             if (ImGui.BeginCombo("##mbdelistdest",
                     conf.DelistToRetainerInventory ? "Retainer inventory".Loc() : "Player inventory".Loc()))
             {
@@ -63,7 +63,7 @@ namespace Marketbuddy
             ImGui.TextWrapped("Only delist listings priced above".Loc());
             var aboveLabel = DrawText.Concat("gil per item".Loc(), "##mbdelistaboveprice");
             SameLineOrBelow(aboveRowX, LabeledItemWidth(110, aboveLabel));
-            ImGui.SetNextItemWidth(110);
+            ImGui.SetNextItemWidth(FontPx(110));
             if (ImGui.InputInt(aboveLabel, ref conf.DelistAboveUnitPrice, 0))
             {
                 conf.DelistAboveUnitPrice =

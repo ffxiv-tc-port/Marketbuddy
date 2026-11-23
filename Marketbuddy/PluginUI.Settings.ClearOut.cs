@@ -67,7 +67,7 @@ namespace Marketbuddy
             ImGui.TextWrapped("only items delisted in the last".Loc());
             var daysLabel = DrawText.Concat("days (0 = any time)".Loc(), "##mbqlskipdays");
             SameLineOrBelow(daysRowX, LabeledItemWidth(60, daysLabel));
-            ImGui.SetNextItemWidth(60);
+            ImGui.SetNextItemWidth(FontPx(60));
             if (ImGui.InputInt(daysLabel, ref conf.QuickListSkipDays, 0))
             {
                 conf.QuickListSkipDays = Math.Clamp(conf.QuickListSkipDays, 0, 3650);

@@ -395,8 +395,8 @@ namespace Marketbuddy
             // 原生視窗座標是遊戲畫面座標；多螢幕視窗化時 ImGui 用桌面座標，差主視窗位置。
             ImGui.SetNextWindowPos(anchor + ImGuiHelpers.MainViewport.Pos);
             ImGui.SetNextWindowSizeConstraints(
-                new Vector2(240, 60),
-                new Vector2(float.MaxValue, Math.Max(220f, nativeHeight)));
+                new Vector2(240, 60) * ImGuiEx.FontPx(1f),
+                new Vector2(float.MaxValue, Math.Max(ImGuiEx.FontPx(220f), nativeHeight)));
 
             if (!ImGui.Begin("Marketbuddy_buytally",
                     ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove |
@@ -508,7 +508,7 @@ namespace Marketbuddy
 
             ImGui.TextUnformatted("I want".Loc());
             ImGui.SameLine();
-            ImGui.SetNextItemWidth(90);
+            ImGui.SetNextItemWidth(ImGuiEx.FontPx(90));
             if (ImGui.InputInt(DrawText.Concat("items in total".Loc(), "##mbbuytallytarget"), ref target, 0))
                 target = Math.Clamp(target, 0, 999_999);
 

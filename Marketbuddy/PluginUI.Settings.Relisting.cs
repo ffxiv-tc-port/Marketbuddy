@@ -20,7 +20,7 @@ namespace Marketbuddy
                 conf.Save();
 
             ImGui.SameLine();
-            ImGui.SetNextItemWidth(45);
+            ImGui.SetNextItemWidth(FontPx(45));
             if (ImGui.InputInt("items".Loc(), ref conf.MaximumStackSize, 0))
                 MaximumStackSizeChanged();
 
@@ -32,7 +32,7 @@ namespace Marketbuddy
             ImGui.Spacing();
             ImGui.TextWrapped("Quick listing: hold this key and right-click an item to put it up for sale".Loc());
             DrawNestIndicator(1);
-            ImGui.SetNextItemWidth(100);
+            ImGui.SetNextItemWidth(FontPx(100));
             if (ImGui.BeginCombo("##mbquicklistkey", QuickListKeyLabel(conf.QuickListKeyCode)))
             {
                 foreach (var code in QuickLister.SelectableKeyCodes)
@@ -150,7 +150,7 @@ namespace Marketbuddy
             ImGui.TextWrapped("Only use sales from the last".Loc());
             var saleAgeLabel = DrawText.Concat("day(s) (0 = any age)".Loc(), "##mbsalemaxage");
             SameLineOrBelow(saleAgeRowX, LabeledItemWidth(70, saleAgeLabel));
-            ImGui.SetNextItemWidth(70);
+            ImGui.SetNextItemWidth(FontPx(70));
             if (ImGui.InputInt(saleAgeLabel, ref conf.RelistLastSoldMaxAgeDays, 0))
             {
                 conf.RelistLastSoldMaxAgeDays = Math.Clamp(conf.RelistLastSoldMaxAgeDays, 0, 3650);
@@ -177,7 +177,7 @@ namespace Marketbuddy
             ImGui.TextWrapped("If the market query fails, fall back to survey rows newer than".Loc());
             var fallbackLabel = DrawText.Concat("hour(s) (0 = off)".Loc(), "##mbsurveyfallback");
             SameLineOrBelow(fallbackRowX, LabeledItemWidth(70, fallbackLabel));
-            ImGui.SetNextItemWidth(70);
+            ImGui.SetNextItemWidth(FontPx(70));
             if (ImGui.InputInt(fallbackLabel, ref conf.RelistSurveyFallbackHours, 0))
             {
                 conf.RelistSurveyFallbackHours = Math.Clamp(conf.RelistSurveyFallbackHours, 0, 8760);
@@ -211,7 +211,7 @@ namespace Marketbuddy
             SameLineOrBelow(cacheRowX, LabeledItemWidth(160, cacheLabel));
             // 步進 60（一分鐘）／快速步進 300（五分鐘）：跑一輪多角色時常用的值是
             // 1800（30 分），用預設的無步進版本只能手動輸入，按不出來。
-            ImGui.SetNextItemWidth(160);
+            ImGui.SetNextItemWidth(FontPx(160));
             if (ImGui.InputInt(cacheLabel, ref conf.MarketDataCacheSeconds, 60, 300))
             {
                 conf.MarketDataCacheSeconds = Math.Clamp(conf.MarketDataCacheSeconds, 0, 3600);
@@ -246,7 +246,7 @@ namespace Marketbuddy
                 conf.Save();
 
             DrawNestIndicator(1);
-            ImGui.SetNextItemWidth(45);
+            ImGui.SetNextItemWidth(FontPx(45));
             if (ImGui.InputInt("% market tax (fallback when live rates are unknown)".Loc(),
                     ref conf.MarketTaxPercent, 0))
             {
@@ -259,7 +259,7 @@ namespace Marketbuddy
             ImGui.TextWrapped("Delist items whose target price is below".Loc());
             var minPriceLabel = DrawText.Concat("gil (0 = off)".Loc(), "##mbbatchminprice");
             SameLineOrBelow(minPriceRowX, LabeledItemWidth(90, minPriceLabel));
-            ImGui.SetNextItemWidth(90);
+            ImGui.SetNextItemWidth(FontPx(90));
             if (ImGui.InputInt(minPriceLabel, ref conf.BatchMinPrice, 0))
             {
                 if (conf.BatchMinPrice < 0)
@@ -291,7 +291,7 @@ namespace Marketbuddy
             ImGui.TextWrapped("only when the normal price is at least".Loc());
             var anomalyMinLabel = DrawText.Concat("gil or more (0 = off)".Loc(), "##mbanomalymin");
             SameLineOrBelow(anomalyMinRowX, LabeledItemWidth(110, anomalyMinLabel));
-            ImGui.SetNextItemWidth(110);
+            ImGui.SetNextItemWidth(FontPx(110));
             if (ImGui.InputInt(anomalyMinLabel, ref conf.AnomalyGuardMinNormalPrice, 0))
             {
                 if (conf.AnomalyGuardMinNormalPrice < 0)
@@ -304,7 +304,7 @@ namespace Marketbuddy
             ImGui.TextWrapped("and the cheap price is at least".Loc());
             var anomalyRatioLabel = DrawText.Concat("times cheaper than that".Loc(), "##mbanomalyratio");
             SameLineOrBelow(anomalyRatioRowX, LabeledItemWidth(45, anomalyRatioLabel));
-            ImGui.SetNextItemWidth(45);
+            ImGui.SetNextItemWidth(FontPx(45));
             if (ImGui.InputInt(anomalyRatioLabel, ref conf.AnomalyGuardRatio, 0))
                 conf.Save();
 
@@ -322,7 +322,7 @@ namespace Marketbuddy
                 ImGui.TextWrapped("only when the median is at least".Loc());
                 var historyMinLabel = DrawText.Concat("gil or more (0 = always)".Loc(), "##mbanomalyhistmin");
                 SameLineOrBelow(historyMinRowX, LabeledItemWidth(110, historyMinLabel));
-                ImGui.SetNextItemWidth(110);
+                ImGui.SetNextItemWidth(FontPx(110));
                 if (ImGui.InputInt(historyMinLabel, ref conf.AnomalyHistoryMinMedian, 0))
                 {
                     if (conf.AnomalyHistoryMinMedian < 0)
@@ -374,7 +374,7 @@ namespace Marketbuddy
             ImGui.TextWrapped("Consensus price: the latest".Loc());
             var entriesLabel = DrawText.Concat("sales (3-50)".Loc(), "##mbconsensusentries");
             SameLineOrBelow(entriesRowX, LabeledItemWidth(45, entriesLabel));
-            ImGui.SetNextItemWidth(45);
+            ImGui.SetNextItemWidth(FontPx(45));
             if (ImGui.InputInt(entriesLabel, ref conf.PriceConsensusEntries, 0))
             {
                 conf.PriceConsensusEntries = Math.Clamp(conf.PriceConsensusEntries,
@@ -387,7 +387,7 @@ namespace Marketbuddy
             ImGui.TextWrapped("only sales and other-world listings from the last".Loc());
             var windowLabel = DrawText.Concat("days (1-90)".Loc(), "##mbconsensuswindow");
             SameLineOrBelow(windowRowX, LabeledItemWidth(45, windowLabel));
-            ImGui.SetNextItemWidth(45);
+            ImGui.SetNextItemWidth(FontPx(45));
             if (ImGui.InputInt(windowLabel, ref conf.PriceConsensusWindowDays, 0))
             {
                 conf.PriceConsensusWindowDays = Math.Clamp(conf.PriceConsensusWindowDays,

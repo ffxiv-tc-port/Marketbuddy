@@ -55,7 +55,7 @@ namespace Marketbuddy
                 conf.Save();
 
             ImGui.Spacing();
-            ImGui.SetNextItemWidth(45);
+            ImGui.SetNextItemWidth(FontPx(45));
             if (conf.UndercutUsePercent)
             {
                 if (ImGui.InputInt("##percundercut", ref conf.UndercutPercent, 0))
@@ -67,7 +67,7 @@ namespace Marketbuddy
                     UndercutPriceChanged();
             }
             ImGui.SameLine();
-            ImGui.SetNextItemWidth(55);
+            ImGui.SetNextItemWidth(FontPx(55));
             DrawUndercutTypeSelector();
             ImGui.SameLine();
             ImGui.TextUnformatted("undercut over the selected price".Loc());
@@ -121,7 +121,7 @@ namespace Marketbuddy
             var roundLabel = DrawText.Concat("gil (1 = no rounding)".Loc(), "##mbroundmultiple");
             SameLineOrBelow(roundRowX, LabeledItemWidth(90, roundLabel));
             if (!roundingOn) PushStyleDisabled();
-            ImGui.SetNextItemWidth(90);
+            ImGui.SetNextItemWidth(FontPx(90));
             if (ImGui.InputInt(roundLabel, ref conf.PriceRoundingMultiple, 0))
             {
                 conf.PriceRoundingMultiple = Math.Clamp(conf.PriceRoundingMultiple, 1, Configuration.MAX_PRICE);

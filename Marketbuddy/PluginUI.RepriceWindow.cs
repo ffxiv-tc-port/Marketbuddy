@@ -104,14 +104,14 @@ namespace Marketbuddy
             if (ImGui.Checkbox(DrawText.Concat("Limit stack size to".Loc(), " "), ref conf.UseMaxStackSize))
                 conf.Save();
             ImGui.SameLine();
-            ImGui.SetNextItemWidth(70);
+            ImGui.SetNextItemWidth(FontPx(70));
             if (ImGui.InputInt("items".Loc(), ref conf.MaximumStackSize, 0))
                 MaximumStackSizeChanged();
 
             // 降價獨立成一列：標籤在前，接著金額，再接著單位選單（gil / %）。
             ImGui.TextUnformatted("undercut".Loc());
             ImGui.SameLine();
-            ImGui.SetNextItemWidth(90);
+            ImGui.SetNextItemWidth(FontPx(90));
             if (conf.UndercutUsePercent)
             {
                 if (ImGui.InputInt("##percundercut", ref conf.UndercutPercent, 0))
@@ -124,7 +124,7 @@ namespace Marketbuddy
             }
 
             ImGui.SameLine();
-            ImGui.SetNextItemWidth(70);
+            ImGui.SetNextItemWidth(FontPx(70));
             DrawUndercutTypeSelector();
         }
 

@@ -40,7 +40,8 @@ namespace Marketbuddy
             if (!SettingsVisible) return;
 
             // 視窗 id 換過：舊 id 存的是自動撐高的尺寸，可能比螢幕還高。
-            var scale = ImGuiHelpers.GlobalScale;
+            // 字級基準：使用者的放大多半設在字型上，乘 GlobalScale 對那種設定沒有作用。
+            var scale = FontPx(1f);
             var minSize = new Vector2(560f, 320f) * scale;
             ImGui.SetNextWindowSize(new Vector2(900f, 600f) * scale, ImGuiCond.FirstUseEver);
             ImGui.SetNextWindowSizeConstraints(minSize, Vector2.Max(minSize, ImGui.GetMainViewport().WorkSize));
