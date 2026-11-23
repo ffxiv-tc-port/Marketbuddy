@@ -513,11 +513,11 @@ namespace Marketbuddy
         /// 「即時出售品清單」的看盤欄位總開關：扣稅後實拿、板上比我便宜的件數、預估幾天賣完。
         /// </summary>
         /// <remarks>
-        /// 🔴 <b>預設關閉、純顯示</b>：不會因為任何數字自動改價、上架或下架。
+        /// 🔴 <b>純顯示</b>：不會因為任何數字自動改價、上架或下架。預設開：新設定，舊設定檔沒有這個鍵時吃初始值。
         /// 後兩欄的資料只在使用者按下面板上的「查日銷」時才向 Universalis 查（<c>LastSoldPriceSource.RequestWatch</c>），
         /// 沒按過的列畫灰色的 <c>?</c>，不畫 0。
         /// </remarks>
-        public bool LiveSellListWatchColumns = false;
+        public bool LiveSellListWatchColumns = true;
 
         /// <summary>看盤三欄各自的開關；只在 <see cref="LiveSellListWatchColumns"/> 開著時作用。</summary>
         public bool LiveSellListShowNet = true;
