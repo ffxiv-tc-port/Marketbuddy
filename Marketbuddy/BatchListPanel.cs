@@ -282,11 +282,11 @@ namespace Marketbuddy
                     ImGui.SetTooltip("Not auto-listed: press \"Allow\" on the right to tick it again.".Loc());
             }
 
-            var grey = excluded || c.Protected || c.Estimate <= 0;
+            var grey = excluded || c.Protected || c.RecentlyBelow || c.Estimate <= 0;
             ImGui.SameLine(nameX);
             TextMaybeGrey(NameText(c, excluded), grey);
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip(EstimateTooltip(c));
+                ImGui.SetTooltip(NameTooltip(c, excluded));
             ImGui.SameLine(estimateX);
             TextMaybeGrey(EstimateText(c), grey);
             if (ImGui.IsItemHovered())
@@ -304,17 +304,27 @@ namespace Marketbuddy
             ImGui.PopID();
         }
 
+        /// <summary>名稱的滑鼠提示：近期低於門檻的多一句「為什麼沒預先勾」。</summary>
+        internal static string NameTooltip(BatchLister.Candidate c, bool excluded) => c.RecentlyBelow && !excluded && !c.Protected
+            ? RecentlyBelowTooltip()
+            : EstimateTooltip(c);
+
+        internal static string RecentlyBelowTooltip()
+            => "A price check in the last few days came out below your threshold (or it was delisted for a low price), so pressing start will not list it: from your bags it goes on the \"Sell to the shop\" list instead. That is why it is not ticked in advance; tick it yourself if you want that.".Loc();
+
         private static string EstimateTooltip(BatchLister.Candidate c) => c.Estimate > 0
             ? "Estimate from market data seen in the last few minutes; the real price is checked when it is its turn.".Loc()
             : "? = no recent market data; the price is checked when it is its turn, and it is skipped if nobody is selling it.".Loc();
 
-        private static string NameText(BatchLister.Candidate c, bool excluded)
+        internal static string NameText(BatchLister.Candidate c, bool excluded)
         {
             var line = DrawText.Loc("?? x?? (?? stack(s))", (c.Name, c.Quantity, c.Slots.Count),
                 static (t, a) => t.Loc(a.Name, a.Quantity, a.Item3));
             if (excluded)
                 return DrawText.Concat(line, DrawText.Concat("  ", "(never auto-listed)".Loc()));
-            return c.Protected ? DrawText.Concat(line, DrawText.Concat("  ", "(on a craft list)".Loc())) : line;
+            if (c.Protected)
+                return DrawText.Concat(line, DrawText.Concat("  ", "(on a craft list)".Loc()));
+            return c.RecentlyBelow ? DrawText.Concat(line, DrawText.Concat("  ", "(recently below your threshold)".Loc())) : line;
         }
 
         private static string EstimateText(BatchLister.Candidate c)

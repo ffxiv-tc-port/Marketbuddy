@@ -329,7 +329,7 @@ namespace Marketbuddy
 
                 if (BatchLister.PlayerTickCount() == 0)
                 {
-                    reason = "tick what to list first: open a retainer's sell list with \"Sell items in your inventory\" and tick items in the batch listing panel".Loc();
+                    reason = "tick what to list first: press \"Review ticks\" next to this button, or tick items in the batch listing panel".Loc();
                     return false;
                 }
             }

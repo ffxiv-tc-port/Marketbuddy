@@ -82,6 +82,9 @@ namespace Marketbuddy
 
             /// <summary>在 InventoryTools 的製作清單上。</summary>
             public required bool Protected { get; init; }
+
+            /// <summary>近期查價低於門檻或低價下架過：按開始也不會查價上架（只給面板標示與預先勾選用）。</summary>
+            public bool RecentlyBelow { get; init; }
         }
 
         private enum Phase
@@ -127,10 +130,11 @@ namespace Marketbuddy
 
         private readonly List<uint> readLoaded = new();
         private readonly List<VendorSellSlot> readSlots = new();
-        private readonly HashSet<VendorSellKey> playerTicks = new();
-        private ulong playerTicksContentId;
+        private readonly PlayerTickBook playerTicks = new();
         private DateTime lastViewedUtc = DateTime.MinValue;
         private DateTime nextRefreshUtc = DateTime.MinValue;
+        private DateTime bagViewedUtc = DateTime.MinValue;
+        private DateTime nextBagRefreshUtc = DateTime.MinValue;
         private HashSet<uint> protectedIds = new();
         private bool protectedRead;
 
@@ -180,6 +184,9 @@ namespace Marketbuddy
 
         /// <summary>面板上目前列得出來的道具；沒人在看時不重算。</summary>
         public IReadOnlyList<Candidate> Candidates { get; private set; } = Array.Empty<Candidate>();
+
+        /// <summary>僱員選單旁「檢視勾選」用的玩家背包道具；沒人在看時不重算。</summary>
+        public IReadOnlyList<Candidate> BagCandidates { get; private set; } = Array.Empty<Candidate>();
 
         public BatchListSource CandidateSource { get; private set; }
 
@@ -240,10 +247,7 @@ namespace Marketbuddy
                 return;
             if (CandidateSource == BatchListSource.PlayerBags)
             {
-                if (ticked)
-                    playerTicks.Add(c.Key);
-                else
-                    playerTicks.Remove(c.Key);
+                SetPlayerTicked(c.Key, ticked);
                 return;
             }
 
@@ -263,7 +267,7 @@ namespace Marketbuddy
                 return;
             if (CandidateSource == BatchListSource.PlayerBags)
             {
-                playerTicks.Clear();
+                ClearPlayerTicks();
                 return;
             }
 
@@ -279,12 +283,7 @@ namespace Marketbuddy
                 return;
             if (CandidateSource == BatchListSource.PlayerBags)
             {
-                foreach (var c in Candidates)
-                {
-                    if (!c.Protected && !BatchListExclusions.IsExcluded(c.Key.ItemId))
-                        playerTicks.Add(c.Key);
-                }
-
+                TickAllPlayer(Candidates);
                 return;
             }
 
@@ -325,13 +324,123 @@ namespace Marketbuddy
                 static p => p.RetainerId, static p => p.ItemId);
         }
 
+        // ------------------------------------------------------------------ 玩家背包的勾選（面板與僱員選單旁的檢視視窗共用）
+
+        /// <summary>僱員選單旁的檢視視窗在畫：之後幾秒內每秒重讀一次玩家背包（<see cref="BagCandidates"/>）並視情況預先勾選。</summary>
+        public void MarkBagViewed() => bagViewedUtc = DateTime.UtcNow;
+
+        /// <summary>玩家背包這種道具有沒有勾（不自動上架的一律當沒勾）。</summary>
+        public bool IsPlayerTicked(VendorSellKey key)
+            => playerTicks.ContentId == PlayerState.ContentId && !BatchListExclusions.IsExcluded(key.ItemId) &&
+               playerTicks.Contains(key);
+
+        /// <summary>使用者能不能改勾選：上架進行中不准（與面板原本相同）。</summary>
+        public bool PlayerTicksEditable => !IsRunning;
+
+        public void SetPlayerTicked(VendorSellKey key, bool ticked)
+        {
+            if (!PlayerTicksEditable || (ticked && BatchListExclusions.IsExcluded(key.ItemId)))
+                return;
+            SyncPlayerCharacter();
+            playerTicks.Set(key, ticked);
+        }
+
+        public void ClearPlayerTicks()
+        {
+            if (!PlayerTicksEditable)
+                return;
+            SyncPlayerCharacter();
+            playerTicks.Clear();
+        }
+
+        /// <summary>勾選每一種；在製作清單上的（<see cref="Candidate.Protected"/>）與不自動上架的不勾。</summary>
+        public void TickAllPlayer(IReadOnlyList<Candidate> candidates)
+        {
+            if (!PlayerTicksEditable)
+                return;
+            SyncPlayerCharacter();
+            foreach (var c in candidates)
+            {
+                if (!c.Protected && !BatchListExclusions.IsExcluded(c.Key.ItemId))
+                    playerTicks.Set(c.Key, true);
+            }
+        }
+
+        /// <summary>換了角色：勾選清空（<see cref="PlayerTickBook"/>），製作清單重讀。</summary>
+        private void SyncPlayerCharacter()
+        {
+            if (playerTicks.SyncCharacter(PlayerState.ContentId))
+                protectedRead = false;
+        }
+
+        private void EnsureProtectedRead()
+        {
+            if (protectedRead)
+                return;
+            protectedIds = BagSorter.ReadProtectedIds(out _);
+            protectedRead = true;
+        }
+
+        /// <summary>
+        /// 預先勾選（設定 <see cref="Configuration.BatchListPreTick"/>）：勾選是空的、這個角色這次遊戲期間還沒預先勾過也沒動過才勾。
+        /// 🔴 市場紅線：只改勾選，絕不開始上架。低於門檻記憶還沒讀完時先不勾（不然會把近期低於門檻的也勾進去）。
+        /// </summary>
+        private void MaybePreTick(IReadOnlyList<Candidate> bagCandidates)
+        {
+            // 巡迴中不預先勾：巡迴每到一名僱員都重讀這份勾選，只能由使用者改。
+            if (!conf.BatchListPreTick || IsRunning || tour.IsRunning || bagCandidates.Count == 0)
+                return;
+            if ((conf.BatchListRememberBelowThreshold && !BelowThresholdLedger.Loaded) ||
+                (conf.QuickListSkipLowPriceDelisted && !LowPriceDelistLedger.Loaded))
+                return;
+
+            var eligible = new List<(VendorSellKey, bool)>(bagCandidates.Count);
+            int onCraftList = 0, excluded = 0, below = 0;
+            foreach (var c in bagCandidates)
+            {
+                var isExcluded = BatchListExclusions.IsExcluded(c.Key.ItemId);
+                if (c.Protected)
+                    onCraftList++;
+                else if (isExcluded)
+                    excluded++;
+                else if (c.RecentlyBelow)
+                    below++;
+                eligible.Add((c.Key, PlayerTickBook.PreTickEligible(c.Protected, isExcluded, c.RecentlyBelow)));
+            }
+
+            var n = playerTicks.TryPreTick(true, PlayerState.ContentId, eligible);
+            if (n > 0)
+                Log.Information($"[BatchList] 預先勾選玩家背包 {n} 種（共 {bagCandidates.Count} 種；沒勾：製作清單 {onCraftList}、" +
+                                $"不自動上架 {excluded}、近期低於門檻或低價下架過 {below}）；只勾選，要按開始才上架");
+        }
+
+        /// <summary>近期查價低於門檻（記憶）或低價下架過：按開始時不查價、直接當成低於門檻的那些（不看 Ctrl 重查）。</summary>
+        private bool RecentlyBelowThreshold(VendorSellKey key, DateTime nowUtc)
+        {
+            if (QuickListSkipList.ShouldSkip(conf, key.ItemId, key.Hq, out _))
+                return true;
+            return conf.BatchListRememberBelowThreshold && BelowThresholdLedger.Loaded &&
+                   BelowThresholdLedger.TryGet(key, out var record) &&
+                   BelowThresholdRule.ShouldSkip(record, nowUtc, conf.BatchListBelowThresholdDays, false,
+                       engine.CurrentTaxPercent(), conf.BatchDelistBelowVendor, conf.BatchMinPrice);
+        }
+
+        private void RefreshBagCandidates(DateTime now)
+        {
+            nextBagRefreshUtc = now.AddMilliseconds(CandidateRefreshMs);
+            SyncPlayerCharacter();
+            EnsureProtectedRead();
+            BagCandidates = BuildCandidates(PlayerBagTypes, protectedIds, withEstimate: true);
+            MaybePreTick(BagCandidates);
+        }
+
         /// <summary>這個角色在批次上架面板（玩家背包）勾了幾種道具；不自動上架的不算。換了角色、勾選還沒清掉時回 0。</summary>
         internal int PlayerTickCount()
         {
-            if (playerTicksContentId != PlayerState.ContentId)
+            if (playerTicks.ContentId != PlayerState.ContentId)
                 return 0;
             var n = 0;
-            foreach (var key in playerTicks)
+            foreach (var key in playerTicks.Keys)
             {
                 if (!BatchListExclusions.IsExcluded(key.ItemId))
                     n++;
@@ -347,7 +456,7 @@ namespace Marketbuddy
         internal List<Pick> BagTourPicks(IReadOnlySet<VendorSellKey> drop)
         {
             var picks = new List<Pick>();
-            if (playerTicksContentId != PlayerState.ContentId || playerTicks.Count == 0)
+            if (playerTicks.ContentId != PlayerState.ContentId || playerTicks.Count == 0)
                 return picks;
             foreach (var c in BuildCandidates(PlayerBagTypes, new HashSet<uint>(), withEstimate: false))
             {
@@ -378,26 +487,17 @@ namespace Marketbuddy
         private void RefreshCandidates(DateTime now)
         {
             nextRefreshUtc = now.AddMilliseconds(CandidateRefreshMs);
-            var contentId = PlayerState.ContentId;
-            if (contentId != playerTicksContentId)
-            {
-                playerTicks.Clear();
-                playerTicksContentId = contentId;
-                protectedRead = false;
-            }
+            SyncPlayerCharacter();
 
             var retainerOwner = VendorSeller.GetRetainerInventoryAddonId();
             CandidateSource = retainerOwner != 0 ? BatchListSource.RetainerBags : BatchListSource.PlayerBags;
             CandidateWindowOpen = retainerOwner != 0 || VendorSeller.GetInventoryAddonId() != 0;
 
-            if (!protectedRead)
-            {
-                protectedIds = BagSorter.ReadProtectedIds(out _);
-                protectedRead = true;
-            }
-
+            EnsureProtectedRead();
             Candidates = BuildCandidates(CandidateSource == BatchListSource.RetainerBags ? RetainerBagTypes : PlayerBagTypes,
                 protectedIds, withEstimate: true);
+            if (CandidateSource == BatchListSource.PlayerBags)
+                MaybePreTick(Candidates);
         }
 
         private List<Candidate> BuildCandidates(InventoryType[] types, HashSet<uint> protectedItems, bool withEstimate)
@@ -421,6 +521,7 @@ namespace Marketbuddy
             }
 
             HashSet<ulong>? own = null;
+            var nowUtc = DateTime.UtcNow;
             var result = new List<Candidate>(order.Count);
             foreach (var key in order)
             {
@@ -441,6 +542,7 @@ namespace Marketbuddy
                     Key = key, Name = name, Slots = slots, Quantity = qty,
                     Estimate = withEstimate ? Estimate(key, own ??= OwnRetainers.Snapshot(conf)) : -1,
                     Protected = protectedItems.Contains(key.ItemId),
+                    RecentlyBelow = withEstimate && RecentlyBelowThreshold(key, nowUtc),
                 });
             }
 
@@ -693,6 +795,8 @@ namespace Marketbuddy
             if (conf.BatchListEnabled && gui.IsRetainerSellListOpen && now >= nextRefreshUtc &&
                 (now - lastViewedUtc).TotalMilliseconds < ViewTimeoutMs)
                 RefreshCandidates(now);
+            if (conf.BagListTourEnabled && now >= nextBagRefreshUtc && (now - bagViewedUtc).TotalMilliseconds < ViewTimeoutMs)
+                RefreshBagCandidates(now);
         }
 
         private void TrackContextMenu()

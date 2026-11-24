@@ -59,8 +59,20 @@ namespace Marketbuddy
             HelpMarker(
                 "Off by default. Tick items in the panel and press the button: each stack is priced one at a time with the same market check and the same pricing rules as the relist (no parallel queries, the server spacing is kept), and only then put up for sale at that price through the game's own right-click \"Put Up for Sale\". Anything that would sell below the NPC price or below your minimum is not listed; items nobody is selling are skipped rather than listed at the cap. Nothing starts on its own, and ESC, Cancel, a right-click, a confirm key or AutoRetainer starting stops it."
                     .Loc());
+            DrawBatchListPreTick();
             DrawBelowThresholdMemory();
             DrawBatchListExclusions();
+        }
+
+        /// <summary>預先勾選可上架的道具（預設開）。面板與背包上架巡迴共用同一份勾選，所以只要其中一個開著就有用。</summary>
+        private void DrawBatchListPreTick()
+        {
+            DrawNestIndicator(1);
+            if (ImGui.Checkbox("Tick items that can be listed in advance (from your bags)".Loc(), ref conf.BatchListPreTick))
+                conf.Save();
+            HelpMarker(
+                "On by default. When this character has nothing ticked for your bags yet (first time, or after switching characters), the batch listing panel and \"List from your bags at retainers with free slots\" tick every item that can be listed, except items on a craft list, items on your \"never auto-list\" list, and items whose price check came out below your threshold in the last few days (or that were delisted for a low price). It only ticks them - nothing is listed until you press start. Once it has ticked items, or once you change the ticks yourself, it leaves this character's ticks alone until you switch characters; items you unticked are not ticked again during this game session."
+                    .Loc());
         }
 
         /// <summary>賣給商店：併入原有堆疊也整疊賣（預設關，只在上一層開著時可勾）。</summary>

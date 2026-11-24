@@ -204,6 +204,7 @@ namespace Marketbuddy
 
         private readonly BatchListSummaryView bagTourSummaryView = new("mbbagtour");
         private TextSlot<int> bagTourLabel;
+        private BagTickView? bagTickView;
 
         /// <summary>
         /// 背包上架到有空位的僱員：一段式（與全僱員補上架一致）。上架的是批次上架面板（玩家背包）裡勾的道具；
@@ -233,6 +234,12 @@ namespace Marketbuddy
                 ImGui.SetTooltip(
                     "Visits this character's retainers one by one through \"Sell items in your inventory\" and lists the items you ticked in the batch listing panel from your bags, priced exactly like the batch listing button. Moves on when a retainer's market fills up; ends when nothing ticked is left in your bags or every retainer has been visited. Retainers whose market was full when Marketbuddy last saw it are skipped. No relisting. ESC or Cancel stops it."
                         .Loc());
+            }
+
+            if (marketbuddy.BatchLister is { } bagLister)
+            {
+                bagTickView ??= new BagTickView(bagLister);
+                bagTickView.Draw();
             }
 
             DrawBagTourResult(tour);

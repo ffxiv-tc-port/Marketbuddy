@@ -80,6 +80,12 @@ namespace Marketbuddy
         /// <summary>出售品視窗旁的「批次上架」面板。<b>預設關閉。</b>🔴 市場紅線：開著也只是多一個面板，要按開始才動。</summary>
         public bool BatchListEnabled = false;
 
+        /// <summary>
+        /// 這個角色玩家背包的勾選是空的時候，先把可上架的道具勾起來（不在製作清單、不在不自動上架清單、近期沒低於門檻）。<b>預設開。</b>
+        /// 🔴 市場紅線：只是勾選，上架仍要使用者按開始；規則見 <see cref="PlayerTickBook"/>。
+        /// </summary>
+        public bool BatchListPreTick = true;
+
         /// <summary>僱員選單旁的「全僱員補上架」按鈕。<b>預設關閉。</b>不掛進多角色巡迴。</summary>
         public bool ReplenishTourEnabled = false;
 
