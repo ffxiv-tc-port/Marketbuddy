@@ -28,6 +28,13 @@ namespace Marketbuddy
         /// 🔴 只由使用者按鈕（兩段確認）開始；不掛進 <see cref="MultiCharacterTour"/>，沒有事件接手。
         /// </summary>
         Tidy,
+
+        /// <summary>
+        /// 背包上架到有空位的僱員：逐名僱員從「出售（玩家所持物品）」進去，把玩家背包裡在批次上架面板勾過的道具上架，
+        /// 直到背包沒有可上的或僱員都走過；不重掛。依紀錄確知已滿的僱員不去。
+        /// 🔴 只由使用者按鈕開始；不掛進 <see cref="MultiCharacterTour"/>，沒有事件接手。
+        /// </summary>
+        BagList,
     }
 
     /// <summary>
@@ -76,7 +83,13 @@ namespace Marketbuddy
 
             /// <summary>整理一輪：這名僱員不補上架，換到僱員物品欄那兩步也省掉。</summary>
             public bool SkipReplenish;
+
+            public bool BagListStarted;
+            public bool BagChecked;
         }
+
+        /// <summary>背包上架巡迴：每名僱員一列（給收工的彙整表）。</summary>
+        internal readonly record struct BagTourRetainerRow(string Name, int Listed, int ShopList, int Skipped, string Outcome);
 
         /// <summary>進出售品視窗之後要等哪一個物品欄視窗。</summary>
         private enum BagWait
@@ -132,6 +145,21 @@ namespace Marketbuddy
         private int totalReplenished, totalReplenishKept, totalReplenishSkipped;
         private int totalVendorSold, totalVendorSkipped;
         private long totalVendorGil;
+
+        // 背包上架巡迴：整趟的道具彙整、每名僱員的結果、依紀錄已滿沒去的僱員數、背包是否已經沒有可上的。
+        private BagTourLedger bagLedger = new();
+        private readonly List<BagTourRetainerRow> bagRetainerRows = new();
+        private int bagSkippedFull, bagListed, bagShopList, bagSkipped;
+        private bool bagEmptied;
+
+        /// <summary>最近一趟背包上架巡迴的道具彙整（跑的途中是空的）。</summary>
+        public IReadOnlyList<BatchListSummaryRow> BagTourSummary { get; private set; } = Array.Empty<BatchListSummaryRow>();
+
+        /// <summary>最近一趟背包上架巡迴每名僱員的結果（跑的途中是空的）。</summary>
+        public IReadOnlyList<BagTourRetainerRow> BagTourRetainers { get; private set; } = Array.Empty<BagTourRetainerRow>();
+
+        /// <summary>最近一趟背包上架巡迴的收工說明；空＝還沒跑過。</summary>
+        public string BagTourEndText { get; private set; } = string.Empty;
 
         public bool IsRunning => queue.IsRunning;
 
@@ -279,6 +307,33 @@ namespace Marketbuddy
                     return false;
             }
 
+            if (mode == TourMode.BagList)
+            {
+                if (!Configuration.GetOrLoad().BagListTourEnabled)
+                {
+                    reason = "the feature is turned off in /mbuddy".Loc();
+                    return false;
+                }
+
+                if (AutoRetainerBridge.ExternalDriveActive)
+                {
+                    reason = "not available while AutoRetainer hands over a character".Loc();
+                    return false;
+                }
+
+                if (BatchLister?.IsAvailable != true)
+                {
+                    reason = "the right-click menu hook is not available".Loc();
+                    return false;
+                }
+
+                if (BatchLister.PlayerTickCount() == 0)
+                {
+                    reason = "tick what to list first: open a retainer's sell list with \"Sell items in your inventory\" and tick items in the batch listing panel".Loc();
+                    return false;
+                }
+            }
+
             if (!gui.IsRetainerListOpen)
             {
                 reason = "retainer list is not open".Loc();
@@ -290,6 +345,17 @@ namespace Marketbuddy
             {
                 reason = "retainer data not ready".Loc();
                 return false;
+            }
+
+            if (mode == TourMode.BagList)
+            {
+                if (CollectBagTargets(out _).Count == 0)
+                {
+                    reason = "every retainer's market is full as far as Marketbuddy has seen".Loc();
+                    return false;
+                }
+
+                return true;
             }
 
             var applySkipList = mode == TourMode.Delist;
@@ -336,7 +402,8 @@ namespace Marketbuddy
             }
 
             var isDelist = mode == TourMode.Delist;
-            var targets = CollectTargets(isDelist, mode);
+            var bagSkippedAtStart = 0;
+            var targets = mode == TourMode.BagList ? CollectBagTargets(out bagSkippedAtStart) : CollectTargets(isDelist, mode);
             // 被使用者的跳過名單擋掉的僱員數（重掛巡迴一律 0，名單不作用在它身上）。
             var skippedRetainers = isDelist ? CollectTargets(false).Count - targets.Count : 0;
             Mode = mode;
@@ -349,6 +416,17 @@ namespace Marketbuddy
             totalVendorGil = 0;
             aborting = false;
             tourStoppedForSpace = false;
+            if (mode == TourMode.BagList)
+            {
+                bagLedger = new BagTourLedger();
+                bagRetainerRows.Clear();
+                bagSkippedFull = bagSkippedAtStart;
+                bagListed = bagShopList = bagSkipped = 0;
+                bagEmptied = false;
+                BagTourSummary = Array.Empty<BatchListSummaryRow>();
+                BagTourRetainers = Array.Empty<BagTourRetainerRow>();
+                BagTourEndText = string.Empty;
+            }
 
             // 目的地在開跑當下定案，跟每個引擎自己抄的那份是同一個來源、同一個時點。
             tourToRetainerInventory = mode == TourMode.Delist && Configuration.GetOrLoad().DelistToRetainerInventory;
@@ -373,11 +451,20 @@ namespace Marketbuddy
                 var firstWait = mode switch
                 {
                     TourMode.Replenish => BagWait.Retainer,
-                    TourMode.Tidy => BagWait.Player,
+                    TourMode.Tidy or TourMode.BagList => BagWait.Player,
                     _ => BagWait.None,
                 };
                 queue.Enqueue($"enter sell list {target.Name}", TimeSpan.FromSeconds(NavStepWatchdogSeconds),
                     () => TickEnterSellList(ctx, sellEntryText, firstWait));
+                if (mode == TourMode.BagList)
+                {
+                    queue.Enqueue($"list from bags {target.Name}", TimeSpan.FromSeconds(ReplenishWatchdogSeconds),
+                        () => TickBagList(target, ctx));
+                    queue.Enqueue($"leave {target.Name}", TimeSpan.FromSeconds(NavStepWatchdogSeconds),
+                        () => TickLeaveRetainer(ctx, quitEntryText));
+                    continue;
+                }
+
                 queue.Enqueue($"batch {target.Name}", TimeSpan.FromSeconds(BatchWatchdogSeconds),
                     () => TickRunBatch(target, ctx));
                 if (mode == TourMode.Tidy)
@@ -407,6 +494,7 @@ namespace Marketbuddy
                 TourMode.Delist => "[Marketbuddy] Delisting all retainers: ?? to visit...".Loc(targets.Count),
                 TourMode.Replenish => "[Marketbuddy] Relisting and replenishing all retainers: ?? to visit...".Loc(targets.Count),
                 TourMode.Tidy => "[Marketbuddy] Tidying up this character: ?? retainer(s) to visit (relist, sell what was delisted to the shop, replenish)...".Loc(targets.Count),
+                TourMode.BagList => "[Marketbuddy] Listing from your bags at retainers with free slots: up to ?? retainer(s) to visit...".Loc(targets.Count),
                 _ => "[Marketbuddy] Relisting all retainers: ?? to visit...".Loc(targets.Count),
             });
 
@@ -415,6 +503,12 @@ namespace Marketbuddy
             // 名單空著（預設）時這一行不會出現。
             if (skippedRetainers > 0)
                 ChatGui.Print("[Marketbuddy] ?? retainer(s) skipped: on your skip list.".Loc(skippedRetainers));
+            if (mode == TourMode.BagList)
+            {
+                Log.Information($"[BatchList] 背包上架巡迴開始：要去 {targets.Count} 名僱員、依紀錄已滿不去 {bagSkippedAtStart} 名、勾選 {BatchLister?.PlayerTickCount() ?? 0} 種");
+                if (bagSkippedAtStart > 0)
+                    ChatGui.Print("[Marketbuddy] ?? retainer(s) skipped: their market was full when Marketbuddy last saw it.".Loc(bagSkippedAtStart));
+            }
         }
 
         public void CancelByButton() => Abort("cancelled by user".Loc());
@@ -485,6 +579,21 @@ namespace Marketbuddy
                 targets.Add(retainer);
             }
 
+            return targets;
+        }
+
+        /// <summary>背包上架巡迴要去的僱員：依本插件看過的出售清單確知已滿的不去，有空位與不知道的都去（不看遊戲計數）。</summary>
+        private static List<RetainerTarget> CollectBagTargets(out int skippedFull)
+        {
+            var all = EnumerateRetainers();
+            var useSnapshots = RetainerSlotsReader.SnapshotsUsable;
+            var slots = new List<RetainerSlots>(all.Count);
+            foreach (var r in all)
+                slots.Add(RetainerSlotsReader.Of(r.RetainerId, r.Name, r.Listed, useSnapshots));
+            var targets = new List<RetainerTarget>(all.Count);
+            foreach (var i in MarketSlots.PlanVisits(slots, RetainerMarketPrice.SlotCount))
+                targets.Add(all[i]);
+            skippedFull = all.Count - targets.Count;
             return targets;
         }
 
@@ -569,10 +678,13 @@ namespace Marketbuddy
             CurrentRetainerNumber = number;
             CurrentRetainerName = target.Name;
 
+            if (Mode == TourMode.BagList && !BagTourShouldVisit(target, ctx))
+                return TickTaskResult.Done;
+
             var retainerManager = RetainerManager.Instance();
             var retainer = retainerManager == null ? null : retainerManager->GetRetainerBySortedIndex(target.SortedIndex);
             if (retainer == null || retainer->RetainerId != target.RetainerId ||
-                (retainer->MarketItemCount == 0 &&
+                (retainer->MarketItemCount == 0 && Mode != TourMode.BagList &&
                  !(ReplenishLike && WantsReplenish(target.RetainerId, 0))))
             {
                 // Retainer list changed since the tour started: skip this one.
@@ -626,6 +738,8 @@ namespace Marketbuddy
                     return TickTaskResult.Continue;
                 Log.Information(wait == BagWait.Retainer
                     ? $"[BatchList] 全僱員補上架：出售品視窗開了 {RetainerBagWaitMs / 1000} 秒僱員物品欄視窗都沒就緒，這名僱員不補上架"
+                    : Mode == TourMode.BagList
+                    ? $"[BatchList] 背包上架巡迴：出售品視窗開了 {RetainerBagWaitMs / 1000} 秒玩家物品欄視窗都沒就緒，這名僱員不上架"
                     : $"[Marketbuddy] 整理一輪：出售品視窗開了 {RetainerBagWaitMs / 1000} 秒玩家物品欄視窗都沒就緒，這名僱員不賣給商店");
                 return TickTaskResult.Done;
             }
@@ -826,6 +940,131 @@ namespace Marketbuddy
             return TickTaskResult.Done;
         }
 
+        /// <summary>
+        /// 背包上架巡迴：選這名僱員之前判一次（每名只判一次）。背包沒有可上的＝之後都不去；依紀錄確知已滿＝這名不去。
+        /// 回 false 時已經標好 <see cref="RetainerContext.SkipRemainingSteps"/>。
+        /// </summary>
+        private bool BagTourShouldVisit(RetainerTarget target, RetainerContext ctx)
+        {
+            if (ctx.BagChecked)
+                return !ctx.SkipRemainingSteps;
+            ctx.BagChecked = true;
+            var remaining = bagEmptied || BatchLister == null ? 0 : BatchLister.BagTourPicks(bagLedger.Dropped).Count;
+            var slots = RetainerSlotsReader.Of(target.RetainerId, target.Name, target.Listed, RetainerSlotsReader.SnapshotsUsable);
+            var step = BagListTourRules.Decide(remaining, slots.Listed, RetainerMarketPrice.SlotCount);
+            if (step == BagTourStep.Visit)
+                return true;
+
+            ctx.SkipRemainingSteps = true;
+            if (step == BagTourStep.BagEmpty)
+            {
+                if (!bagEmptied)
+                    Log.Information($"[BatchList] 背包上架巡迴：背包裡已經沒有勾選、可上架的道具，{target.Name} 起不再拜訪");
+                bagEmptied = true;
+                return false;
+            }
+
+            bagSkippedFull++;
+            Log.Information($"[BatchList] 背包上架巡迴：{target.Name} 依紀錄市場已滿（{slots.Listed}/{RetainerMarketPrice.SlotCount}），不拜訪");
+            return false;
+        }
+
+        /// <summary>
+        /// 背包上架巡迴：在這名僱員面前從玩家背包批次上架勾選的道具（定價與門檻規則同批次上架按鈕）。
+        /// 市場滿了、沒開始、玩家物品欄視窗沒開＝換下一名；其餘停下的原因整趟停。
+        /// </summary>
+        private TickTaskResult TickBagList(RetainerTarget target, RetainerContext ctx)
+        {
+            if (ctx.SkipRemainingSteps)
+                return TickTaskResult.Done;
+            var lister = BatchLister;
+            if (!ctx.BagListStarted)
+            {
+                ctx.BagListStarted = true;
+                if (lister == null || !ctx.PlayerBagReady)
+                {
+                    NoteBagRetainer(target.Name, 0, 0, 0, "your inventory window did not open".Loc());
+                    return TickTaskResult.Done;
+                }
+
+                var picks = lister.BagTourPicks(bagLedger.Dropped);
+                if (picks.Count == 0)
+                {
+                    bagEmptied = true;
+                    return TickTaskResult.Done;
+                }
+
+                if (!lister.Start(picks, BatchListSource.PlayerBags, forTour: true))
+                {
+                    Log.Information($"[BatchList] 背包上架巡迴：{target.Name} 沒有開始，換下一名");
+                    NoteBagRetainer(target.Name, 0, 0, 0, "did not start".Loc());
+                    return TickTaskResult.Done;
+                }
+
+                return TickTaskResult.Continue;
+            }
+
+            if (lister == null || lister.IsRunning)
+                return TickTaskResult.Continue;
+
+            bagLedger.AddRun(lister.Summary);
+            var skipped = lister.SkippedCount;
+            var outcome = lister.End switch
+            {
+                BatchListEnd.Finished => "done".Loc(),
+                BatchListEnd.MarketFull => "market full".Loc(),
+                BatchListEnd.NextRetainer => "could not list here (??)".Loc(lister.EndReason),
+                _ => "stopped: ??".Loc(lister.EndReason),
+            };
+            NoteBagRetainer(target.Name, lister.ListedCount, lister.VendorQueuedCount, skipped, outcome);
+            bagListed += lister.ListedCount;
+            bagShopList += lister.VendorQueuedCount;
+            bagSkipped += skipped;
+            if (lister.End == BatchListEnd.Stopped)
+            {
+                Abort(lister.EndReason.Length > 0 ? lister.EndReason : "batch aborted".Loc());
+                return TickTaskResult.Continue;
+            }
+
+            retainersDone++;
+            return TickTaskResult.Done;
+        }
+
+        private void NoteBagRetainer(string name, int listed, int shopList, int skipped, string outcome)
+        {
+            bagRetainerRows.Add(new BagTourRetainerRow(name, listed, shopList, skipped, outcome));
+            Log.Information($"[BatchList] 背包上架巡迴：{name} 上架 {listed}、改賣商店 {shopList}、跳過 {skipped}（{outcome}）");
+        }
+
+        /// <summary>背包上架巡迴收工（跑完或中止都走這裡）：彙整表交給面板，聊天視窗與 log 各一份摘要。</summary>
+        private void FinishBagTour(string? abortReason)
+        {
+            BagTourSummary = bagLedger.Rows();
+            BagTourRetainers = bagRetainerRows.ToArray();
+            var left = 0;
+            foreach (var row in BagTourSummary)
+            {
+                if (row.Kind == BatchListResultKind.NotProcessed)
+                    left += row.Stacks;
+            }
+
+            var why = abortReason != null
+                ? "stopped: ??".Loc(abortReason)
+                : bagEmptied || left == 0
+                    ? "everything ticked in your bags has been dealt with".Loc()
+                    : "every retainer with free slots has been visited".Loc();
+            BagTourEndText = why;
+            Log.Information(
+                $"[BatchList] 背包上架巡迴收工（{why}）：拜訪 {bagRetainerRows.Count} 名、依紀錄已滿沒去 {bagSkippedFull} 名，" +
+                $"上架 {bagListed}、改賣商店 {bagShopList}、跳過 {bagSkipped}、剩 {left} 疊沒輪到");
+            var line = "[Marketbuddy] Listing from your bags: ?? listed, ?? added to the shop list, ?? skipped at ?? retainer(s); ?? stack(s) not reached - ??"
+                .Loc(bagListed, bagShopList, bagSkipped, bagRetainerRows.Count, left, why);
+            if (abortReason != null)
+                ChatGui.PrintError(line);
+            else
+                ChatGui.Print(line);
+        }
+
         private static int CurrentMarketItemCount()
         {
             var retainerManager = RetainerManager.Instance();
@@ -968,7 +1207,33 @@ namespace Marketbuddy
         private void OnQueueAborted(string reason)
         {
             ReleaseSuppressionIfHeld();
+            var retainerName = CurrentRetainerName;
             CurrentRetainerName = string.Empty;
+
+            if (Mode == TourMode.BagList)
+            {
+                // 巡迴帶起來的那一批跟著停，不留在背景繼續上架；它做到哪裡也算進彙整。
+                if (BatchLister is { IsRunning: true } bagLister)
+                {
+                    bagLister.EmergencyStop(reason);
+                    bagLedger.AddRun(bagLister.Summary);
+                    NoteBagRetainer(retainerName, bagLister.ListedCount, bagLister.VendorQueuedCount, bagLister.SkippedCount,
+                        "stopped: ??".Loc(reason));
+                    bagListed += bagLister.ListedCount;
+                    bagShopList += bagLister.VendorQueuedCount;
+                    bagSkipped += bagLister.SkippedCount;
+                }
+
+                FinishBagTour(reason);
+                if (AutoRetainerBridge.IsBusy)
+                {
+                    AutoRetainerBridge.ArmAvailabilityNotice();
+                    ChatGui.Print("[Marketbuddy] Wait for AutoRetainer to finish, then press the button again.".Loc());
+                }
+
+                TourAborted?.Invoke(reason);
+                return;
+            }
 
             // 整理一輪自己帶起來的兩段跟著停，不留在背景繼續賣或上架。
             if (Mode == TourMode.Tidy)
@@ -1035,6 +1300,12 @@ namespace Marketbuddy
         {
             ReleaseSuppressionIfHeld();
             CurrentRetainerName = string.Empty;
+            if (Mode == TourMode.BagList)
+            {
+                FinishBagTour(null);
+                TourCompleted?.Invoke();
+                return;
+            }
             if (Mode != TourMode.Delist)
             {
                 ChatGui.Print("[Marketbuddy] All retainers done: ?? visited, ?? repriced, ?? skipped, ?? delisted, ?? failed"

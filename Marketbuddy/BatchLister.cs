@@ -136,9 +136,10 @@ namespace Marketbuddy
 
         private Configuration conf => Configuration.GetOrLoad();
 
-        /// <summary>巡迴驅動的補上架由哪一個開關管：全僱員補上架，或整理一輪自己的開關。</summary>
+        /// <summary>巡迴驅動的上架由哪一個開關管：全僱員補上架、整理一輪或背包上架巡迴各自的開關。</summary>
         private bool TourMayReplenish
-            => conf.ReplenishTourEnabled || (tour.Mode == TourMode.Tidy && conf.TidyRoundEnabled);
+            => conf.ReplenishTourEnabled || (tour.Mode == TourMode.Tidy && conf.TidyRoundEnabled) ||
+               (tour.Mode == TourMode.BagList && conf.BagListTourEnabled);
 
         public bool IsRunning { get; private set; }
         public BatchListSource Source { get; private set; }
@@ -322,6 +323,41 @@ namespace Marketbuddy
             var conf = Configuration.GetOrLoad();
             return BatchListRules.HasEligiblePick(conf.ReplenishPicks, retainerId, conf.BatchListExcludedItems,
                 static p => p.RetainerId, static p => p.ItemId);
+        }
+
+        /// <summary>這個角色在批次上架面板（玩家背包）勾了幾種道具；不自動上架的不算。換了角色、勾選還沒清掉時回 0。</summary>
+        internal int PlayerTickCount()
+        {
+            if (playerTicksContentId != PlayerState.ContentId)
+                return 0;
+            var n = 0;
+            foreach (var key in playerTicks)
+            {
+                if (!BatchListExclusions.IsExcluded(key.ItemId))
+                    n++;
+            }
+
+            return n;
+        }
+
+        /// <summary>
+        /// 背包上架巡迴用：玩家背包裡勾選過的道具的每一疊（與面板按開始時同一份勾選），扣掉 <paramref name="drop"/>。
+        /// 🔴 只在 framework 執行緒呼叫。
+        /// </summary>
+        internal List<Pick> BagTourPicks(IReadOnlySet<VendorSellKey> drop)
+        {
+            var picks = new List<Pick>();
+            if (playerTicksContentId != PlayerState.ContentId || playerTicks.Count == 0)
+                return picks;
+            foreach (var c in BuildCandidates(PlayerBagTypes, new HashSet<uint>(), withEstimate: false))
+            {
+                if (!playerTicks.Contains(c.Key) || drop.Contains(c.Key) || BatchListExclusions.IsExcluded(c.Key.ItemId))
+                    continue;
+                foreach (var s in c.Slots)
+                    picks.Add(new Pick(s, c.Name));
+            }
+
+            return picks;
         }
 
         /// <summary>這一次按下開始會上架的格數（勾選的道具的每一疊）。</summary>

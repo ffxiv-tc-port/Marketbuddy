@@ -93,6 +93,12 @@ namespace Marketbuddy
         public bool TidyRoundEnabled = false;
 
         /// <summary>
+        /// 僱員選單旁的「背包上架到有空位的僱員」按鈕。<b>預設關閉。</b>
+        /// 🔴 市場紅線：只是多一顆按鈕；按了才逐名僱員上架背包裡勾選的道具，不掛進多角色巡迴、沒有事件接手。
+        /// </summary>
+        public bool BagListTourEnabled = false;
+
+        /// <summary>
         /// 不自動上架的道具（道具 id，NQ／HQ 一起）：批次上架、全僱員補上架、整理一輪的補上架都跳過。<b>預設空。</b>
         /// 只讓自動上架少做；手動與快速上架不受影響。改動一律經 <see cref="BatchListExclusions"/>。
         /// </summary>

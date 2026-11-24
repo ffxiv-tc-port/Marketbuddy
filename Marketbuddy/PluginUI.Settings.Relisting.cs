@@ -450,6 +450,14 @@ namespace Marketbuddy
                     .Loc());
 
             ImGui.Spacing();
+            if (ImGui.Checkbox("Offer \"List from your bags at retainers with free slots\" next to the retainer list".Loc(),
+                    ref conf.BagListTourEnabled))
+                conf.Save();
+            HelpMarker(
+                "Off by default. One button that visits this character's retainers in turn, enters \"Sell items in your inventory\" and lists the items you ticked in the batch listing panel from your bags - same pricing, thresholds and \"Don't auto-list\" list as the batch listing button. When a retainer's market fills up it moves on to the next; it ends when nothing ticked is left in your bags or every retainer has been visited, then shows a summary next to the retainer list. Retainers whose market was full the last time Marketbuddy saw their sell list are skipped; retainers it has never seen are visited. Nothing is relisted. It only runs when you press it - never from AutoRetainer, never in the multi-character round. ESC, Cancel or the fleet emergency stop ends it."
+                    .Loc());
+
+            ImGui.Spacing();
             ImGui.Separator();
             ImGui.Spacing();
             if (ImGui.Checkbox("Relist across characters together with AutoRetainer's multi mode".Loc(),

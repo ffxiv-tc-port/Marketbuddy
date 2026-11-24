@@ -59,6 +59,8 @@ namespace Marketbuddy
                     DrawReplenishTourButton(tour);
                 if (conf.TidyRoundEnabled)
                     DrawTidyRoundButton(tour);
+                if (conf.BagListTourEnabled)
+                    DrawBagListTourButton(tour);
                 DrawDelistTourButton(tour);
             }
 
@@ -198,6 +200,86 @@ namespace Marketbuddy
                     "Relists every retainer like the button above, then fills that retainer's free market slots from its own inventory - only with the items you ticked for that retainer in the batch listing panel, each priced first. Items below your thresholds stay in the retainer's inventory. ESC, Cancel or any confirm key stops it."
                         .Loc());
             }
+        }
+
+        private readonly BatchListSummaryView bagTourSummaryView = new("mbbagtour");
+        private TextSlot<int> bagTourLabel;
+
+        /// <summary>
+        /// 背包上架到有空位的僱員：一段式（與全僱員補上架一致）。上架的是批次上架面板（玩家背包）裡勾的道具；
+        /// 收工後的彙整表畫在按鈕下面。
+        /// </summary>
+        private void DrawBagListTourButton(MultiRetainerTour tour)
+        {
+            var canStart = tour.CanStart(TourMode.BagList, out var reason);
+            var disabled = !canStart && !AutoRetainerBridge.IsBusy;
+            if (disabled)
+                ImGui.BeginDisabled();
+            var ticked = marketbuddy.BatchLister?.PlayerTickCount() ?? 0;
+            if (ImGui.Button(bagTourLabel.Get(ticked,
+                    static n => "List from your bags at retainers with free slots (?? ticked)".Loc(n) + "##mbbagtourstart")))
+                tour.Start(TourMode.BagList);
+            if (disabled)
+            {
+                ImGui.EndDisabled();
+                if (!string.IsNullOrEmpty(reason) && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                {
+                    using var tooltipAlpha = new ImRaii.Style().Push(ImGuiStyleVar.Alpha, 1f);
+                    ImGui.SetTooltip(reason);
+                }
+            }
+            else if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(
+                    "Visits this character's retainers one by one through \"Sell items in your inventory\" and lists the items you ticked in the batch listing panel from your bags, priced exactly like the batch listing button. Moves on when a retainer's market fills up; ends when nothing ticked is left in your bags or every retainer has been visited. Retainers whose market was full when Marketbuddy last saw it are skipped. No relisting. ESC or Cancel stops it."
+                        .Loc());
+            }
+
+            DrawBagTourResult(tour);
+        }
+
+        private void DrawBagTourResult(MultiRetainerTour tour)
+        {
+            if (tour.BagTourEndText.Length == 0)
+                return;
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudGrey);
+            ImGui.TextUnformatted(DrawText.Loc("Last bag listing round: ??", tour.BagTourEndText));
+            ImGui.PopStyleColor();
+            var retainers = tour.BagTourRetainers;
+            if (retainers.Count > 0 && ImGui.TreeNode(DrawText.Concat(
+                    DrawText.Loc("Retainers visited (??)", retainers.Count), "##mbbagtourretainers")))
+            {
+                if (ImGui.BeginTable("##mbbagtourretainertable", 5,
+                        ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerH))
+                {
+                    ImGui.TableSetupColumn("Retainer".Loc());
+                    ImGui.TableSetupColumn("Listed".Loc());
+                    ImGui.TableSetupColumn("Shop list".Loc());
+                    ImGui.TableSetupColumn("Skipped".Loc());
+                    ImGui.TableSetupColumn("Result".Loc());
+                    ImGui.TableHeadersRow();
+                    foreach (var row in retainers)
+                    {
+                        ImGui.TableNextRow();
+                        ImGui.TableNextColumn();
+                        ImGui.TextUnformatted(row.Name);
+                        ImGui.TableNextColumn();
+                        ImGui.TextUnformatted(DrawText.N0(row.Listed));
+                        ImGui.TableNextColumn();
+                        ImGui.TextUnformatted(DrawText.N0(row.ShopList));
+                        ImGui.TableNextColumn();
+                        ImGui.TextUnformatted(DrawText.N0(row.Skipped));
+                        ImGui.TableNextColumn();
+                        ImGui.TextUnformatted(row.Outcome);
+                    }
+
+                    ImGui.EndTable();
+                }
+
+                ImGui.TreePop();
+            }
+
+            bagTourSummaryView.Draw(tour.BagTourSummary);
         }
 
         private DateTime tidyArmedUntil = DateTime.MinValue;
