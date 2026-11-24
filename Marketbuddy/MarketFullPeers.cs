@@ -45,7 +45,7 @@ namespace Marketbuddy
 
         private static int Free(int capacity, int listed) => Math.Max(0, capacity - listed);
 
-        private static string Age(DateTime atUtc, DateTime nowUtc)
+        internal static string Age(DateTime atUtc, DateTime nowUtc)
         {
             var age = nowUtc - atUtc;
             if (age.TotalMinutes < 1)

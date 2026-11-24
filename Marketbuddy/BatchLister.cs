@@ -208,6 +208,21 @@ namespace Marketbuddy
         /// <summary>右鍵選單的 hook 與 Addon 表第 99 列都在，才做得了。</summary>
         public bool IsAvailable => quickLister?.CanPutUpForSale == true;
 
+        /// <summary>
+        /// 這名僱員市場已佔格數（含已送出、還沒出現在市場格的）與上限，和開始後的「市場已滿」判斷同一份讀法。
+        /// 讀不到回 false（不猜）。當幀讀、不留指標。
+        /// </summary>
+        internal bool TryReadThisRetainerMarket(out int used, out int capacity)
+        {
+            used = 0;
+            capacity = 0;
+            if (quickLister == null)
+                return false;
+            quickLister.TryReadFullMarket(out var occupied, out var inFlight, out capacity);
+            used = occupied + inFlight;
+            return capacity > 0;
+        }
+
         // ------------------------------------------------------------------ 面板：候選與勾選
 
         public void MarkViewed() => lastViewedUtc = DateTime.UtcNow;

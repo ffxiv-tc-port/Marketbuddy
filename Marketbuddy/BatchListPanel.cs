@@ -49,6 +49,13 @@ namespace Marketbuddy
         private int skippedTipCount = -1;
         private string skippedTip = string.Empty;
 
+        // 其他僱員的空位：每秒最多重讀一次（列舉僱員與組字串會配置）。
+        private const int PeersRefreshMs = 1000;
+        private DateTime peersReadUtc = DateTime.MinValue;
+        private string peersLine = string.Empty;
+        private string peersTip = string.Empty;
+        private TextSlot<(int Used, int Capacity)> slotsText;
+
         public BatchListPanel(BatchLister lister)
         {
             this.lister = lister;
@@ -79,7 +86,8 @@ namespace Marketbuddy
             Grey(lister.CandidateSource == BatchListSource.RetainerBags
                 ? "From: this retainer's inventory (your ticks are remembered for \"Replenish all retainers\")".Loc()
                 : "From: your bags".Loc());
-            DrawStartButton();
+            var full = DrawMarketSlots();
+            DrawStartButton(full);
             DrawCandidates();
             DrawLastResult();
         }
@@ -103,18 +111,72 @@ namespace Marketbuddy
         private string ResultLine() => resultText.Get((lister.ListedCount, lister.VendorQueuedCount, lister.SkippedCount),
             static k => "?? listed, ?? added to the shop list, ?? skipped".Loc(k.Listed, k.Vendor, k.Skipped));
 
-        private void DrawStartButton()
+        /// <summary>
+        /// 「這名僱員市場 n/20」與其他僱員的空位；回傳這名僱員確知已滿。
+        /// 讀法與開始後的「市場已滿」判斷相同；讀不到畫「?」、不擋開始。
+        /// </summary>
+        private bool DrawMarketSlots()
+        {
+            var known = lister.TryReadThisRetainerMarket(out var used, out var capacity);
+            var full = known && MarketSlots.KnownFull(used, capacity);
+            RefreshPeers(known ? capacity : RetainerMarketPrice.SlotCount);
+
+            var text = slotsText.Get((known ? used : -1, capacity), static k => k.Used < 0
+                ? "This retainer's market: ?".Loc()
+                : "This retainer's market: ??/??".Loc(k.Used, k.Capacity));
+            if (full)
+                ImGui.TextColored(ImGuiColors.DalamudOrange, text);
+            else if (known)
+                ImGui.TextUnformatted(text);
+            else
+                Grey(text);
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(known
+                    ? peersTip
+                    : "This retainer's market can't be read yet, so the start button is not held back.".Loc() + "\n" + peersTip);
+
+            if (full && peersLine.Length > 0)
+            {
+                ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + ImGuiEx.FontPx(360f));
+                ImGui.TextUnformatted(peersLine);
+                ImGui.PopTextWrapPos();
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip(peersTip);
+            }
+
+            return full;
+        }
+
+        private void RefreshPeers(int capacity)
+        {
+            var now = DateTime.UtcNow;
+            if ((now - peersReadUtc).TotalMilliseconds < PeersRefreshMs)
+                return;
+            peersReadUtc = now;
+            var peers = RetainerSlotsReader.Read(BatchReprice.ActiveRetainerId());
+            peersLine = MarketSlots.PeersLine(peers, capacity);
+            peersTip = MarketSlots.PeersTooltip(peers, capacity, now);
+            if (peers != null && !RetainerSlotsReader.SnapshotsUsable)
+                peersTip += "\n" + "Other retainers are only known once Marketbuddy has seen their sell list with \"Record what disappears from your retainers' listings\" on.".Loc();
+        }
+
+        private void DrawStartButton(bool marketFull)
         {
             var stacks = lister.TickedStacks();
             var canStart = lister.CanStart(lister.CandidateSource, false, out var reason);
-            if (canStart && stacks == 0)
+            if (canStart && marketFull)
+            {
+                canStart = false;
+                reason = "this retainer's market is full - pressing start would stop right away. Free slots of your other retainers are listed above.".Loc();
+            }
+            else if (canStart && stacks == 0)
             {
                 canStart = false;
                 reason = "nothing is ticked to list".Loc();
             }
 
-            // AutoRetainer 是唯一的阻擋時照樣讓人按，按下去會說明原因（與重掛按鈕相同）。
-            var disabled = !canStart && !AutoRetainerBridge.IsBusy;
+            // AutoRetainer 是唯一的阻擋時照樣讓人按，按下去會說明原因（與重掛按鈕相同）；確知已滿一律停用。
+            var disabled = (!canStart && !AutoRetainerBridge.IsBusy) || marketFull;
             if (disabled)
                 ImGui.BeginDisabled();
             if (ImGuiEx.MarketActionButton(startLabel.Get(stacks, static n => "List ?? ticked stack(s)".Loc(n) + "##mbbatchliststart"), "mbbatchliststart"))
