@@ -1351,7 +1351,57 @@ namespace Marketbuddy
                 PumpRepriceQueue();
             if (guardReplay != null)
                 PumpGuardReplay();
+            PrefetchLastSoldPrices();
             UpdateSuppression();
+        }
+
+        /// <summary>這一段快速上架已經替哪些道具排過最近成交價查詢；管線清空就整份忘掉。</summary>
+        private readonly HashSet<uint> lastSoldPrefetched = [];
+
+        private readonly List<uint> lastSoldPrefetchScratch = [];
+
+        /// <summary>
+        /// 快速上架的道具一進管線（右鍵選了出售那一刻）就排 Universalis 的最近成交價查詢，
+        /// 不等它上架完、輪到引擎定價時才問。批次上架那幾件已經照算好的價上架、不再定價，不排。
+        /// 🔴 framework 執行緒；只排查詢，不碰任何上架或改價。
+        /// </summary>
+        private void PrefetchLastSoldPrices()
+        {
+            if (PendingCount == 0)
+            {
+                lastSoldPrefetched.Clear();
+                return;
+            }
+
+            if (!conf.RelistUseLastSoldPrice)
+                return;
+
+            lastSoldPrefetchScratch.Clear();
+            foreach (var pending in pendingMenuSelects)
+            {
+                if (pending.Price == null)
+                    AddLastSoldPrefetch(pending.ItemId);
+            }
+
+            if (deferredConfirm is { Pending.Price: null } deferred)
+                AddLastSoldPrefetch(deferred.Pending.ItemId);
+            foreach (var watch in watches)
+            {
+                if (watch.NeedsReprice)
+                    AddLastSoldPrefetch(watch.ItemId);
+            }
+
+            foreach (var entry in repriceQueue)
+                AddLastSoldPrefetch(entry.ItemId);
+
+            if (lastSoldPrefetchScratch.Count > 0)
+                BatchReprice.RequestLastSoldPrices(lastSoldPrefetchScratch);
+        }
+
+        private void AddLastSoldPrefetch(uint itemId)
+        {
+            if (itemId != 0 && lastSoldPrefetched.Add(itemId))
+                lastSoldPrefetchScratch.Add(itemId);
         }
 
         private void ExpirePendingMenuSelects()

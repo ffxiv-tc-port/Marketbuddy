@@ -57,12 +57,15 @@ namespace Marketbuddy
         private const int ForeignOfferingsReportSeconds = 60; // 「不是我們在等的」掛單封包最多幾秒記一次累計筆數
 
         /// <summary>
-        /// 「以歷史最近賣出價重掛」時，一格最多等 Universalis 這麼久。
+        /// 「以歷史最近賣出價重掛」時，一格最多等 Universalis 這麼久（最長的那一種；單件與斷路器見 <see cref="LastSoldWaitPolicy"/>）。
         /// 逾時之後<b>不是失敗</b>：那一格落回既有的市場比價流程，也就是它原本的定價方式。
         /// 🔴 必須明顯小於 <see cref="SlotWatchdogSeconds"/>：那個看門狗一到期是<b>整批中止</b>，
         /// 而「網路慢」不該讓整輪重掛死掉。
         /// </summary>
-        private const int LastSoldWaitMs = 25000;
+        private const int LastSoldWaitMs = LastSoldWaitPolicy.BatchWaitMs;
+
+        /// <summary>「拿不到最近成交價」的聊天提示，跨批次最多這麼久講一次（單件的批次每件都是新的一批）。</summary>
+        private static readonly TimeSpan LastSoldFallbackNoticeInterval = TimeSpan.FromMinutes(5);
 
         /// <summary>Backoff before retry attempt N: escalates fast, then caps low - never the multi-second climb of a classic exponential backoff.</summary>
         private static int RetryBackoffFor(int attempt) => Math.Min(RetryBackoffBaseMs * attempt, RetryBackoffCapMs);
@@ -218,6 +221,9 @@ namespace Marketbuddy
 
         /// <summary>這一批已經講過一次「拿不到歷史賣出價，改用市場比價」了嗎。每批重設。</summary>
         private bool lastSoldFallbackWarned;
+
+        /// <summary>上一次真的印出那句提示的時間；不隨批次重設。</summary>
+        private DateTime lastSoldFallbackNoticeAt = DateTime.MinValue;
 
         private static double MsSince(DateTime t) =>
             t == DateTime.MinValue ? -1 : (DateTime.UtcNow - t).TotalMilliseconds;
@@ -1133,10 +1139,24 @@ namespace Marketbuddy
                     if (state == LastSoldState.Unknown)
                         RequestLastSoldPrices([job.ItemId]);
                 }
-                else if ((now - job.LastSoldWaitStart).TotalMilliseconds > LastSoldWaitMs)
+
+                // 斷路器開著時上限是 0：查詢照樣排著，答案回來之前這一格先照原本的方式定價。
+                var limitMs = LastSoldWaitPolicy.LimitMs(job.QuickListed || job.ProbeOnly,
+                    LastSoldPriceSource.IsStruggling);
+                var waitedMs = (now - job.LastSoldWaitStart).TotalMilliseconds;
+                if (waitedMs >= limitMs)
                 {
                     job.LastSoldDone = true;
-                    WarnLastSoldFallback(job, "timed out");
+                    if (limitMs == 0)
+                    {
+                        WarnLastSoldFallback(job, "Universalis struggling, not waiting");
+                    }
+                    else
+                    {
+                        LastSoldPriceSource.NoteCallerTimeout(limitMs);
+                        WarnLastSoldFallback(job, $"timed out after {waitedMs:F0} ms (limit {limitMs} ms)");
+                    }
+
                     return null;
                 }
 
@@ -1193,7 +1213,7 @@ namespace Marketbuddy
         /// <summary>
         /// 🔴 只從 framework 執行緒呼叫：它會讀 <c>PlayerState</c>。
         /// </summary>
-        private static void RequestLastSoldPrices(IReadOnlyCollection<uint> itemIds)
+        internal static void RequestLastSoldPrices(IReadOnlyCollection<uint> itemIds)
         {
             var worldId = PlayerState.ContentId == 0 ? 0u : PlayerState.CurrentWorld.RowId;
             LastSoldPriceSource.Request(worldId, itemIds);
@@ -1201,16 +1221,19 @@ namespace Marketbuddy
 
         /// <summary>
         /// 歷史賣出價這條路走不通、這一格改用市場比價時的告知。
-        /// 一整批只講一次——每一格都講會把真正的改價結果洗掉。
+        /// 一整批只講一次、跨批次 <see cref="LastSoldFallbackNoticeInterval"/> 內也只講一次——
+        /// 快速上架與批次上架每件各是一批，只靠每批一次的話每件都會講。
         /// </summary>
         private void WarnLastSoldFallback(SlotJob job, string reason)
         {
             Log.Information(
                 $"{Diag} LASTSOLD-FALLBACK item={job.ItemId} '{job.Name}' reason={reason}; using market pricing instead");
 
-            if (lastSoldFallbackWarned)
+            var now = DateTime.UtcNow;
+            if (lastSoldFallbackWarned || now - lastSoldFallbackNoticeAt < LastSoldFallbackNoticeInterval)
                 return;
             lastSoldFallbackWarned = true;
+            lastSoldFallbackNoticeAt = now;
             ChatGui.PrintError(
                 "[Marketbuddy] Could not get the last sale price from Universalis; those items keep their usual pricing."
                     .Loc());

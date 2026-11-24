@@ -568,6 +568,7 @@ namespace Marketbuddy
             IsRunning = true;
             AutoRetainerBridge.AcquireSuppression("batch listing");
             suppressionHeld = true;
+            PrefetchLastSoldPrices(DateTime.UtcNow);
 
             Log.Information(
                 $"[BatchList] 開始：{jobs.Count} 疊，來源={(source == BatchListSource.PlayerBags ? "玩家背包" : "僱員物品欄")}，" +
@@ -576,6 +577,28 @@ namespace Marketbuddy
             if (!forTour)
                 ChatGui.Print("[Marketbuddy] Batch listing ?? stack(s)...".Loc(jobs.Count));
             return true;
+        }
+
+        /// <summary>
+        /// 這一批會查價的道具一開始就一次排進 Universalis 查詢（一個請求最多問 60 件），
+        /// 不要每件輪到時才各自排一次、各等一次。會被跳過不查價的那幾件不排。
+        /// 🔴 只從 framework 執行緒呼叫；只在使用者（或他開的巡迴）按了開始之後才會走到這裡。
+        /// </summary>
+        private void PrefetchLastSoldPrices(DateTime now)
+        {
+            if (!conf.RelistUseLastSoldPrice)
+                return;
+            var itemIds = new HashSet<uint>();
+            foreach (var job in jobs)
+            {
+                var key = job.Pick.Slot.Key;
+                if (!QuickListSkipList.ShouldSkip(conf, key.ItemId, key.Hq, out _) &&
+                    !TryRememberedBelow(key, now, out _))
+                    itemIds.Add(key.ItemId);
+            }
+
+            if (itemIds.Count > 0)
+                BatchReprice.RequestLastSoldPrices(itemIds);
         }
 
         public void CancelByButton() => Stop("cancelled by user".Loc(), BatchListEnd.Stopped);

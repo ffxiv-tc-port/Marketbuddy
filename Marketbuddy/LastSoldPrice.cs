@@ -924,11 +924,19 @@ namespace Marketbuddy
                 }
 
                 Volatile.Write(ref failureLogged, 0);
+                NoteHealthy();
                 LogFirstSuccess(batch.Count, unresolved.Count, recovered.Count);
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                // 外掛卸載；不是錯誤。
+                Mark(batch, LastSoldState.Failed);
             }
             catch (OperationCanceledException)
             {
-                // 外掛卸載／換世界；不是錯誤。
+                // 🔴 token 沒被取消卻擲取消＝HttpClient 自己的逾時（.NET 以 TaskCanceledException 回報）。
+                //    那是 Universalis 太慢，要讓斷路器看得到，不能當成卸載默默吞掉。
+                NoteFailure($"timeout {RequestTimeoutSeconds}s");
                 Mark(batch, LastSoldState.Failed);
             }
             catch (Exception e)
@@ -1027,6 +1035,33 @@ namespace Marketbuddy
                 };
         }
 
+        private static readonly LastSoldHealth Health = new();
+
+        /// <summary>
+        /// Universalis 剛逾時或失敗過、之後還沒成功過一次（2 分鐘內）。任何執行緒都可以讀。
+        /// 為真時呼叫端不等還沒查到的道具（見 <see cref="LastSoldWaitPolicy"/>）；查詢本身照常排、照常送。
+        /// </summary>
+        internal static bool IsStruggling => Health.IsStruggling(DateTime.UtcNow);
+
+        /// <summary>呼叫端等到上限還沒拿到答案。只記斷路器，不設退避：請求還在路上，不是失敗。</summary>
+        internal static void NoteCallerTimeout(int waitedMs) => NoteTrouble($"waited {waitedMs} ms without an answer");
+
+        private static void NoteTrouble(string reason)
+        {
+            if (!Health.NoteTrouble(DateTime.UtcNow))
+                return;
+            Log.Information(
+                $"[Marketbuddy] 歷史賣出價：Universalis 回應太慢或失敗（{reason}）。" +
+                $"接下來 {LastSoldHealth.WindowMs / 60000} 分鐘內還沒查到的道具不再等它，直接照原本的方式定價；" +
+                "查詢照常在背景進行，成功一次就恢復等待。");
+        }
+
+        private static void NoteHealthy()
+        {
+            if (Health.NoteSuccess(DateTime.UtcNow))
+                Log.Information("[Marketbuddy] 歷史賣出價：Universalis 恢復回應，重掛與上架恢復等待最近成交價。");
+        }
+
         /// <summary>
         /// 記一次失敗並退避。
         /// 要使用者回報的診斷寫 <c>Information</c>；同一段連續失敗只寫第一行，避免洗版。
@@ -1035,6 +1070,7 @@ namespace Marketbuddy
         {
             Interlocked.Exchange(ref backoffUntilTicks,
                 DateTime.UtcNow.AddMilliseconds(FailureBackoffMs).Ticks);
+            NoteTrouble(reason);
 
             if (Interlocked.Exchange(ref failureLogged, 1) != 0)
                 return;
