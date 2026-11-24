@@ -745,7 +745,7 @@ namespace Marketbuddy
             // 使用者沒按按鈕的話 BeginBatch 根本不會被呼叫。
             if (conf.RelistUseLastSoldPrice)
             {
-                var itemIds = new HashSet<uint>();
+                var itemIds = new List<uint>(jobs.Count);
                 foreach (var job in jobs)
                     itemIds.Add(job.ItemId);
                 RequestLastSoldPrices(itemIds);
@@ -1211,12 +1211,13 @@ namespace Marketbuddy
         internal static string FormatSoldAt(DateTime soldAtUtc) => RelistPricing.FormatAt(soldAtUtc);
 
         /// <summary>
+        /// 使用者按了之後正在等的查詢：照 <paramref name="itemIds"/> 的順序（＝處理順序）排在背景預取前面，每批最多 20 件。
         /// 🔴 只從 framework 執行緒呼叫：它會讀 <c>PlayerState</c>。
         /// </summary>
         internal static void RequestLastSoldPrices(IReadOnlyCollection<uint> itemIds)
         {
             var worldId = PlayerState.ContentId == 0 ? 0u : PlayerState.CurrentWorld.RowId;
-            LastSoldPriceSource.Request(worldId, itemIds);
+            LastSoldPriceSource.Request(worldId, itemIds, urgent: true);
         }
 
         /// <summary>

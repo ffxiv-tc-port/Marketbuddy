@@ -580,7 +580,7 @@ namespace Marketbuddy
         }
 
         /// <summary>
-        /// 這一批會查價的道具一開始就一次排進 Universalis 查詢（一個請求最多問 60 件），
+        /// 這一批會查價的道具一開始就照處理順序一次排進 Universalis 查詢（每批最多 20 件，先上架的先查），
         /// 不要每件輪到時才各自排一次、各等一次。會被跳過不查價的那幾件不排。
         /// 🔴 只從 framework 執行緒呼叫；只在使用者（或他開的巡迴）按了開始之後才會走到這裡。
         /// </summary>
@@ -588,7 +588,7 @@ namespace Marketbuddy
         {
             if (!conf.RelistUseLastSoldPrice)
                 return;
-            var itemIds = new HashSet<uint>();
+            var itemIds = new List<uint>(jobs.Count);
             foreach (var job in jobs)
             {
                 var key = job.Pick.Slot.Key;

@@ -66,9 +66,6 @@ namespace Marketbuddy
     /// </summary>
     internal static partial class LastSoldPriceSource
     {
-        /// <summary>一次 HTTP 請求最多帶幾件道具（aggregated 端點吃逗號分隔的清單）。</summary>
-        private const int BatchSize = 60;
-
         /// <summary>兩次 HTTP 請求之間的最小間隔。Universalis 是公開服務，不要打快。</summary>
         private const int MinRequestGapMs = 1200;
 
@@ -226,7 +223,8 @@ namespace Marketbuddy
         /// <summary>🔴 只在持有這把鎖時碰 <see cref="Queue"/>／<see cref="queueWorldId"/>。鎖內不做 I/O、不寫 log、不碰 ImGui。</summary>
         private static readonly object Gate = new();
 
-        private static readonly HashSet<uint> Queue = [];
+        /// <summary>每批大小（背景 60 件、使用者正在等的 20 件）與先後見 <see cref="LastSoldRequestQueue"/>。</summary>
+        private static readonly LastSoldRequestQueue Queue = new();
 
         private static uint queueWorldId;
 
@@ -647,7 +645,10 @@ namespace Marketbuddy
         /// 🔴 只從 framework 執行緒呼叫。
         /// </summary>
         /// <param name="worldId">目前所在世界的 id；0＝還沒登入，直接不做事。</param>
-        internal static void Request(uint worldId, IReadOnlyCollection<uint> itemIds)
+        /// <param name="urgent">
+        /// 使用者按了重掛／上架、正在等這幾件的答案：照 <paramref name="itemIds"/> 的順序排在背景預取前面，每批最多 20 件。
+        /// </param>
+        internal static void Request(uint worldId, IReadOnlyCollection<uint> itemIds, bool urgent = false)
         {
             if (http == null || worldId == 0 || itemIds.Count == 0)
                 return;
@@ -694,7 +695,12 @@ namespace Marketbuddy
                         existing.ExclusionRevision == snapshot.Revision)
                     {
                         if (existing.State == LastSoldState.Loading)
+                        {
+                            // 背景已經排了、還沒送出的那幾件提到前面；已經送出的不動。
+                            if (urgent)
+                                Queue.Promote(itemId);
                             continue;
+                        }
 
                         var ttlMinutes = existing.State switch
                         {
@@ -706,7 +712,7 @@ namespace Marketbuddy
                             continue;
                     }
 
-                    if (!Queue.Add(itemId))
+                    if (!Queue.Add(itemId, urgent))
                         continue;
 
                     // 一排進佇列就標成「查詢中」，畫面立刻分得出「還在問」與「問不到」。
@@ -744,20 +750,18 @@ namespace Marketbuddy
                     lock (Gate)
                     {
                         // 看盤查詢是使用者按了才排的，排在最近成交價後面：重掛每一格都在等那一條。
-                        if (Queue.Count == 0)
+                        if (Queue.TakeBatch() is { } next)
+                        {
+                            worldId = queueWorldId;
+                            batch = next;
+                        }
+                        else
                         {
                             var watchBatch = TakeWatchBatchLocked(out worldId);
                             if (watchBatch == null)
                                 break;
                             batch = watchBatch;
                             watch = true;
-                        }
-                        else
-                        {
-                            worldId = queueWorldId;
-                            batch = Queue.Take(BatchSize).ToList();
-                            foreach (var itemId in batch)
-                                Queue.Remove(itemId);
                         }
                     }
 

@@ -61,9 +61,11 @@ internal static class Program
         var slowOld = Simulate(Mode.Legacy, Flow.BatchList, latencySec: 30, ok: false, items: 9);
         Check("legacy Universalis down: items wait 25 s (negative control)", slowOld.Max(w => w.WaitSec) <= 8.0, false);
 
+        CheckQueue();
+
         Console.WriteLine();
-        Console.WriteLine("估算（9 件；Universalis 每個請求的耗時／結果；每件市場板比價另計約 2 秒）：");
-        foreach (var flow in new[] { Flow.BatchList, Flow.QuickList })
+        Console.WriteLine("估算（Universalis 每個請求的耗時／結果；每件市場板比價另計約 2 秒）：");
+        foreach (var (flow, n) in new[] { (Flow.BatchList, 9), (Flow.BatchList, 49), (Flow.QuickList, 9) })
         foreach (var (latency, ok, label) in new[]
                  {
                      (1.5, true, "正常 1.5 s 成功"),
@@ -72,12 +74,14 @@ internal static class Program
                      (30.0, false, "掛掉 30 s 逾時失敗"),
                  })
         {
-            var oldW = Simulate(Mode.Legacy, flow, latency, ok, 9);
-            var newW = Simulate(Mode.New, flow, latency, ok, 9);
+            var oldW = Simulate(Mode.Legacy, flow, latency, ok, n);
+            var newW = Simulate(Mode.New, flow, latency, ok, n);
             Console.WriteLine(
-                $"  {flow,-9} {label,-14} 改前 總等 {oldW.Sum(w => w.WaitSec),6:F1} s [{string.Join(",", oldW.Select(w => w.WaitSec.ToString("F0")))}]" +
-                $"  改後 總等 {newW.Sum(w => w.WaitSec),6:F1} s [{string.Join(",", newW.Select(w => w.WaitSec.ToString("F0")))}]" +
-                $"  改後用到成交價 {newW.Count(w => w.GotPrice)}/9（改前 {oldW.Count(w => w.GotPrice)}/9）");
+                $"  {flow,-9} {n,2} 件 {label,-14} 改前 總等 {oldW.Sum(w => w.WaitSec),6:F1} s 最長 {oldW.Max(w => w.WaitSec),4:F0}" +
+                $"  改後 總等 {newW.Sum(w => w.WaitSec),6:F1} s 最長 {newW.Max(w => w.WaitSec),4:F0}" +
+                $" 等>0 的件 [{string.Join(",", newW.Select((w, i) => (w, i)).Where(x => x.w.WaitSec > 0).Select(x => $"#{x.i}:{x.w.WaitSec:F0}"))}]" +
+                $"  改後送出批次 [{string.Join(",", lastSentSizes)}]" +
+                $"  用到成交價 改後 {newW.Count(w => w.GotPrice)}/{n}（改前 {oldW.Count(w => w.GotPrice)}/{n}）");
         }
 
         Console.WriteLine();
@@ -86,6 +90,49 @@ internal static class Program
     }
 
     private static int LegacyLimitMs(bool singleItem) => 25000;
+
+    private static void CheckQueue()
+    {
+        var ids = Enumerable.Range(1, 60).Select(i => (uint)(1000 + i * 7 % 61)).ToList();
+        var q = new LastSoldRequestQueue();
+        foreach (var id in ids)
+            q.Add(id, urgent: true);
+        var batches = new List<List<uint>>();
+        while (q.TakeBatch() is { } b)
+            batches.Add(b);
+        Check("60 urgent items: 3 batches", batches.Count, 3);
+        Check("60 urgent items: each batch <= 20", batches.All(b => b.Count <= 20), true);
+        Check("60 urgent items: order kept", batches.SelectMany(b => b).SequenceEqual(ids), true);
+        Check("queue empty afterwards", q.Count, 0);
+
+        // 負對照：改前是 HashSet 一次取 60 件。
+        var legacy = new HashSet<uint>(ids).Take(60).ToList();
+        Check("legacy sends all 60 in one batch (negative control)", legacy.Count <= 20, false);
+
+        var bg = new LastSoldRequestQueue();
+        for (uint i = 1; i <= 70; i++)
+            bg.Add(i, urgent: false);
+        bg.Add(500, urgent: true);
+        bg.Add(5, urgent: true);
+        Check("re-adding a queued background item as urgent returns false", bg.Add(6, urgent: true), false);
+        Check("urgent first, in request order, background promoted",
+            bg.TakeBatch()!.SequenceEqual(new uint[] { 500, 5, 6 }), true);
+        var next = bg.TakeBatch()!;
+        Check("background batch still 60", next.Count, 60);
+        Check("background order kept, promoted ones gone",
+            next.SequenceEqual(Enumerable.Range(1, 70).Select(i => (uint)i).Where(i => i is not 5 and not 6).Take(60)), true);
+        Check("background remainder", bg.TakeBatch()!.Count, 8);
+        Check("drained", bg.TakeBatch() == null, true);
+
+        var dup = new LastSoldRequestQueue();
+        Check("first add", dup.Add(9, urgent: true), true);
+        Check("duplicate add", dup.Add(9, urgent: true), false);
+        Check("duplicate not sent twice", dup.TakeBatch()!.Count, 1);
+        dup.Promote(9);
+        Check("promote after send is a no-op", dup.Count, 0);
+    }
+
+    private static List<int> lastSentSizes = [];
 
     private enum Mode { Legacy, New }
 
@@ -109,6 +156,8 @@ internal static class Program
         var state = new S[items];
         var stamp = new double[items];
         var queue = new List<int>();
+        var realQueue = new LastSoldRequestQueue();
+        lastSentSizes = [];
         List<int>? inflight = null;
         double inflightDone = 0, nextSend = 0;
         var health = new LastSoldHealth();
@@ -120,7 +169,10 @@ internal static class Program
                 return;
             state[i] = S.Loading;
             stamp[i] = t;
-            queue.Add(i);
+            if (mode == Mode.New)
+                realQueue.Add((uint)i, urgent: true);
+            else
+                queue.Add(i);
         }
 
         double Arrival(int i) => flow == Flow.BatchList ? 0 : i * 30.0;
@@ -161,10 +213,19 @@ internal static class Program
                 inflight = null;
             }
 
-            if (inflight == null && queue.Count > 0 && t >= nextSend)
+            if (inflight == null && (queue.Count > 0 || realQueue.Count > 0) && t >= nextSend)
             {
-                inflight = queue.Take(60).ToList();
-                queue.RemoveRange(0, inflight.Count);
+                if (mode == Mode.New)
+                {
+                    inflight = realQueue.TakeBatch()!.Select(x => (int)x).ToList();
+                    lastSentSizes.Add(inflight.Count);
+                }
+                else
+                {
+                    inflight = queue.Take(60).ToList();
+                    queue.RemoveRange(0, inflight.Count);
+                }
+
                 inflightDone = t + latencySec;
             }
 
