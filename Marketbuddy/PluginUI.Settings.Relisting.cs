@@ -71,7 +71,7 @@ namespace Marketbuddy
             if (ImGui.Checkbox("Tick items that can be listed in advance (from your bags)".Loc(), ref conf.BatchListPreTick))
                 conf.Save();
             HelpMarker(
-                "On by default. When this character has nothing ticked for your bags yet (first time, or after switching characters), the batch listing panel and \"List from your bags at retainers with free slots\" tick every item that can be listed, except items on a craft list, items on your \"never auto-list\" list, and items whose price check came out below your threshold in the last few days (or that were delisted for a low price). It only ticks them - nothing is listed until you press start. Once it has ticked items, or once you change the ticks yourself, it leaves this character's ticks alone until you switch characters; items you unticked are not ticked again during this game session."
+                "On by default. The batch listing panel and \"List from your bags at retainers with free slots\" tick the items in your bags that can be listed - also items that arrive in your bags later - except items on a craft list, items on your \"never auto-list\" list, and items whose price check came out below your threshold in the last few days (or that were delisted for a low price). While InventoryTools is loaded but its craft lists cannot be read yet, nothing is ticked in advance. It only ticks them - nothing is listed until you press start. Items you untick stay unticked for this game session; after \"Untick all\" nothing more is ticked in advance for this character until the game is restarted."
                     .Loc());
         }
 

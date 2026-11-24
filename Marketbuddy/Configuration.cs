@@ -81,7 +81,7 @@ namespace Marketbuddy
         public bool BatchListEnabled = false;
 
         /// <summary>
-        /// 這個角色玩家背包的勾選是空的時候，先把可上架的道具勾起來（不在製作清單、不在不自動上架清單、近期沒低於門檻）。<b>預設開。</b>
+        /// 把玩家背包裡可上架的道具先勾起來，含之後才進背包的（不在製作清單、不在不自動上架清單、近期沒低於門檻；取消過的不勾回）。<b>預設開。</b>
         /// 🔴 市場紅線：只是勾選，上架仍要使用者按開始；規則見 <see cref="PlayerTickBook"/>。
         /// </summary>
         public bool BatchListPreTick = true;

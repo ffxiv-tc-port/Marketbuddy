@@ -283,7 +283,8 @@ namespace Marketbuddy
         /// InventoryTools 製作清單上的道具（每份清單要做的成品，加上目前啟用那份清單還要從僱員取回的材料）。
         /// 對方沒裝、還沒好或擲例外就回空集合、<paramref name="ok"/>＝false，這一層略過、不擋分揀。
         /// </summary>
-        internal static HashSet<uint> ReadProtectedIds(out bool ok)
+        /// <param name="logFailure">讀不到時要不要寫 log（每秒重試的呼叫端只寫第一次）。</param>
+        internal static HashSet<uint> ReadProtectedIds(out bool ok, bool logFailure = true)
         {
             var ids = new HashSet<uint>();
             ok = false;
@@ -311,7 +312,8 @@ namespace Marketbuddy
             }
             catch (Exception e)
             {
-                Log.Information($"[Marketbuddy] 背包分揀：InventoryTools 製作清單讀不到（{e.GetType().Name}），保護清單這一層略過");
+                if (logFailure)
+                    Log.Information($"[Marketbuddy] 背包分揀：InventoryTools 製作清單讀不到（{e.GetType().Name}），保護清單這一層略過");
             }
 
             return ids;

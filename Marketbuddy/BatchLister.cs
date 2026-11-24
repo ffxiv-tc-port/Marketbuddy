@@ -135,8 +135,8 @@ namespace Marketbuddy
         private DateTime nextRefreshUtc = DateTime.MinValue;
         private DateTime bagViewedUtc = DateTime.MinValue;
         private DateTime nextBagRefreshUtc = DateTime.MinValue;
-        private HashSet<uint> protectedIds = new();
-        private bool protectedRead;
+        private readonly CraftListReader craftLists = new();
+        private bool craftListFailureLogged;
 
         private Configuration conf => Configuration.GetOrLoad();
 
@@ -369,26 +369,49 @@ namespace Marketbuddy
         /// <summary>換了角色：勾選清空（<see cref="PlayerTickBook"/>），製作清單重讀。</summary>
         private void SyncPlayerCharacter()
         {
-            if (playerTicks.SyncCharacter(PlayerState.ContentId))
-                protectedRead = false;
+            if (!playerTicks.SyncCharacter(PlayerState.ContentId))
+                return;
+            craftLists.Reset();
+            craftListFailureLogged = false;
         }
 
-        private void EnsureProtectedRead()
+        private const string InventoryToolsInternalName = "InventoryTools";
+
+        /// <summary>InventoryTools 此刻有沒有載入（即時讀，不快取）。</summary>
+        private static bool InventoryToolsLoaded()
         {
-            if (protectedRead)
-                return;
-            protectedIds = BagSorter.ReadProtectedIds(out _);
-            protectedRead = true;
+            foreach (var plugin in PluginInterface.InstalledPlugins)
+            {
+                if (plugin.InternalName == InventoryToolsInternalName)
+                    return plugin.IsLoaded;
+            }
+
+            return false;
         }
+
+        /// <summary>製作清單（每個角色讀到一次）；InventoryTools 載入了卻讀不到時回 <see cref="CraftListState.NotReady"/>，下次重試。</summary>
+        private CraftListState RefreshCraftLists()
+            => craftLists.Refresh(InventoryToolsLoaded(), () =>
+            {
+                var ids = BagSorter.ReadProtectedIds(out var ok, logFailure: false);
+                if (!ok && !craftListFailureLogged)
+                {
+                    craftListFailureLogged = true;
+                    Log.Information("[BatchList] InventoryTools 已載入但製作清單讀不到：先不預先勾選，每秒重試（這個角色只記這一次）");
+                }
+
+                return (ok, ids);
+            });
 
         /// <summary>
-        /// 預先勾選（設定 <see cref="Configuration.BatchListPreTick"/>）：勾選是空的、這個角色這次遊戲期間還沒預先勾過也沒動過才勾。
-        /// 🔴 市場紅線：只改勾選，絕不開始上架。低於門檻記憶還沒讀完時先不勾（不然會把近期低於門檻的也勾進去）。
+        /// 預先勾選（設定 <see cref="Configuration.BatchListPreTick"/>）：合格、還沒勾、這次遊戲期間沒被取消勾選過的都勾（含新進背包的）。
+        /// 🔴 市場紅線：只改勾選，絕不開始上架。低於門檻紀錄還沒讀完、或 InventoryTools 載入了卻讀不到製作清單時，這一輪不勾。
         /// </summary>
-        private void MaybePreTick(IReadOnlyList<Candidate> bagCandidates)
+        private void MaybePreTick(IReadOnlyList<Candidate> bagCandidates, CraftListState craftState)
         {
             // 巡迴中不預先勾：巡迴每到一名僱員都重讀這份勾選，只能由使用者改。
-            if (!conf.BatchListPreTick || IsRunning || tour.IsRunning || bagCandidates.Count == 0)
+            if (!conf.BatchListPreTick || IsRunning || tour.IsRunning || bagCandidates.Count == 0 ||
+                craftState == CraftListState.NotReady)
                 return;
             if ((conf.BatchListRememberBelowThreshold && !BelowThresholdLedger.Loaded) ||
                 (conf.QuickListSkipLowPriceDelisted && !LowPriceDelistLedger.Loaded))
@@ -429,9 +452,9 @@ namespace Marketbuddy
         {
             nextBagRefreshUtc = now.AddMilliseconds(CandidateRefreshMs);
             SyncPlayerCharacter();
-            EnsureProtectedRead();
-            BagCandidates = BuildCandidates(PlayerBagTypes, protectedIds, withEstimate: true);
-            MaybePreTick(BagCandidates);
+            var craftState = RefreshCraftLists();
+            BagCandidates = BuildCandidates(PlayerBagTypes, craftLists.Ids, withEstimate: true);
+            MaybePreTick(BagCandidates, craftState);
         }
 
         /// <summary>這個角色在批次上架面板（玩家背包）勾了幾種道具；不自動上架的不算。換了角色、勾選還沒清掉時回 0。</summary>
@@ -493,11 +516,11 @@ namespace Marketbuddy
             CandidateSource = retainerOwner != 0 ? BatchListSource.RetainerBags : BatchListSource.PlayerBags;
             CandidateWindowOpen = retainerOwner != 0 || VendorSeller.GetInventoryAddonId() != 0;
 
-            EnsureProtectedRead();
+            var craftState = RefreshCraftLists();
             Candidates = BuildCandidates(CandidateSource == BatchListSource.RetainerBags ? RetainerBagTypes : PlayerBagTypes,
-                protectedIds, withEstimate: true);
+                craftLists.Ids, withEstimate: true);
             if (CandidateSource == BatchListSource.PlayerBags)
-                MaybePreTick(Candidates);
+                MaybePreTick(Candidates, craftState);
         }
 
         private List<Candidate> BuildCandidates(InventoryType[] types, HashSet<uint> protectedItems, bool withEstimate)
