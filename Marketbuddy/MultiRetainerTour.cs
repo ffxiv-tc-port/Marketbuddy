@@ -1235,14 +1235,11 @@ namespace Marketbuddy
                 return;
             }
 
-            // 整理一輪自己帶起來的兩段跟著停，不留在背景繼續賣或上架。
-            if (Mode == TourMode.Tidy)
-            {
-                if (VendorSeller is { IsRunning: true } seller)
-                    seller.EmergencyStop(reason);
-                if (BatchLister is { IsRunning: true } lister)
-                    lister.EmergencyStop(reason);
-            }
+            // 巡迴自己帶起來的那一段跟著停，不留在背景繼續賣或上架（整理一輪：賣商店＋上架；全僱員補上架：上架）。
+            if (Mode == TourMode.Tidy && VendorSeller is { IsRunning: true } seller)
+                seller.EmergencyStop(reason);
+            if (ReplenishLike && BatchLister is { IsRunning: true } lister)
+                lister.EmergencyStop(reason);
 
             // 🔑 「目的地滿了」是這個功能**預期中**的結束方式，不是故障。
             // 用一般訊息（不是紅字）、講清楚已完成多少與還剩多少、並明說再按一次就接著跑。
