@@ -213,6 +213,33 @@ namespace Marketbuddy
             }
         }
 
+        /// <summary>AR 角色收尾期間專用的「走到工坊鈴邊」(AR 不經主工作佇列自己走、有時限)。
+        /// null＝問不到(舊版 AR 沒有這個端點、IPC 還沒好或型別對不上),呼叫端退回舊端點。</summary>
+        internal static bool? TryStartAutoRetainerWorkshopBellApproach()
+        {
+            try
+            {
+                return Svc.PluginInterface.GetIpcSubscriber<bool>("AutoRetainer.PluginState.StartWorkshopBellApproach").InvokeFunc();
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>上一次走鈴的狀態:0 沒開始過、1 走路中、2 到了、3 放棄。null＝問不到。</summary>
+        internal static int? GetAutoRetainerWorkshopBellApproachState()
+        {
+            try
+            {
+                return Svc.PluginInterface.GetIpcSubscriber<int>("AutoRetainer.PluginState.GetWorkshopBellApproachState").InvokeFunc();
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         /// <summary>
         /// True when AutoRetainer is currently suppressed (by us or anybody
         /// else). AutoRetainer absent: false.

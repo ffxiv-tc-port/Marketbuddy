@@ -58,6 +58,10 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
 
     /// <summary>請 AutoRetainer 走過去的整段上限；走路期間不套 <see cref="OpenBellTimeoutSeconds"/>，走完才重新計時。</summary>
     private const int ApproachWalkCapSeconds = 90;
+
+    /// <summary>AR <c>GetWorkshopBellApproachState</c> 的值(AR 端承諾不改號)。</summary>
+    private const int ApproachStateWalking = 1;
+    private const int ApproachStateArrived = 2;
     private const int StartTourTimeoutSeconds = 15;
     private const int CloseListTimeoutSeconds = 15;
 
@@ -145,6 +149,12 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
     private bool approachInFlight;
 
     private DateTime approachStartedAt = DateTime.MinValue;
+
+    /// <summary>這次走路是經 AR 收尾專用端點開始的(看它的狀態端點);false＝舊端點(看 AR 的 IsBusy)。</summary>
+    private bool approachViaPostprocessEndpoint;
+
+    /// <summary>AR 走路結束但沒說「到了」:重新找一次鈴,仍搆不到就直接跳過,不再等滿開鈴逾時。</summary>
+    private bool skipIfStillOutOfReach;
 
     /// <summary>上一次掃描看到的最近傳喚鈴距離(不論搆不搆得到);沒看到鈴是 -1。</summary>
     private float lastNearestBellDistance = -1f;
@@ -434,6 +444,8 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
         bellGate.Reset();
         approachRequested = false;
         approachInFlight = false;
+        approachViaPostprocessEndpoint = false;
+        skipIfStillOutOfReach = false;
         lastNearestBellDistance = -1f;
         EnterPhase(Phase.OpeningBell);
     }
@@ -543,6 +555,19 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
             if (DateTime.UtcNow - lastBellInteract < TimeSpan.FromMilliseconds(250))
                 return;
             lastBellInteract = DateTime.UtcNow;
+            if (approachViaPostprocessEndpoint)
+            {
+                // 問不到(AR 中途卸載)也當作走完:下面重新找一次鈴,搆不到就跳過。
+                var approachState = IPCManager.GetAutoRetainerWorkshopBellApproachState();
+                if (approachState == ApproachStateWalking)
+                    return;
+                approachInFlight = false;
+                phaseStartedAt = DateTime.UtcNow;
+                lastBellInteract = DateTime.MinValue;
+                skipIfStillOutOfReach = approachState != ApproachStateArrived;
+                Log.Information($"[MultiCharacterTour] {CurrentCharacterName}：AutoRetainer 走鈴結束（{(approachState == ApproachStateArrived ? "到了" : approachState == null ? "問不到狀態" : $"沒走到，狀態 {approachState}，原因見 AutoRetainer 的 [WorkshopBellApproach] 那行")}），重新找鈴。");
+                return;
+            }
             if (IPCManager.IsAutoRetainerTaskChainBusy())
                 return;
             approachInFlight = false;
@@ -562,16 +587,28 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
             (Condition[ConditionFlag.BetweenAreas] || Condition[ConditionFlag.BetweenAreas51]))
             scan = BellScan.Unknown;
 
+        if (scan == BellScan.OutOfReach && skipIfStillOutOfReach)
+        {
+            legOutcome = LegOutcome.Skipped;
+            legReason = "no summoning bell within reach".Loc();
+            Log.Information($"[MultiCharacterTour] {CurrentCharacterName}：AutoRetainer 沒走到鈴邊，鈴仍在 {lastNearestBellDistance:F1} 米外搆不到，跳過。");
+            EnterPhase(Phase.Closing);
+            return;
+        }
+
         if (scan == BellScan.OutOfReach && !approachRequested && Configuration.GetOrLoad().MultiCharTourApproachWorkshopBell)
         {
             approachRequested = true;
-            if (IPCManager.TryEnqueueApproachWorkshopBell())
+            // 舊版 AR 沒有收尾專用端點(null)才退回舊端點;新版回 false 就是拒絕了,舊端點在收尾期間一樣會拒絕。
+            var started = IPCManager.TryStartAutoRetainerWorkshopBellApproach();
+            approachViaPostprocessEndpoint = started != null;
+            if (started ?? IPCManager.TryEnqueueApproachWorkshopBell())
             {
                 approachInFlight = true;
                 // 走路的時間不算進開鈴逾時：走路期間改看 ApproachWalkCapSeconds，走完（見上）再重置 phaseStartedAt。
                 approachStartedAt = DateTime.UtcNow;
                 phaseStartedAt = approachStartedAt;
-                Log.Information($"[MultiCharacterTour] {CurrentCharacterName}：鈴在 {lastNearestBellDistance:F1} 米外搆不到，請 AutoRetainer 走到工坊的鈴邊。");
+                Log.Information($"[MultiCharacterTour] {CurrentCharacterName}：鈴在 {lastNearestBellDistance:F1} 米外搆不到，請 AutoRetainer 走到工坊的鈴邊（{(approachViaPostprocessEndpoint ? "收尾專用端點" : "舊端點")}）。");
                 return;
             }
             Log.Information($"[MultiCharacterTour] {CurrentCharacterName}：鈴在 {lastNearestBellDistance:F1} 米外搆不到，AutoRetainer 沒有接下走過去的請求（原因見 AutoRetainer 那行），照舊等。");
