@@ -108,6 +108,12 @@ namespace Marketbuddy
         /// <summary>Universalis 自己回報的資料中心組成表要快取多久（小時）。</summary>
         private const int DataCentersCacheHours = 12;
 
+        /// <summary>
+        /// 回應內容（解壓後）上限。正常一批遠小於 1 MB，接近這個量的不會是價格資料；
+        /// 超過時 GetAsync 擲 <see cref="HttpRequestError.ConfigurationLimitExceeded"/>，記一行 Warning、放棄這次回應、不重試。
+        /// </summary>
+        private const long MaxResponseBytes = 8 * 1024 * 1024;
+
         private sealed class ItemEntry
         {
             public required LastSoldState State;
@@ -310,6 +316,8 @@ namespace Marketbuddy
             })
             {
                 Timeout = TimeSpan.FromSeconds(RequestTimeoutSeconds),
+                // 必須在第一次請求前設定（送過請求後再設會擲 InvalidOperationException）。
+                MaxResponseContentBufferSize = MaxResponseBytes,
             };
             http.DefaultRequestHeaders.UserAgent.ParseAdd(
                 $"Marketbuddy/{Assembly.GetExecutingAssembly().GetName().Version}");
@@ -908,6 +916,10 @@ namespace Marketbuddy
                 {
                     throw;
                 }
+                catch (HttpRequestException e) when (IsResponseTooLarge(e))
+                {
+                    recovered = [];
+                }
                 catch (Exception e)
                 {
                     // 🔴 補查失敗絕不能連累同一批裡已經查到的那幾件——它們早就寫進 Cache 了。
@@ -934,6 +946,11 @@ namespace Marketbuddy
             catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
                 // 外掛卸載；不是錯誤。
+                Mark(batch, LastSoldState.Failed);
+            }
+            catch (HttpRequestException e) when (IsResponseTooLarge(e))
+            {
+                // 不是連線問題：不退避、不算進「回應太慢」，只是這一批沒有答案。
                 Mark(batch, LastSoldState.Failed);
             }
             catch (OperationCanceledException)
@@ -1093,6 +1110,16 @@ namespace Marketbuddy
             => status is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests
                 or >= HttpStatusCode.InternalServerError;
 
+        private static bool IsResponseTooLarge(HttpRequestException e)
+            => e.HttpRequestError == HttpRequestError.ConfigurationLimitExceeded;
+
+        /// <summary>記錄用：只留路徑（不含查詢字串），太長截斷。</summary>
+        private static string DescribeEndpoint(string url)
+        {
+            var path = Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.AbsolutePath : url;
+            return path.Length > 120 ? path[..120] + "..." : path;
+        }
+
         /// <summary>
         /// 送一個 GET；遇到暫時性狀態就退一下再試一次（只重試一次）。
         /// 伺服器自己在 <c>Retry-After</c> 裡給建議時以它為準，夾在
@@ -1104,7 +1131,20 @@ namespace Marketbuddy
         {
             for (var attempt = 0; ; attempt++)
             {
-                var response = await client.GetAsync(url, token).ConfigureAwait(false);
+                HttpResponseMessage response;
+                try
+                {
+                    response = await client.GetAsync(url, token).ConfigureAwait(false);
+                }
+                catch (HttpRequestException e) when (IsResponseTooLarge(e))
+                {
+                    // StatusCode 是 null：呼叫端各自先攔下這個例外，別讓它落進「連線失敗」的退避。
+                    Log.Warning(
+                        $"[Marketbuddy] Universalis 回應超過 {MaxResponseBytes / (1024 * 1024)} MB 上限" +
+                        $"（{DescribeEndpoint(url)}），已放棄這次回應、不重試。");
+                    throw;
+                }
+
                 if (attempt >= 1 || !IsTransient(response.StatusCode))
                     return response;
 
@@ -1161,6 +1201,10 @@ namespace Marketbuddy
                     catch (OperationCanceledException)
                     {
                         throw;
+                    }
+                    catch (HttpRequestException e) when (IsResponseTooLarge(e))
+                    {
+                        return (ItemId: itemId, Entry: (ItemEntry?)null);
                     }
                     catch (Exception e)
                     {
@@ -1492,6 +1536,10 @@ namespace Marketbuddy
                 NoteMedianFailure($"timeout {MedianTimeoutSeconds}s");
                 return null;
             }
+            catch (HttpRequestException e) when (IsResponseTooLarge(e))
+            {
+                return null;
+            }
             catch (Exception e)
             {
                 NoteMedianFailure(e.Message);
@@ -1594,6 +1642,10 @@ namespace Marketbuddy
             catch (OperationCanceledException) when (!outer.IsCancellationRequested)
             {
                 NoteDcListingFailure($"timeout {MedianTimeoutSeconds}s");
+                return null;
+            }
+            catch (HttpRequestException e) when (IsResponseTooLarge(e))
+            {
                 return null;
             }
             catch (Exception e)

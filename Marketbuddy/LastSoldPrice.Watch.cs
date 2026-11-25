@@ -251,6 +251,11 @@ namespace Marketbuddy
             {
                 MarkWatch(batch, worldId, LastSoldState.Failed);
             }
+            catch (HttpRequestException e) when (IsResponseTooLarge(e))
+            {
+                // 不設退避：NoteWatchFailure 的退避是給連線問題的。
+                MarkWatch(batch, worldId, LastSoldState.Failed);
+            }
             catch (Exception e)
             {
                 NoteWatchFailure(e.Message);
