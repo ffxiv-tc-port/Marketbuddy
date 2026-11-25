@@ -82,16 +82,52 @@ namespace Marketbuddy
                 return;
             var multi = marketbuddy.MultiCharTour;
             if (!multi.IsArmed)
+            {
+                if (multi.SkippedCount > 0)
+                {
+                    ImGui.Separator();
+                    DrawMultiCharacterSkippedLine(multi, "##mbmcrerunpanel", drawError: true);
+                }
                 return;
+            }
 
             ImGui.Separator();
             ImGui.TextUnformatted(DrawText.Loc("Multi-character round: ??/?? character(s)",
                 (multi.RoundCompleted, multi.RoundTargets), static (t, a) => t.Loc(a.RoundCompleted, a.RoundTargets)));
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip(MultiCharacterRemainingText(multi));
+                WrappedTooltip(MultiCharacterRemainingText(multi),
+                    multi.SkippedCount > 0 ? DrawText.Loc("Skipped so far:\n??", multi.SkippedDetailText) : null);
 
             if (ImGui.Button(DrawText.Concat("Stop multi-character relisting".Loc(), "##mbmcstoppanel")))
                 multi.Stop("stopped by user".Loc());
+        }
+
+        /// <summary>
+        /// 沒武裝時：上一輪被跳過的角色名畫在列上、原因放滑鼠提示，旁邊一顆「只重跑這幾角」。
+        /// 按下去等同按「武裝一輪」（每輪手動、不存檔、急停照停），只是目標只取這幾角。
+        /// </summary>
+        private void DrawMultiCharacterSkippedLine(MultiCharacterTour multi, string buttonId, bool drawError)
+        {
+            if (multi.SkippedCount == 0)
+                return;
+
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudOrange);
+            ImGui.TextWrapped(DrawText.Loc("Skipped last round: ??", multi.SkippedNamesText));
+            ImGui.PopStyleColor();
+            if (ImGui.IsItemHovered())
+                WrappedTooltip(multi.SkippedDetailText);
+
+            if (ImGui.Button(DrawText.Concat(DrawText.Loc("Rerun the ?? skipped", multi.SkippedCount), buttonId)))
+                multiCharArmError = multi.TryArmSkippedOnly(out var reason) ? string.Empty : reason;
+            if (ImGui.IsItemHovered())
+                WrappedTooltip("Arms one round like \"Arm for one round\", but only the characters listed here are handled; AutoRetainer still goes through the others and this plugin hands them straight back. Arming is never saved, and the emergency stop ends it. The list is kept in memory only, so reloading the plugin clears it.".Loc());
+
+            if (drawError && multiCharArmError.Length > 0)
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudRed);
+                ImGui.TextWrapped(DrawText.Loc("Cannot arm: ??", multiCharArmError));
+                ImGui.PopStyleColor();
+            }
         }
 
         private static string MultiCharacterRemainingText(MultiCharacterTour multi)

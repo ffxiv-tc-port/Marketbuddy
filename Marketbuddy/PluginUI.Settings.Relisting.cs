@@ -512,6 +512,14 @@ namespace Marketbuddy
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip(MultiCharacterRemainingText(multi));
 
+                if (multi.SkippedCount > 0)
+                {
+                    DrawNestIndicator(1);
+                    ImGui.TextWrapped(DrawText.Loc("Skipped so far: ??", multi.SkippedNamesText));
+                    if (ImGui.IsItemHovered())
+                        WrappedTooltip(multi.SkippedDetailText);
+                }
+
                 DrawNestIndicator(1);
                 if (ImGui.Button("Stop multi-character relisting".Loc() + "##mbmcstopconfig"))
                     multi.Stop("stopped by user".Loc());
@@ -527,6 +535,14 @@ namespace Marketbuddy
                 ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudRed);
                 ImGui.TextWrapped("Cannot arm: ??".Loc(multiCharArmError));
                 ImGui.PopStyleColor();
+            }
+
+            if (multi.SkippedCount > 0)
+            {
+                DrawNestIndicator(1);
+                ImGui.BeginGroup();
+                DrawMultiCharacterSkippedLine(multi, "##mbmcrerunconfig", drawError: false);
+                ImGui.EndGroup();
             }
         }
 

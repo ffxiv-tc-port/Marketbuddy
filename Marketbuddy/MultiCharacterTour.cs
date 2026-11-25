@@ -188,6 +188,13 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
     private int roundSkipped;
     private int roundRepriced;
 
+    /// <summary>這一輪（或上一輪）被跳過的角色；只放記憶體，重載插件就沒了。</summary>
+    private readonly MultiCharSkipLedger skipLedger = new();
+
+    private int skipTextVersion = -1;
+    private string skippedNamesText = string.Empty;
+    private string skippedDetailText = string.Empty;
+
     public MultiCharacterTour(MarketGuiEventHandler gui, MultiRetainerTour tour)
     {
         this.gui = gui;
@@ -270,6 +277,57 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
     public string CurrentCharacterName =>
         currentLegCid != 0 && targetNames.TryGetValue(currentLegCid, out var name) ? name : string.Empty;
 
+    /// <summary>這一輪到目前（或上一輪）被跳過幾角。</summary>
+    public int SkippedCount => skipLedger.Count;
+
+    /// <summary>被跳過的角色名，以頓號串起（沒有就是空字串）。只在框架執行緒上讀。</summary>
+    public string SkippedNamesText
+    {
+        get
+        {
+            RefreshSkipTexts();
+            return skippedNamesText;
+        }
+    }
+
+    /// <summary>一角一行「名字：原因」。只在框架執行緒上讀。</summary>
+    public string SkippedDetailText
+    {
+        get
+        {
+            RefreshSkipTexts();
+            return skippedDetailText;
+        }
+    }
+
+    private void RefreshSkipTexts()
+    {
+        if (skipTextVersion == skipLedger.Version)
+            return;
+        skipTextVersion = skipLedger.Version;
+        skippedNamesText = skipLedger.Join("、", static (name, _) => name);
+        skippedDetailText = skipLedger.Join("\n", static (name, why) => "??: ??".Loc(name, why));
+    }
+
+    /// <summary>
+    /// 只重跑上一輪被跳過的角色。與 <see cref="TryArm(out string)"/> 相同：每輪手動、不存檔、急停照停。
+    /// </summary>
+    public bool TryArmSkippedOnly(out string reason)
+    {
+        reason = string.Empty;
+        if (armed)
+            return true;
+
+        var only = skipLedger.RerunTargets();
+        if (only == null)
+        {
+            reason = "no character was skipped last round".Loc();
+            return false;
+        }
+
+        return TryArm(out reason, only);
+    }
+
     /// <summary>
     /// 武裝：抄一份「這一輪要跑哪些角色」，然後等 AutoRetainer 叫號。
     /// </summary>
@@ -277,7 +335,10 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
     /// ⚠️ 武裝狀態<b>刻意不存檔</b>：重開遊戲／重載外掛一律回到解除狀態。
     /// 「上次忘了關」的自動化是這一類功能最容易出事的地方。
     /// </remarks>
-    public bool TryArm(out string reason)
+    public bool TryArm(out string reason) => TryArm(out reason, null);
+
+    /// <param name="only">非 null 時只取這些角色（仍要在 AutoRetainer 多角色模式裡勾著）。</param>
+    private bool TryArm(out string reason, HashSet<ulong>? only)
     {
         reason = string.Empty;
         if (armed)
@@ -297,14 +358,18 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
             var data = IPCManager.GetAutoRetainerCharacterData(cid);
             if (data == null || !data.Enabled || data.ExcludeRetainer)
                 continue;
-            remaining.Add(data.CID != 0 ? data.CID : cid);
-            targetNames[data.CID != 0 ? data.CID : cid] =
-                string.IsNullOrEmpty(data.Name) ? $"CID {cid:X}" : data.Name;
+            var key = data.CID != 0 ? data.CID : cid;
+            if (only != null && !only.Contains(key))
+                continue;
+            remaining.Add(key);
+            targetNames[key] = string.IsNullOrEmpty(data.Name) ? $"CID {cid:X}" : data.Name;
         }
 
         if (remaining.Count == 0)
         {
-            reason = "no character is enabled in AutoRetainer's multi mode".Loc();
+            reason = only != null
+                ? "none of the skipped characters is enabled in AutoRetainer's multi mode any more".Loc()
+                : "no character is enabled in AutoRetainer's multi mode".Loc();
             targetNames.Clear();
             return false;
         }
@@ -314,10 +379,13 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
         roundDone = 0;
         roundSkipped = 0;
         roundRepriced = 0;
+        skipLedger.BeginRound();
 
-        ChatGui.Print("[Marketbuddy] Multi-character relisting armed: ?? character(s) this round."
+        ChatGui.Print((only != null
+                ? "[Marketbuddy] Multi-character relisting armed for last round's skipped characters only: ?? character(s)."
+                : "[Marketbuddy] Multi-character relisting armed: ?? character(s) this round.")
             .Loc(roundTargets));
-        Log.Information($"[MultiCharacterTour] 武裝：本輪目標 {roundTargets} 角（{string.Join(", ", RemainingNames())}）。");
+        Log.Information($"[MultiCharacterTour] 武裝{(only != null ? "（只重跑上一輪跳過的角色）" : string.Empty)}：本輪目標 {roundTargets} 角（{string.Join(", ", RemainingNames())}）。");
 
         // ⚠️ 沒開多開模式不是「不能武裝」——使用者可能正要去按 AR 的開關。
         // 但要當場講清楚，否則他會坐在那裡等一個永遠不會來的叫號。
@@ -356,6 +424,7 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
 
         // 沒有進行中的工作，但控制權還在手上（理論上不該發生）——立刻還回去。
         FinishIfPending(reason);
+        ReportSkippedOnce();
     }
 
     // ── AutoRetainer 事件 ────────────────────────────────────────────────
@@ -428,6 +497,9 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
         if (tour.IsRunning)
         {
             Log.Information("[MultiCharacterTour] 已經有一趟巡迴在跑（手動觸發），這一角不接手。");
+            // 只記進跳過清單；remaining 與計數照舊不動。
+            if (remaining.Contains(currentLegCid))
+                skipLedger.Record(currentLegCid, CurrentCharacterName, "a tour you started by hand was running".Loc());
             FinishIfPending("已有巡迴在跑");
             return;
         }
@@ -845,11 +917,13 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
                 break;
             case LegOutcome.Skipped:
                 roundSkipped++;
+                skipLedger.Record(cid, name, legReason);
                 ChatGui.Print("[Marketbuddy] ??: skipped (??)".Loc(name, legReason));
                 break;
             case LegOutcome.Aborted:
                 roundSkipped++;
                 armed = false;
+                skipLedger.Record(cid, name, legReason);
                 ChatGui.PrintError("[Marketbuddy] Multi-character relisting stopped at ??: ??".Loc(name, legReason));
                 break;
         }
@@ -862,6 +936,19 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
 
         if (armed && remaining.Count == 0)
             CompleteRound();
+        else if (!armed)
+            ReportSkippedOnce();
+    }
+
+    /// <summary>一輪結束（跑完或中途停）時印一次跳過清單：聊天一行＋log 一行。</summary>
+    private void ReportSkippedOnce()
+    {
+        if (!skipLedger.TryTakeSummary(out var skipped))
+            return;
+        var list = skipLedger.Join("、", static (name, why) => "?? (??)".Loc(name, why));
+        ChatGui.Print("[Marketbuddy] Skipped this round (?? character(s)): ??. The rerun button next to \"Arm for one round\" arms a round for just them."
+            .Loc(skipped.Count, list));
+        Log.Information($"[MultiCharacterTour] 本輪跳過 {skipped.Count} 角：{list}。");
     }
 
     /// <summary>整輪跑完：這才是使用者要的那一聲。</summary>
@@ -871,6 +958,7 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
         ChatGui.Print("[Marketbuddy] Multi-character relisting finished: ?? character(s) relisted, ?? skipped, ?? item(s) repriced in total."
             .Loc(roundDone, roundSkipped, roundRepriced));
         Log.Information($"[MultiCharacterTour] 整輪完成：{roundDone} 角完成、{roundSkipped} 角跳過、共重掛 {roundRepriced} 件。");
+        ReportSkippedOnce();
 
         // 純通知，零行為。⚠️ 只有這裡響：途中每一角的巡迴收尾都被
         // tour.ExternalDriverActive 擋掉了。
@@ -904,6 +992,18 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
                 }
                 if (ImGui.IsItemHovered())
                     ImGui.SetTooltip("Marketbuddy multi-character relist: arm one round. Tataru praises only when every character is done.".Loc());
+
+                if (SkippedCount > 0)
+                {
+                    ImGui.SameLine();
+                    if (ImGui.Button(DrawText.Concat(DrawText.Loc("Rerun the ?? skipped", SkippedCount), "##mbmcrerun_armain")))
+                    {
+                        if (!TryArmSkippedOnly(out var reason))
+                            ChatGui.Print("[Marketbuddy] " + "Cannot arm: ??".Loc(reason));
+                    }
+                    if (ImGui.IsItemHovered())
+                        ImGui.SetTooltip(DrawText.Loc("Arm one round for only the characters skipped last round:\n??", SkippedDetailText));
+                }
             }
             else
             {
