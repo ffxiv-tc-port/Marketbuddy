@@ -172,6 +172,7 @@ namespace Marketbuddy
             }
 
             Interlocked.Exchange(ref lastRequestTicks, DateTime.UtcNow.Ticks);
+            Stats.Query(batch);
             try
             {
                 // 多件與單件的回應形狀不同（單件沒有 items 那一層），fields 兩種都列。
@@ -195,12 +196,14 @@ namespace Marketbuddy
                         Log.Information(
                             $"[Marketbuddy] 看盤：Universalis 不認得世界 id {worldId}，這一次遊戲期間不再向它查詢。");
                     MarkWatch(batch, worldId, LastSoldState.NoData);
+                    Stats.Succeeded();
                     return;
                 }
 
                 if (response.StatusCode == HttpStatusCode.BadRequest)
                 {
                     MarkWatch(batch, worldId, LastSoldState.NoData);
+                    Stats.Succeeded();
                     return;
                 }
 
@@ -208,6 +211,7 @@ namespace Marketbuddy
                 {
                     NoteWatchFailure($"HTTP {(int)response.StatusCode}");
                     MarkWatch(batch, worldId, LastSoldState.Failed);
+                    Stats.Failed();
                     return;
                 }
 
@@ -246,20 +250,25 @@ namespace Marketbuddy
                     Log.Information(
                         $"[Marketbuddy] 看盤：Universalis 查詢正常運作。第一次成功查了 {batch.Count} 件，" +
                         $"其中 {handled.Count} 件有資料。成功之後不再重複回報，只有失敗才會再寫一行。");
+                Stats.Succeeded();
             }
             catch (OperationCanceledException)
             {
                 MarkWatch(batch, worldId, LastSoldState.Failed);
+                if (!token.IsCancellationRequested)
+                    Stats.Failed();
             }
             catch (HttpRequestException e) when (IsResponseTooLarge(e))
             {
                 // 不設退避：NoteWatchFailure 的退避是給連線問題的。
                 MarkWatch(batch, worldId, LastSoldState.Failed);
+                Stats.Failed();
             }
             catch (Exception e)
             {
                 NoteWatchFailure(e.Message);
                 MarkWatch(batch, worldId, LastSoldState.Failed);
+                Stats.Failed();
             }
         }
 

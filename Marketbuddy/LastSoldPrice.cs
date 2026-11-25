@@ -9,6 +9,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Dalamud.Networking.Http;
+using Dalamud.Plugin.Services;
 using Lumina.Excel.Sheets;
 using static Marketbuddy.Common.Dalamud;
 
@@ -303,6 +304,23 @@ namespace Marketbuddy
 
         private static DateTime dcWorldsExpiryUtc = DateTime.MinValue;
 
+        /// <summary>每小時一行 Information 的請求彙總（最近成交價與看盤共用這一份）。</summary>
+        private static readonly UniversalisRequestStats Stats = new("[Marketbuddy]", Environment.TickCount64);
+
+        /// <summary>🔴 同一插件的 Framework.Update 共用一個 try/catch：這裡自己吞掉，不能讓後面的處理常式那一幀被跳過。</summary>
+        private static void OnStatsTick(IFramework framework)
+        {
+            try
+            {
+                if (Stats.TryFlush(Environment.TickCount64) is { } summary)
+                    Log.Information(summary);
+            }
+            catch
+            {
+                // 只是診斷。
+            }
+        }
+
         internal static void Init()
         {
             if (http != null)
@@ -331,10 +349,18 @@ namespace Marketbuddy
             Volatile.Write(ref dcListingFailureLogged, 0);
             Volatile.Write(ref watchFailureLogged, 0);
             Volatile.Write(ref watchSuccessLogged, 0);
+
+            Stats.Reset(Environment.TickCount64);
+            Framework.Update += OnStatsTick;
         }
 
         internal static void Shutdown()
         {
+            Framework.Update -= OnStatsTick;
+            // 卸載時補寫未滿一小時的部分（標「近 N 分」）。
+            if (Stats.TryFlush(Environment.TickCount64, force: true) is { } summary)
+                Log.Information(summary);
+
             try
             {
                 cts?.Cancel();
@@ -852,6 +878,7 @@ namespace Marketbuddy
             }
 
             Interlocked.Exchange(ref lastRequestTicks, DateTime.UtcNow.Ticks);
+            Stats.Query(batch);
 
             // 🔴 整批只讀這一次 volatile：中途換快照會讓同一批裡的道具用不同版號過濾，
             //    而版號是寫進快取的，那會變成一批答案裡有些永遠被判成過期。
@@ -882,6 +909,7 @@ namespace Marketbuddy
                             $"[Marketbuddy] 歷史賣出價：Universalis 不認得世界 id {worldId}，" +
                             "這一次遊戲期間不再向它查詢；重掛會照原本的市場比價進行。");
                     Mark(batch, LastSoldState.NoData);
+                    Stats.Succeeded();
                     return;
                 }
 
@@ -898,6 +926,7 @@ namespace Marketbuddy
                 {
                     NoteFailure($"HTTP {(int)response.StatusCode}");
                     Mark(batch, LastSoldState.Failed);
+                    Stats.Failed();
                     return;
                 }
                 else
@@ -942,6 +971,7 @@ namespace Marketbuddy
                 Volatile.Write(ref failureLogged, 0);
                 NoteHealthy();
                 LogFirstSuccess(batch.Count, unresolved.Count, recovered.Count);
+                Stats.Succeeded();
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
@@ -952,6 +982,7 @@ namespace Marketbuddy
             {
                 // 不是連線問題：不退避、不算進「回應太慢」，只是這一批沒有答案。
                 Mark(batch, LastSoldState.Failed);
+                Stats.Failed();
             }
             catch (OperationCanceledException)
             {
@@ -959,6 +990,7 @@ namespace Marketbuddy
                 //    那是 Universalis 太慢，要讓斷路器看得到，不能當成卸載默默吞掉。
                 NoteFailure($"timeout {RequestTimeoutSeconds}s");
                 Mark(batch, LastSoldState.Failed);
+                Stats.Failed();
             }
             catch (Exception e)
             {
@@ -968,6 +1000,7 @@ namespace Marketbuddy
                 //    這一批被標成「失敗」（暫時的），下一批照常。
                 NoteFailure(e.Message);
                 Mark(batch, LastSoldState.Failed);
+                Stats.Failed();
             }
         }
 
@@ -1132,6 +1165,7 @@ namespace Marketbuddy
             for (var attempt = 0; ; attempt++)
             {
                 HttpResponseMessage response;
+                Stats.Attempt(attempt);
                 try
                 {
                     response = await client.GetAsync(url, token).ConfigureAwait(false);
