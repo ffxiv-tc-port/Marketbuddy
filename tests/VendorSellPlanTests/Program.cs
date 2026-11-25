@@ -75,6 +75,9 @@ internal static class Program
         MergedOnlyTheGrownStackIsSold();
         MergedNeedsConfirmationIsManual();
 
+        SlotDiffClassifies();
+        LookalikesCountOtherSlotsOnly();
+
         Console.WriteLine($"PASS {passes} / FAIL {failures}");
         return failures == 0 ? 0 : 1;
     }
@@ -681,6 +684,48 @@ internal static class Program
         var v = Merge(before, now, [D(Ruby, 28)], allow: true);
         Expect("整疊會跳確認框：需要手動", v.State == VendorSellState.Manual &&
             v.Reason == VendorSellManualReason.NeedsConfirmation && v.MergedStacks.Count == 0, v);
+    }
+
+    // 賣前核對對不上時的診斷分類：只寫記錄，不影響賣不賣。
+    private static void SlotDiffClassifies()
+    {
+        var p = S(Inv2, 0, Gear, 1, detail: 7);
+        Check("差別：讀不到", VendorSellPlanner.DiffSlot(p, false, null) == VendorSellSlotDiff.Unreadable);
+        Check("差別：變空", VendorSellPlanner.DiffSlot(p, true, null) == VendorSellSlotDiff.Empty);
+        Check("差別：別的道具", VendorSellPlanner.DiffSlot(p, true, S(Inv2, 0, Other, 1)) == VendorSellSlotDiff.OtherItem);
+        Check("差別：HQ", VendorSellPlanner.DiffSlot(p, true, S(Inv2, 0, new VendorSellKey(Gear.ItemId, true), 1)) == VendorSellSlotDiff.Quality);
+        Check("差別：數量", VendorSellPlanner.DiffSlot(p, true, S(Inv2, 0, Gear, 2)) == VendorSellSlotDiff.Quantity);
+        Check("差別：細節", VendorSellPlanner.DiffSlot(p, true, S(Inv2, 0, Gear, 1, detail: 8)) == VendorSellSlotDiff.DetailOnly);
+        Check("差別：需確認旗標", VendorSellPlanner.DiffSlot(p, true, S(Inv2, 0, Gear, 1, needsConfirmation: true)) == VendorSellSlotDiff.DetailOnly);
+        Check("差別：一樣", VendorSellPlanner.DiffSlot(p, true, p) == VendorSellSlotDiff.Identical);
+    }
+
+    private static void LookalikesCountOtherSlotsOnly()
+    {
+        var p = S(Inv2, 20, Ruby, 1, detail: 7);
+        VendorSellSlot[] bag =
+        [
+            p,
+            S(Inv2, 21, Ruby, 1, detail: 7),
+            S(Inv2, 22, Ruby, 1, detail: 9),
+            S(Inv1, 20, Ruby, 1, detail: 7),
+            S(Inv2, 23, Ruby, 2, detail: 7),
+            S(Inv2, 24, RubyHq, 1, detail: 7),
+            S(Inv2, 25, Dye, 1, detail: 7),
+        ];
+        var first = new List<VendorSellSlot>();
+        var n = VendorSellPlanner.CountLookalikes(p, bag, out var same, first, firstCap: 2);
+        Check("同款：數到 3 格（不含自己、不含別的數量／HQ／道具）", n == 3, $"n={n}");
+        Check("同款：細節也相同 2 格", same == 2, $"same={same}");
+        Check("同款：只收前 2 格", first.Count == 2 && first[0].Slot == 21 && first[1].Slot == 22);
+        Check("同款：沒有就是 0", VendorSellPlanner.CountLookalikes(S(Inv4, 0, Other, 5), bag, out var s0) == 0 && s0 == 0);
+    }
+
+    private static void Check(string name, bool ok, string detail = "")
+    {
+        if (ok) passes++;
+        else failures++;
+        Console.WriteLine($"{(ok ? "PASS" : "FAIL")}  {name}  {detail}");
     }
 
     private static VendorSellVerdict Merge(VendorSellSnapshot before, VendorSellSnapshot now, VendorSellDelist[] delists,

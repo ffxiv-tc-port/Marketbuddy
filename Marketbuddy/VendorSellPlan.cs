@@ -483,5 +483,61 @@ namespace Marketbuddy
         }
 
         public const ulong DetailSeed = 14695981039346656037UL;
+
+        /// <summary>賣前核對對不上時，那一格現在和清單的差別。只給診斷用，不影響賣不賣。</summary>
+        public static VendorSellSlotDiff DiffSlot(VendorSellSlot planned, bool readable, VendorSellSlot? current)
+        {
+            if (!readable)
+                return VendorSellSlotDiff.Unreadable;
+            if (current is not { } c)
+                return VendorSellSlotDiff.Empty;
+            if (c.Key.ItemId != planned.Key.ItemId)
+                return VendorSellSlotDiff.OtherItem;
+            if (c.Key.Hq != planned.Key.Hq)
+                return VendorSellSlotDiff.Quality;
+            if (c.Quantity != planned.Quantity)
+                return VendorSellSlotDiff.Quantity;
+            return c == planned ? VendorSellSlotDiff.Identical : VendorSellSlotDiff.DetailOnly;
+        }
+
+        /// <summary>
+        /// 清單那一格以外，同道具、同 HQ、同數量的格子有幾格；<paramref name="sameDetail"/> 是其中細節指紋也相同的。
+        /// <paramref name="first"/> 收最先找到的最多 <paramref name="firstCap"/> 格（給記錄用）。
+        /// </summary>
+        public static int CountLookalikes(VendorSellSlot planned, IReadOnlyList<VendorSellSlot> slots,
+            out int sameDetail, List<VendorSellSlot>? first = null, int firstCap = 3)
+        {
+            var count = 0;
+            sameDetail = 0;
+            foreach (var s in slots)
+            {
+                if ((s.Container == planned.Container && s.Slot == planned.Slot) ||
+                    s.Key != planned.Key || s.Quantity != planned.Quantity)
+                    continue;
+                count++;
+                if (s.Detail == planned.Detail)
+                    sameDetail++;
+                if (first != null && first.Count < firstCap)
+                    first.Add(s);
+            }
+
+            return count;
+        }
+    }
+
+    /// <summary>見 <see cref="VendorSellPlanner.DiffSlot"/>；判斷順序就是列舉順序。</summary>
+    internal enum VendorSellSlotDiff
+    {
+        Unreadable,
+        Empty,
+        OtherItem,
+        Quality,
+        Quantity,
+
+        /// <summary>道具、HQ、數量都一樣，只有細節指紋、兵裝庫或需確認旗標不同。</summary>
+        DetailOnly,
+
+        /// <summary>和清單完全一樣（重算後不再列為可賣，或右鍵選單那一刻才對不上）。</summary>
+        Identical,
     }
 }

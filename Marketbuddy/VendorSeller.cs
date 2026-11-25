@@ -174,6 +174,14 @@ namespace Marketbuddy
         public long SoldGil { get; private set; }
         public int SkippedStacks { get; private set; }
 
+        // 這一次賣商店裡「那一格和清單對不上」的診斷計數；只寫記錄，不影響賣不賣。
+        private readonly int[] mismatchByDiff = new int[(int)VendorSellSlotDiff.Identical + 1];
+        private int mismatchFromSort;
+        private int mismatchAtMenu;
+        private readonly List<uint> diagLoaded = new();
+        private readonly List<VendorSellSlot> diagSlots = new();
+        private readonly List<VendorSellSlot> diagLookalikes = new();
+
         public IReadOnlyList<VendorSellVerdict> Plan => plan;
         public DateTime? RoundStartedUtc => round?.StartedUtc;
         public bool IsAvailable => quickLister?.CanVendorSell == true;
@@ -615,6 +623,9 @@ namespace Marketbuddy
             SoldStacks = 0;
             SoldGil = 0;
             SkippedStacks = 0;
+            Array.Clear(mismatchByDiff);
+            mismatchFromSort = 0;
+            mismatchAtMenu = 0;
             WaitingFor = string.Empty;
             contextMenuHiddenFrames = 0;
             jobs[0].PhaseStartedUtc = DateTime.UtcNow;
@@ -831,8 +842,10 @@ namespace Marketbuddy
 
             // 開選單前的最後一次核對：整份重算，而且那一格要逐項對上計畫。
             RefreshPlan();
-            if (!StillPlanned(job, out var why))
+            if (!StillPlanned(job, out var why, out var slotMismatch))
             {
+                if (slotMismatch)
+                    LogSlotMismatch(job, atMenu: false);
                 Skip(job, why);
                 return;
             }
@@ -859,6 +872,7 @@ namespace Marketbuddy
                         (job.MergedExisting > 0 ? $"（併入原有堆疊整疊賣，其中原有 {job.MergedExisting}）" : string.Empty));
                     return;
                 case VendorSellMenuResult.SlotMismatch:
+                    LogSlotMismatch(job, atMenu: true);
                     Skip(job, "the slot no longer matches what was planned".Loc());
                     return;
                 default:
@@ -920,9 +934,11 @@ namespace Marketbuddy
                 Stop("the sale of ?? was not confirmed in time".Loc(job.Name));
         }
 
-        private bool StillPlanned(SellJob job, out string why)
+        /// <param name="slotMismatch">true＝因為那一格和清單對不上而不賣（另一種是「已經不安全」）。</param>
+        private bool StillPlanned(SellJob job, out string why, out bool slotMismatch)
         {
             why = string.Empty;
+            slotMismatch = false;
             var p = job.Planned;
             if (job.FromSort)
             {
@@ -930,6 +946,7 @@ namespace Marketbuddy
                 if (TryReadSlot((InventoryType)p.Container, p.Slot, out var current) && current is { } c && c == p)
                     return true;
                 why = "the slot no longer matches what was planned".Loc();
+                slotMismatch = true;
                 return false;
             }
 
@@ -954,7 +971,104 @@ namespace Marketbuddy
             }
 
             why = "the slot no longer matches what was planned".Loc();
+            slotMismatch = true;
             return false;
+        }
+
+        /// <summary>
+        /// 診斷：那一格現在放的是什麼、清單原本是什麼、別處有幾格同道具同 HQ 同數量。逐格一行 Information。
+        /// 只讀這一幀的背包，不改任何判斷。
+        /// </summary>
+        private void LogSlotMismatch(SellJob job, bool atMenu)
+        {
+            try
+            {
+                var p = job.Planned;
+                var readable = TryReadSlot((InventoryType)p.Container, p.Slot, out var current);
+                var diff = VendorSellPlanner.DiffSlot(p, readable, current);
+                mismatchByDiff[(int)diff]++;
+                if (job.FromSort)
+                    mismatchFromSort++;
+                if (atMenu)
+                    mismatchAtMenu++;
+
+                diagLoaded.Clear();
+                diagSlots.Clear();
+                diagLookalikes.Clear();
+                var inventoryManager = InventoryManager.Instance();
+                if (inventoryManager != null)
+                {
+                    Capture(inventoryManager, BagContainers, false, diagLoaded, diagSlots);
+                    Capture(inventoryManager, ArmoryContainers, true, diagLoaded, diagSlots);
+                }
+
+                var lookalikes = VendorSellPlanner.CountLookalikes(p, diagSlots, out var sameDetail, diagLookalikes);
+                var where = new List<string>(diagLookalikes.Count);
+                foreach (var s in diagLookalikes)
+                    where.Add(DescribeSlot(s) + (s.Detail == p.Detail ? string.Empty : "（細節不同）"));
+
+                var now = !readable ? "讀不到" : current is { } c ? DescribeContent(c) : "空格";
+                Log.Information(
+                    $"[Marketbuddy] VendorSell: 對不上的那一格（{(job.FromSort ? "背包分揀" : "這一輪下架")}，" +
+                    $"{(atMenu ? "右鍵選單核對" : "賣前核對")}）{DescribeSlot(p)}：清單＝{job.Name}（{DescribeContent(p)}），" +
+                    $"現在＝{now}；差別＝{DiffText(diff)}；別處同道具同 HQ 同數量 {lookalikes} 格（細節也相同 {sameDetail} 格）" +
+                    (where.Count > 0 ? $"：{string.Join("、", where)}" : string.Empty));
+            }
+            catch (Exception e)
+            {
+                Log.Information($"[Marketbuddy] VendorSell: 對不上的那一格診斷失敗（不影響賣不賣）：{e.Message}");
+            }
+        }
+
+        private static string DescribeContent(VendorSellSlot s)
+            => $"{ItemNameOf(s.Key.ItemId)} id {s.Key.ItemId}{(s.Key.Hq ? " HQ" : string.Empty)} x{s.Quantity}" +
+               $"，細節 {s.Detail:X16}{(s.NeedsConfirmation ? "，賣時要確認" : string.Empty)}{(s.Armory ? "，兵裝庫" : string.Empty)}";
+
+        private static string ItemNameOf(uint itemId)
+        {
+            if (itemId == uint.MaxValue)
+                return "連結格";
+            var sheet = DataManager.GetExcelSheet<Item>();
+            if (sheet != null && sheet.TryGetRow(itemId, out var row))
+            {
+                var text = row.Name.ExtractText();
+                if (text.Length > 0)
+                    return text;
+            }
+
+            return "?";
+        }
+
+        private static string DiffText(VendorSellSlotDiff diff) => diff switch
+        {
+            VendorSellSlotDiff.Unreadable => "讀不到",
+            VendorSellSlotDiff.Empty => "變空",
+            VendorSellSlotDiff.OtherItem => "換成別的道具",
+            VendorSellSlotDiff.Quality => "HQ 不同",
+            VendorSellSlotDiff.Quantity => "數量不同",
+            VendorSellSlotDiff.DetailOnly => "只有細節不同",
+            _ => "看起來一樣",
+        };
+
+        /// <summary>收尾時一行彙總；這一次沒有對不上的格子就不寫。</summary>
+        private void LogMismatchSummary()
+        {
+            var total = 0;
+            foreach (var n in mismatchByDiff)
+                total += n;
+            if (total == 0)
+                return;
+
+            var parts = new List<string>();
+            for (var i = 0; i < mismatchByDiff.Length; i++)
+            {
+                if (mismatchByDiff[i] > 0)
+                    parts.Add($"{DiffText((VendorSellSlotDiff)i)} {mismatchByDiff[i]}");
+            }
+
+            Log.Information(
+                $"[Marketbuddy] VendorSell: 這次有 {total} 格和清單對不上：{string.Join("、", parts)}" +
+                $"（背包分揀 {mismatchFromSort} 格、這一輪下架 {total - mismatchFromSort} 格；右鍵選單核對 {mismatchAtMenu} 格）");
         }
 
         private static int MergedExistingOf(VendorSellVerdict v, VendorSellSlot slot)
@@ -1010,6 +1124,7 @@ namespace Marketbuddy
             planRefreshedAt = DateTime.MinValue;
             Log.Information(
                 $"[Marketbuddy] VendorSell: 完成，賣出 {SoldStacks} 格（約 {SoldGil:N0} gil），跳過 {SkippedStacks} 格");
+            LogMismatchSummary();
             ChatGui.Print("[Marketbuddy] Sold to the shop: ?? stack(s) (about ?? gil), ?? skipped"
                 .Loc(SoldStacks, SoldGil.ToString("N0"), SkippedStacks));
         }
@@ -1028,6 +1143,7 @@ namespace Marketbuddy
             Log.Information(
                 $"[Marketbuddy] VendorSell: 中止（{reason}），賣出 {SoldStacks} 格（約 {SoldGil:N0} gil），跳過 {SkippedStacks} 格，" +
                 $"剩 {Math.Max(0, jobs.Count - jobIndex)} 格沒處理");
+            LogMismatchSummary();
             ChatGui.PrintError("[Marketbuddy] Selling to the shop stopped: ?? (?? sold, about ?? gil, ?? skipped)"
                 .Loc(reason, SoldStacks, SoldGil.ToString("N0"), SkippedStacks));
         }
