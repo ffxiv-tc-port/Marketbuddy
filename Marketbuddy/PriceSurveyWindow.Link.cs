@@ -34,6 +34,10 @@ namespace Marketbuddy
                 DrawLinkClient(link);
 
             ImGui.Spacing();
+            if (ImGui.CollapsingHeader(DrawText.Concat("Full market scan on this computer".Loc(), "###mbfullmarket")))
+                DrawFullMarketLocal();
+
+            ImGui.Spacing();
             ImGui.Separator();
             var outbox = link.OutboxCount;
             if (outbox > 0)
@@ -158,6 +162,33 @@ namespace Marketbuddy
                     link.PushList(false);
             }
 
+            var canFull = canStart && status!.SupportsFullMarket;
+            using (Disabled(!canFull))
+            {
+                if (ImGui.Button("Full market scan there".Loc(), new Vector2(Px(180), 0)))
+                    link.SendFullMarketStart();
+            }
+
+            if (TooltipHovered())
+                Tooltip(!connected
+                    ? "The other computer is not connected.".Loc()
+                    : status == null
+                        ? "Waiting for the other computer's status.".Loc()
+                        : !status.SupportsFullMarket
+                            ? "The other computer runs an older Marketbuddy that cannot do a full market scan.".Loc()
+                            : block.Length > 0
+                                ? block
+                                : FullMarketExplain() + "\n\n" + FullMarketEstimate(status.FullPending, status.FullPlanned));
+
+            if (connected && status is { Gil: >= 0 } && status.Gil < PriceSurvey.LowGilWarning)
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudOrange);
+                ImGui.TextWrapped(DrawText.Loc(
+                    "The other computer has only ?? gil: if Lifestream's departure city is not a free aetheryte, it may not be able to pay for the teleport when changing worlds.",
+                    status.Gil.ToString("N0", CultureInfo.InvariantCulture)));
+                ImGui.PopStyleColor();
+            }
+
             using (Disabled(!connected || status is not { RemoteControlled: true }))
             {
                 if (ImGui.Button("Pause".Loc() + "##mblinkpause", new Vector2(Px(120), 0)))
@@ -202,8 +233,18 @@ namespace Marketbuddy
                     _ => "idle".Loc(),
                 };
                 ImGui.TextWrapped(DrawText.Loc("World ??, ??", s.WorldName.Length > 0 ? s.WorldName : "?", state));
-                if (s.RemoteControlled && s.TourMax > 0)
+                if (s.Mode == "full")
+                    ImGui.TextUnformatted("Full market: world ?? / ??, ?? / ?? item(s)".Loc(Math.Max(1, s.FullWorld),
+                        Math.Max(s.FullWorld, s.FullWorlds), s.Processed, s.Total));
+                else if (s.RemoteControlled && s.TourMax > 0)
                     ImGui.TextUnformatted("Round: world ?? of ??".Loc(Math.Max(1, s.TourStep), s.TourMax));
+            }
+
+            if (s.Halt.Length > 0 && !s.RemoteControlled)
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudOrange);
+                ImGui.TextWrapped(DrawText.Loc("The other computer stopped: ??", s.Halt));
+                ImGui.PopStyleColor();
             }
 
             if (s.TourStatus.Length > 0)
@@ -344,6 +385,91 @@ namespace Marketbuddy
 
             if (survey.RemoteListId.Length > 0)
                 Grey(DrawText.Loc("List from the host: ?? item(s).", survey.RemoteListCount));
+        }
+
+        private static string FullMarketExplain()
+            => "Every marketable item on every world of that computer's data centre, stalest first: the order follows when anyone last updated it on Universalis, and items someone updated recently are skipped. Items nobody sells or has ever bought on any world are checked less often. It runs one full round and then waits. Before starting, turn off AutoRetainer's multi-mode and Saucy on that computer - if AutoRetainer gets busy, the round stops there."
+                .Loc();
+
+        private static string FullMarketEstimate(int pending, bool planned)
+        {
+            if (pending < 0)
+                return "Estimate not ready yet.".Loc();
+            var seconds = FullMarketPlanner.EstimateSeconds(pending, MarketRequestGate.IntervalMs);
+            var text = "Estimate: ?? item(s) x ?? s = about ?? hour(s).".Loc(pending.ToString("N0", CultureInfo.InvariantCulture),
+                (MarketRequestGate.IntervalMs / 1000.0).ToString("0.#", CultureInfo.InvariantCulture),
+                (seconds / 3600).ToString("0.0", CultureInfo.InvariantCulture));
+            return planned
+                ? text
+                : text + " " + "Not counting items someone updated on Universalis recently, so the real run is shorter.".Loc();
+        }
+
+        /// <summary>這台自己按的全市場掃描：開始、停止、兩個門檻與 Gil 提醒。</summary>
+        private void DrawFullMarketLocal()
+        {
+            survey.NoteFullPreviewWanted();
+            var active = survey.IsFullMarketActive;
+            var canArm = survey.CanArmTour(out var why) && !survey.IsRunning;
+            using (Disabled(active || !canArm))
+            {
+                if (ImGui.Button("Start a full market round".Loc() + "##mbfullstart", new Vector2(Px(200), 0)))
+                    survey.RequestArmFullMarket();
+            }
+
+            if (TooltipHovered())
+                Tooltip(active
+                    ? "A full market scan is already running.".Loc()
+                    : !canArm
+                        ? why.Length > 0 ? why : "A price survey is already running".Loc()
+                        : FullMarketExplain() + "\n\n" + FullMarketEstimate(survey.FullPendingEstimate, survey.FullPendingPlanned));
+
+            ImGui.SameLine();
+            using (Disabled(!active))
+            {
+                if (ImGui.Button("Stop".Loc() + "##mbfullstop", new Vector2(Px(120), 0)))
+                {
+                    survey.RequestStop("Stopped by the user".Loc());
+                    survey.RequestDisarmTour("Disarmed by the user".Loc());
+                }
+            }
+
+            if (survey.LowGil)
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudOrange);
+                ImGui.TextWrapped(DrawText.Loc(
+                    "This character has only ?? gil: if Lifestream's departure city is not a free aetheryte, changing worlds may fail because the teleport cannot be paid for.",
+                    survey.CurrentGil.ToString("N0", CultureInfo.InvariantCulture)));
+                ImGui.PopStyleColor();
+            }
+
+            if (survey.LastHalt.Length > 0 && !active)
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudOrange);
+                ImGui.TextWrapped(DrawText.Loc("The last round stopped: ??", survey.LastHalt));
+                ImGui.PopStyleColor();
+            }
+
+            ImGui.SetNextItemWidth(Px(100));
+            var fresh = conf.FullMarketFreshHours;
+            if (ImGui.InputInt("Skip items updated within (hours)".Loc() + "##mbfullfresh", ref fresh, 1))
+            {
+                conf.FullMarketFreshHours = Math.Clamp(fresh, 0, 168);
+                conf.Save();
+            }
+
+            Tooltip("Items that someone (on Universalis, or either of your computers) updated within this many hours are skipped this round. 0 = never skip."
+                .Loc());
+
+            ImGui.SetNextItemWidth(Px(100));
+            var noData = conf.FullMarketNoDataDays;
+            if (ImGui.InputInt("Recheck dead items after (days)".Loc() + "##mbfullnodata", ref noData, 1))
+            {
+                conf.FullMarketNoDataDays = Math.Clamp(noData, 0, 90);
+                conf.Save();
+            }
+
+            Tooltip("Items that nobody sells and that have no sales at all on every world are checked again only after this many days. The first round always checks everything. 0 = check them every round."
+                .Loc());
         }
 
         private static string LocalTime(DateTime utc)

@@ -24,11 +24,21 @@ namespace Marketbuddy
         private const string LogTag = "[巡檢連線]";
         private static readonly TimeSpan FrameworkCallTimeout = TimeSpan.FromSeconds(15);
         private static readonly TimeSpan MergeInterval = TimeSpan.FromSeconds(30);
+        private static readonly TimeSpan DigestInterval = TimeSpan.FromMinutes(5);
+
+        /// <summary>找不到這台自己的掛售清單之後，這麼久之內的合併直接跳過（不讀清單、不寫 log）。</summary>
+        private static readonly TimeSpan NoListBackoff = TimeSpan.FromMinutes(5);
+
         private const int MaxMergeBatch = 50_000;
+
+        /// <summary>一次確認收下這麼多筆以上＝斷線後的補傳，照常立刻寫一行；比這少的進彙總。</summary>
+        private const int BackfillLogThreshold = 100;
 
         private readonly PriceSurvey survey;
         private readonly MarketGuiEventHandler gui;
         private readonly SurveyObservationLog observations;
+        private readonly SurveyRoundProgress progress;
+        private readonly SurveyLinkDigest digest;
         private readonly ConcurrentQueue<Action> frameworkQueue = new();
         private readonly object gate = new();
 
@@ -52,6 +62,7 @@ namespace Marketbuddy
         private Func<uint, bool>? knownWorld;
         private DateTime nextStatusAt = DateTime.MinValue;
         private DateTime nextMergeAt = DateTime.MinValue;
+        private DateTime noListUntil = DateTime.MinValue;
         private int merging;
         private int disposed;
         private IDtrBarEntry? dtr;
@@ -63,7 +74,37 @@ namespace Marketbuddy
             this.survey = survey;
             this.gui = gui;
             observations = new SurveyObservationLog(PluginInterface.ConfigDirectory.FullName, m => Log.Information($"{LogTag} {m}"));
+            progress = new SurveyRoundProgress(PluginInterface.ConfigDirectory.FullName, m => Log.Information($"{LogTag} {m}"));
+            digest = new SurveyLinkDigest(DigestInterval, m => Log.Information($"{LogTag} {m}"), DateTime.UtcNow);
+            _ = progress.BeginLoad();
         }
+
+        /// <summary>代掃與全市場掃描的世界進度（存檔）。</summary>
+        internal SurveyRoundProgress Progress => progress;
+
+        /// <summary>觀測索引讀完了（全市場掃描排清單前要等它）。</summary>
+        internal bool ObservationsLoaded => observations.IsLoaded;
+
+        /// <summary>開始讀觀測記錄檔（全市場掃描不必開連線也要用）。</summary>
+        internal void EnsureObservationsLoaded() => _ = observations.BeginLoad();
+
+        /// <summary>這個世界每件道具的觀測摘要（兩台合起來）。執行緒池上呼叫；還沒讀完時是空的。</summary>
+        internal Dictionary<uint, ItemBrief> WorldBrief(uint worldId)
+            => observations.IsLoaded ? observations.WorldBrief(worldId) : new Dictionary<uint, ItemBrief>();
+
+        /// <summary>
+        /// 唯讀查詢（給行情查詢視窗、定價補位用）：(世界, 道具) 最近一次問到答案的那筆，含成交摘要。
+        /// 任何執行緒；記錄檔還沒讀完時回 false。
+        /// </summary>
+        internal bool TryGetLatestObservation(uint worldId, uint itemId, out MarketObservation latest)
+        {
+            latest = default;
+            return observations.IsLoaded && observations.TryGetLatest(worldId, itemId, out latest);
+        }
+
+        /// <summary>唯讀查詢：這件道具在每個世界最近一次問到答案的那筆。任何執行緒。</summary>
+        internal List<MarketObservation> LatestObservationsForItem(uint itemId)
+            => observations.IsLoaded ? observations.LatestForItem(itemId) : [];
 
         /// <summary>伺服器資訊欄左鍵要做的事（打開巡檢視窗）；插件建好 UI 之後掛上。</summary>
         internal Action? OpenWindow { get; set; }
@@ -112,9 +153,11 @@ namespace Marketbuddy
             if (now >= nextStatusAt)
             {
                 nextStatusAt = now.AddSeconds(1);
+                var outbox = observations.IsLoaded ? observations.OutboxCount : 0;
                 if (client != null)
-                    status = survey.BuildLinkStatus(observations.IsLoaded ? observations.OutboxCount : 0);
+                    status = survey.BuildLinkStatus(outbox);
                 UpdateDtr();
+                digest.Tick(now, outbox);
             }
 
             ApplyHostWorlds();
@@ -283,18 +326,31 @@ namespace Marketbuddy
             {
                 if (pendingMerge.Count == 0)
                     return;
+                // 剛確認過這台沒有自己的掛售清單：這一段時間的觀測只留在觀測記錄檔，不讀清單、不寫 log。
+                if (now < noListUntil)
+                {
+                    pendingMerge.Clear();
+                    return;
+                }
+
                 var take = Math.Min(pendingMerge.Count, MaxMergeBatch);
                 batch = pendingMerge.GetRange(0, take);
                 pendingMerge.RemoveRange(0, take);
             }
 
             nextMergeAt = now + MergeInterval;
-            Interlocked.Exchange(ref merging, 1);
             var c = conf;
             var live = c.PriceSurveyAllCharacters
                 ? null
                 : PriceSurveyItemSource.TryFromSellList(gui) ?? PriceSurveyItemSource.TryFromAllaganTools();
             var csvPath = live == null ? PriceSurveyItemSource.InventoryToolsCsvPath() : null;
+            if (live == null && csvPath == null)
+            {
+                NoteNoList(now);
+                return;
+            }
+
+            Interlocked.Exchange(ref merging, 1);
             Task.Run(() =>
             {
                 try
@@ -302,8 +358,7 @@ namespace Marketbuddy
                     var list = live ?? PriceSurveyItemSource.TryFromInventoryToolsCsv(csvPath);
                     if (list == null || list.Items.Count == 0)
                     {
-                        MergeStatus = "Shared prices were kept, but none of them is an item you are selling right now.".Loc();
-                        Log.Information($"{LogTag} 合併：這台找不到自己的掛售清單，{batch.Count} 筆觀測只留在觀測記錄檔。");
+                        NoteNoList(DateTime.UtcNow);
                         return;
                     }
 
@@ -321,9 +376,7 @@ namespace Marketbuddy
                     if (rows.Count > 0)
                         Interlocked.Increment(ref dataSerial);
                     MergeStatus = "Merged ?? shared price(s) into ?? row(s) of your own list.".Loc(batch.Count, rows.Count);
-                    Log.Information(
-                        $"{LogTag} 合併：{batch.Count} 筆觀測 → 這台清單上的 {rows.Count} 列（來源={list.SourceKey}，" +
-                        $"我方僱員 {list.OwnRetainerIds.Count} 位）。");
+                    digest.NoteMerged(batch.Count, rows.Count);
                 }
                 catch (Exception e)
                 {
@@ -336,17 +389,29 @@ namespace Marketbuddy
             });
         }
 
+        /// <summary>沒有自己的掛售清單：這段時間跳過合併。只更新畫面文字，不寫 log。任何執行緒。</summary>
+        private void NoteNoList(DateTime nowUtc)
+        {
+            MergeStatus = "Shared prices were kept, but none of them is an item you are selling right now.".Loc();
+            lock (gate)
+            {
+                noListUntil = nowUtc + NoListBackoff;
+                pendingMerge.Clear();
+            }
+        }
+
         // =====================================================================
         //  巡檢引擎呼叫進來的（framework 執行緒）
         // =====================================================================
 
         /// <summary>
-        /// 這台查完一件。開著連線才記：記錄檔＋待送。代掃的那一件另外排進合併，換成這台自己視角的列。
+        /// 這台查完一件。開著連線、或這一件是全市場掃描的才記：記錄檔＋待送。代掃與全市場的那一件另外排進合併，換成這台自己視角的列。
         /// </summary>
-        internal void NoteObservation(MarketObservation obs, bool proxy)
+        internal void NoteObservation(MarketObservation obs, bool proxy, bool fullMarket)
         {
-            if (!Active)
+            if (!Active && !fullMarket)
                 return;
+            digest.NoteLocal(obs.Verdict);
             _ = observations.BeginLoad();
             observations.RecordLocal(obs);
             if (!proxy)
@@ -451,6 +516,14 @@ namespace Marketbuddy
 
         /// <summary>🔴 只由主機畫面上使用者按的按鈕呼叫。</summary>
         internal void SendCommand(RemoteCommandKind kind) => host?.SendCommand(kind, LastPushedListId, []);
+
+        /// <summary>主機畫面：請另一台跑一輪全市場掃描（不帶清單，那台用自己的道具表）。🔴 只由使用者按的按鈕呼叫。</summary>
+        internal void SendFullMarketStart()
+        {
+            var id = host?.SendCommand(RemoteCommandKind.FullStart, string.Empty, []) ?? -1;
+            if (id == -2)
+                LastPushStatus = "The other computer runs an older Marketbuddy that cannot do a full market scan.".Loc();
+        }
 
         /// <summary>主機畫面：撤銷配對。</summary>
         internal void Revoke() => host?.Revoke();
@@ -569,7 +642,8 @@ namespace Marketbuddy
                 }
             }
 
-            if (batch.Rows.Count > 0 || batch.Worlds.Count > 0)
+            digest.NoteSent(batch.Rows.Count);
+            if (batch.Rows.Count >= BackfillLogThreshold || batch.Worlds.Count > 0)
                 Log.Information($"{LogTag} 補傳完成：{batch.Rows.Count} 筆觀測、{batch.Worlds.Count} 個世界進度，還排著 {observations.OutboxCount} 筆。");
         }
 
@@ -596,9 +670,11 @@ namespace Marketbuddy
                     pendingHostWorlds.AddRange(worlds);
             }
 
-            Log.Information(
-                $"{LogTag} 收到 {rows.Count} 筆觀測（新 {accepted.Count} 筆、重複 {rows.Count - accepted.Count} 筆）" +
-                $"{(worlds.Count > 0 ? $"、{worlds.Count} 個世界進度" : string.Empty)}。");
+            digest.NoteReceived(rows.Count, accepted.Count);
+            if (worlds.Count > 0 || rows.Count >= BackfillLogThreshold)
+                Log.Information(
+                    $"{LogTag} 收到 {rows.Count} 筆觀測（新 {accepted.Count} 筆、重複 {rows.Count - accepted.Count} 筆）" +
+                    $"{(worlds.Count > 0 ? $"、{worlds.Count} 個世界進度" : string.Empty)}。");
             return accepted.Count;
         }
 
@@ -649,21 +725,31 @@ namespace Marketbuddy
                 var s = h.LatestStatus;
                 if (!h.IsConnected)
                     text = "Survey: helper not connected".Loc();
+                else if (s is { RemoteControlled: true, Mode: "full" })
+                    text = "Full market: world ?? / ??, ?? / ?? item(s)".Loc(Math.Max(1, s.FullWorld), Math.Max(s.FullWorld, s.FullWorlds),
+                        s.Processed, s.Total);
                 else if (s is { RemoteControlled: true })
                     text = s.TourMax > 0
                         ? "Survey: helper world ?? / ??".Loc(Math.Max(1, s.TourStep), s.TourMax)
                         : "Survey: helper scanning".Loc();
+                else if (s is { Halt.Length: > 0 })
+                    text = "Survey: helper stopped".Loc();
                 else
                     text = "Survey: helper idle".Loc();
                 tooltip = s == null
                     ? "Click to open the price survey window.".Loc()
                     : $"{(s.WorldName.Length > 0 ? s.WorldName : "?")}  {s.Processed} / {s.Total}\n" +
                       $"{(s.TourStatus.Length > 0 ? s.TourStatus : s.StatusText)}\n" +
+                      (s.Halt.Length > 0 && !s.RemoteControlled ? s.Halt + "\n" : string.Empty) +
                       "Click to open the price survey window.".Loc();
             }
-            else if (client != null && survey.IsRemoteControlled)
+            else if (survey.IsFullMarketActive || (client != null && survey.IsRemoteControlled))
             {
-                text = "Survey: run by the host".Loc();
+                text = survey.IsFullMarketActive
+                    ? survey.IsRemoteControlled
+                        ? "Full market scan run by the host".Loc()
+                        : "Survey: full market scan".Loc()
+                    : "Survey: run by the host".Loc();
                 tooltip = (survey.TourStatus.Length > 0 ? survey.TourStatus : survey.StatusText) + "\n" +
                           "Click to open the price survey window.".Loc();
             }
@@ -695,6 +781,15 @@ namespace Marketbuddy
         {
             if (Interlocked.Exchange(ref disposed, 1) != 0)
                 return;
+            try
+            {
+                digest.Tick(DateTime.UtcNow, observations.IsLoaded ? observations.OutboxCount : 0, force: true);
+            }
+            catch
+            {
+                // 只是診斷。
+            }
+
             try
             {
                 host?.Dispose();
@@ -738,6 +833,29 @@ namespace Marketbuddy
         {
             var sheet = DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>();
             return sheet == null ? static _ => false : id => sheet.TryGetRow(id, out _);
+        }
+
+        /// <summary>
+        /// 全市場掃描的道具清單：ItemSearchCategory&gt;0 且可交易，依 id 排序。表在這裡（framework 執行緒）取，
+        /// 回傳的委派可以帶去執行緒池列舉。
+        /// </summary>
+        internal static Func<List<uint>> MarketableItemsBuilder()
+        {
+            var sheet = DataManager.GetExcelSheet<Lumina.Excel.Sheets.Item>();
+            return () =>
+            {
+                var result = new List<uint>();
+                if (sheet == null)
+                    return result;
+                foreach (var row in sheet)
+                {
+                    if (row.ItemSearchCategory.RowId > 0 && !row.IsUntradable)
+                        result.Add(row.RowId);
+                }
+
+                result.Sort();
+                return result;
+            };
         }
 
         internal static Func<uint, bool> KnownWorld()

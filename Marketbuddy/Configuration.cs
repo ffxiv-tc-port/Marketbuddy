@@ -458,6 +458,17 @@ namespace Marketbuddy
         /// </summary>
         public bool SurveyLinkAllowRemoteControl = false;
 
+        /// <summary>
+        /// 全市場掃描：Universalis 或兩台的觀測在這麼多小時內有人更新過的 (世界, 道具) 這一輪跳過。0＝不跳。
+        /// 🔑 24：Universalis 上一天內有人動過的資料不缺這一筆；一輪全掃約三天，跳過它們讓真正沒人更新的先輪到。
+        /// </summary>
+        public int FullMarketFreshHours = 24;
+
+        /// <summary>
+        /// 全市場掃描：每個世界都沒人賣、這一頁也沒有成交的道具，在一個世界上次問到之後這麼多天內不重掃。0＝不降頻。
+        /// </summary>
+        public int FullMarketNoDataDays = 7;
+
         [NonSerialized] public const int DEFAULT_SURVEY_LINK_PORT = 47835;
 
         /// <summary>
@@ -814,6 +825,8 @@ namespace Marketbuddy
                     conf.SurveyLinkPort = DEFAULT_SURVEY_LINK_PORT;
                 conf.PriceSurveyAutoTourMaxWorlds =
                     Math.Clamp(conf.PriceSurveyAutoTourMaxWorlds, 1, MAX_TOUR_WORLDS);
+                conf.FullMarketFreshHours = Math.Clamp(conf.FullMarketFreshHours, 0, 168);
+                conf.FullMarketNoDataDays = Math.Clamp(conf.FullMarketNoDataDays, 0, 90);
             }
 
             // 🔴 兩條路（全新設定檔／既有設定檔）都要經過，而且只會真的動一次。

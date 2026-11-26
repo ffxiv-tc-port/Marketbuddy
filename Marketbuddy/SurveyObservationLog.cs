@@ -9,13 +9,19 @@ using Marketbuddy.Common;
 
 namespace Marketbuddy
 {
+    /// <summary>某個世界某件道具的觀測摘要（排全市場掃描用）。</summary>
+    /// <param name="AnsweredUtc">最近一次問到答案的時間；MinValue＝從來沒問到。</param>
+    /// <param name="NothingAtAll">最近一次問到的答案是「沒人賣、這一頁也沒有成交」（成交不知道時是 false）。</param>
+    internal readonly record struct ItemBrief(DateTime AnsweredUtc, bool NothingAtAll);
+
     /// <summary>
-    /// 市場觀測記錄檔（<c>survey_observations.csv</c>，追加寫）＋記憶體索引＋送往另一台的待送佇列。
+    /// 市場觀測記錄檔（<c>survey_observations.csv</c>，追加寫、超過門檻整份重寫）＋記憶體索引＋送往另一台的待送佇列。
     /// <para>🔑 一份檔三個用途：①每筆本機觀測帶遞增序號，序號大於「對方已確認」游標的就是待送（斷線、重開遊戲都不丟）；
-    /// ②(道具, 世界) 最新時間的索引：收到的觀測不比索引新就當重複（同一批重送、同一檔匯兩次都只算一次）；
-    /// ③代掃時「這個世界保留時間內問過哪些」看兩邊合起來的資料。</para>
-    /// <para>🔴 <see cref="gate"/> 內只碰欄位與待寫清單：不做 I/O、不寫 log。所有操作都是 O(1) 或 O(本批)，
-    /// 只有 <see cref="AnsweredSince"/> 掃一次索引（每個世界開始掃描時一次，在執行緒池上）。</para>
+    /// ②(世界, 道具) 的最新資料：收到的觀測不比索引新就當重複；索引也是給別的畫面查行情的唯讀來源；
+    /// ③代掃與全市場掃描「這個世界保留時間內問過哪些」看兩邊合起來的資料。</para>
+    /// <para>🔑 有界：每個 (世界, 道具) 只留最近一次問到答案的那筆，外加比它新的一筆沒問到的；再加上待送的本機列。
+    /// 讀檔時與檔案列數超過門檻時，在寫檔執行緒上整份重寫（暫存檔＋取代），已確認游標不動。</para>
+    /// <para>🔴 <see cref="gate"/> 內只碰欄位與待寫清單：不做 I/O、不寫 log。重寫的快照在鎖內抄一份 O(索引) 的清單（執行緒池上）。</para>
     /// </summary>
     internal sealed class SurveyObservationLog
     {
@@ -25,9 +31,15 @@ namespace Marketbuddy
         /// <summary>待送上限；超過就丟最舊的並記一次 log（對方長期不上線時不讓記憶體無限長）。</summary>
         internal const int MaxOutbox = 300_000;
 
-        private const string Header =
-            "seq,origin,timestampUtc,worldId,worldName,itemId,lowestNq,lowestNqRetainer,lowestHq,lowestHqRetainer,listingCount,source,gateIntervalMs,verdict";
+        /// <summary>檔案列數超過「保留列數 ×2 ＋這個值」才重寫（測試可調小）。</summary>
+        internal static int CompactSlack = 20_000;
 
+        private const string Header =
+            "seq,origin,timestampUtc,worldId,worldName,itemId,lowestNq,lowestNqRetainer,lowestHq,lowestHqRetainer,listingCount,source,gateIntervalMs,verdict," +
+            "salesKnown,lastSaleNq,lastSaleNqUtc,lastSaleHq,lastSaleHqUtc,sales7d,salesPage";
+
+        private const int OldColumns = 14;
+        private const int Columns = 21;
         private const string TimestampFormat = "yyyy-MM-dd HH:mm:ss";
         private const char OriginLocal = 'L';
         private const char OriginRemote = 'R';
@@ -41,7 +53,15 @@ namespace Marketbuddy
 
         private readonly record struct Line(long Seq, char Origin, MarketObservation Obs);
 
-        private readonly record struct Latest(DateTime Any, DateTime Answered);
+        /// <summary>一個 (世界, 道具)：最近問到答案的一筆、比它新的一筆沒問到的、以及看過的最新時間。</summary>
+        private struct Entry
+        {
+            public Line Answered;
+            public bool HasAnswered;
+            public Line Other;
+            public bool HasOther;
+            public DateTime Any;
+        }
 
         private readonly object gate = new();
         private readonly string directory;
@@ -49,7 +69,7 @@ namespace Marketbuddy
         private readonly CsvAppendLog<Line> writer;
 
         // ---- gate 內 ----
-        private readonly Dictionary<(uint ItemId, uint WorldId), Latest> latest = new();
+        private readonly Dictionary<uint, Dictionary<uint, Entry>> index = new();
         private readonly Queue<(long Seq, MarketObservation Obs)> outbox = new();
         private readonly List<MarketObservation> beforeLoad = [];
         private long nextSeq = 1;
@@ -57,6 +77,10 @@ namespace Marketbuddy
         private long ackToWrite;
         private long ackWritten;
         private int dropped;
+        private int keptLines;
+        private int linesInFile;
+        private bool compactQueued;
+        private int compactions;
 
         private int loadState;
         private int ackWriting;
@@ -80,6 +104,18 @@ namespace Marketbuddy
                 lock (gate)
                 {
                     return outbox.Count;
+                }
+            }
+        }
+
+        /// <summary>目前檔案（含還沒落地的）有幾列資料、重寫過幾次（畫面與測試用）。</summary>
+        internal (int LinesInFile, int KeptLines, int Compactions) Size
+        {
+            get
+            {
+                lock (gate)
+                {
+                    return (linesInFile, keptLines, compactions);
                 }
             }
         }
@@ -121,6 +157,7 @@ namespace Marketbuddy
 
             var pendingLocal = 0;
             List<MarketObservation> late;
+            bool compact;
             lock (gate)
             {
                 ackedSeq = Math.Max(ackedSeq, acked);
@@ -129,7 +166,7 @@ namespace Marketbuddy
                 nextSeq = Math.Max(nextSeq, ackedSeq + 1);
                 foreach (var line in lines)
                 {
-                    NoteLatest(line.Obs);
+                    NoteLine(line);
                     if (line.Origin != OriginLocal)
                         continue;
                     nextSeq = Math.Max(nextSeq, line.Seq + 1);
@@ -140,16 +177,30 @@ namespace Marketbuddy
                     }
                 }
 
+                linesInFile = lines.Count;
                 late = new List<MarketObservation>(beforeLoad);
                 beforeLoad.Clear();
                 foreach (var obs in late)
                     RecordLocalLocked(obs);
+                compact = MaybeCompactLocked(force: false);
                 Volatile.Write(ref loadState, 2);
             }
 
-            if (late.Count > 0)
+            if (late.Count > 0 || compact)
                 writer.Kick();
-            log($"觀測記錄檔讀完：{lines.Count} 列，待送 {pendingLocal + late.Count} 筆（已確認到序號 {ackedSeq}）。");
+            log($"觀測記錄檔讀完：{lines.Count} 列（{CountKeys()} 組世界×道具），待送 {pendingLocal + late.Count} 筆（已確認到序號 {ackedSeq}）" +
+                $"{(compact ? "，列數超過門檻，背景重寫成每組只留最新" : string.Empty)}。");
+        }
+
+        private int CountKeys()
+        {
+            lock (gate)
+            {
+                var n = 0;
+                foreach (var world in index.Values)
+                    n += world.Count;
+                return n;
+            }
         }
 
         /// <summary>本機掃到一筆。任何執行緒；檔案在執行緒池上落地。</summary>
@@ -164,6 +215,7 @@ namespace Marketbuddy
                 }
 
                 RecordLocalLocked(obs);
+                MaybeCompactLocked(force: false);
             }
 
             writer.Kick();
@@ -172,7 +224,8 @@ namespace Marketbuddy
         private void RecordLocalLocked(MarketObservation obs)
         {
             var seq = nextSeq++;
-            NoteLatest(obs);
+            var line = new Line(seq, OriginLocal, obs);
+            NoteLine(line);
             outbox.Enqueue((seq, obs));
             if (outbox.Count > MaxOutbox)
             {
@@ -180,7 +233,8 @@ namespace Marketbuddy
                 dropped++;
             }
 
-            writer.EnqueueLocked(new Line(seq, OriginLocal, obs));
+            writer.EnqueueLocked(line);
+            linesInFile++;
         }
 
         /// <summary>
@@ -194,25 +248,104 @@ namespace Marketbuddy
                 if (Volatile.Read(ref loadState) != 2)
                     return Intake.NotReady;
                 var at = SurveyShare.TruncateToSecond(obs.AtUtc);
-                if (latest.TryGetValue((obs.ItemId, obs.WorldId), out var known) && known.Any >= at)
+                if (index.TryGetValue(obs.WorldId, out var world) && world.TryGetValue(obs.ItemId, out var known) && known.Any >= at)
                     return Intake.Duplicate;
-                NoteLatest(obs);
-                writer.EnqueueLocked(new Line(0, OriginRemote, obs));
+                var line = new Line(0, OriginRemote, obs);
+                NoteLine(line);
+                writer.EnqueueLocked(line);
+                linesInFile++;
+                MaybeCompactLocked(force: false);
             }
 
             writer.Kick();
             return Intake.Accepted;
         }
 
-        private void NoteLatest(MarketObservation obs)
+        /// <summary>把一列併進索引（只在 gate 內）。同秒的後到者取代先到者。</summary>
+        private void NoteLine(in Line line)
         {
-            var key = (obs.ItemId, obs.WorldId);
+            var obs = line.Obs;
+            if (!index.TryGetValue(obs.WorldId, out var world))
+                index[obs.WorldId] = world = new Dictionary<uint, Entry>();
+            world.TryGetValue(obs.ItemId, out var e);
+            var before = (e.HasAnswered ? 1 : 0) + (e.HasOther ? 1 : 0);
             var at = SurveyShare.TruncateToSecond(obs.AtUtc);
-            latest.TryGetValue(key, out var known);
-            var any = at > known.Any ? at : known.Any;
-            var answered = obs.Answered && at > known.Answered ? at : known.Answered;
-            latest[key] = new Latest(any, answered);
+            if (at > e.Any)
+                e.Any = at;
+            if (obs.Answered)
+            {
+                if (!e.HasAnswered || at >= SurveyShare.TruncateToSecond(e.Answered.Obs.AtUtc))
+                {
+                    e.Answered = line;
+                    e.HasAnswered = true;
+                }
+            }
+            else if (!e.HasOther || at >= SurveyShare.TruncateToSecond(e.Other.Obs.AtUtc))
+            {
+                e.Other = line;
+                e.HasOther = true;
+            }
+
+            if (e.HasOther && e.HasAnswered
+                           && SurveyShare.TruncateToSecond(e.Other.Obs.AtUtc) <= SurveyShare.TruncateToSecond(e.Answered.Obs.AtUtc))
+                e.HasOther = false;
+            world[obs.ItemId] = e;
+            keptLines += (e.HasAnswered ? 1 : 0) + (e.HasOther ? 1 : 0) - before;
         }
+
+        /// <summary>檔案列數超過門檻（或 <paramref name="force"/>）就排一次整份重寫。只在 gate 內。</summary>
+        private bool MaybeCompactLocked(bool force)
+        {
+            if (compactQueued)
+                return false;
+            if (!force && linesInFile <= (2L * (keptLines + outbox.Count)) + CompactSlack)
+                return false;
+            compactQueued = true;
+            writer.RequestRewriteLocked(SnapshotLocked);
+            return true;
+        }
+
+        /// <summary>立刻排一次重寫（測試與診斷用）。</summary>
+        internal void RequestCompact()
+        {
+            lock (gate)
+            {
+                if (Volatile.Read(ref loadState) != 2)
+                    return;
+                MaybeCompactLocked(force: true);
+            }
+
+            writer.Kick();
+        }
+
+        /// <summary>
+        /// 在寫檔執行緒、gate 內被呼叫：每組的保留列＋待送的本機列。待送列一律從佇列寫（序號遞增、讀回來照樣進待送），
+        /// 索引裡的本機列若還在佇列裡就不重複寫。
+        /// </summary>
+        private IReadOnlyList<Line> SnapshotLocked()
+        {
+            compactQueued = false;
+            compactions++;
+            var firstPending = outbox.Count > 0 ? outbox.Peek().Seq : long.MaxValue;
+            var rows = new List<Line>(keptLines + outbox.Count);
+            foreach (var world in index.Values)
+            {
+                foreach (var e in world.Values)
+                {
+                    if (e.HasAnswered && !IsQueued(e.Answered, firstPending))
+                        rows.Add(e.Answered);
+                    if (e.HasOther && !IsQueued(e.Other, firstPending))
+                        rows.Add(e.Other);
+                }
+            }
+
+            foreach (var (seq, obs) in outbox)
+                rows.Add(new Line(seq, OriginLocal, obs));
+            linesInFile = rows.Count;
+            return rows;
+        }
+
+        private static bool IsQueued(in Line line, long firstPending) => line.Origin == OriginLocal && line.Seq >= firstPending;
 
         /// <summary>待送佇列最前面的至多 <paramref name="max"/> 筆（不移除；對方確認後 <see cref="Ack"/>）。</summary>
         internal List<(long Seq, MarketObservation Obs)> PeekOutbox(int max)
@@ -303,10 +436,62 @@ namespace Marketbuddy
             var result = new HashSet<uint>();
             lock (gate)
             {
-                foreach (var ((itemId, world), value) in latest)
+                if (!index.TryGetValue(worldId, out var world))
+                    return result;
+                foreach (var (itemId, e) in world)
                 {
-                    if (world == worldId && value.Answered > cutoffUtc)
+                    if (e.HasAnswered && SurveyShare.TruncateToSecond(e.Answered.Obs.AtUtc) > cutoffUtc)
                         result.Add(itemId);
+                }
+            }
+
+            return result;
+        }
+
+        /// <summary>這個世界每件道具的摘要（排全市場掃描用）。執行緒池上呼叫。</summary>
+        internal Dictionary<uint, ItemBrief> WorldBrief(uint worldId)
+        {
+            lock (gate)
+            {
+                if (!index.TryGetValue(worldId, out var world))
+                    return new Dictionary<uint, ItemBrief>();
+                var result = new Dictionary<uint, ItemBrief>(world.Count);
+                foreach (var (itemId, e) in world)
+                {
+                    if (e.HasAnswered)
+                        result[itemId] = new ItemBrief(SurveyShare.TruncateToSecond(e.Answered.Obs.AtUtc), e.Answered.Obs.NothingAtAll);
+                }
+
+                return result;
+            }
+        }
+
+        /// <summary>
+        /// 唯讀查詢：(世界, 道具) 最近一次問到答案的那筆（含成交摘要；成交不知道時 <c>Sales.Known</c>＝false）。
+        /// 任何執行緒；讀檔完成前一律回 false。
+        /// </summary>
+        internal bool TryGetLatest(uint worldId, uint itemId, out MarketObservation latest)
+        {
+            latest = default;
+            lock (gate)
+            {
+                if (!index.TryGetValue(worldId, out var world) || !world.TryGetValue(itemId, out var e) || !e.HasAnswered)
+                    return false;
+                latest = e.Answered.Obs;
+                return true;
+            }
+        }
+
+        /// <summary>唯讀查詢：這件道具在每個世界最近一次問到答案的那筆。任何執行緒。</summary>
+        internal List<MarketObservation> LatestForItem(uint itemId)
+        {
+            var result = new List<MarketObservation>();
+            lock (gate)
+            {
+                foreach (var world in index.Values)
+                {
+                    if (world.TryGetValue(itemId, out var e) && e.HasAnswered)
+                        result.Add(e.Answered.Obs);
                 }
             }
 
@@ -316,6 +501,9 @@ namespace Marketbuddy
         /// <summary>還沒落地的列數（畫面用）。</summary>
         internal int PendingWrites => writer.PendingCount;
 
+        /// <summary>每一列（含重寫）都已經落地、沒有寫檔工作在跑。</summary>
+        internal bool IsSettled => writer.IsIdle;
+
         // =====================================================================
         //  格式
         // =====================================================================
@@ -323,6 +511,7 @@ namespace Marketbuddy
         private static string Format(Line line)
         {
             var o = line.Obs;
+            var s = o.Sales;
             return string.Join(",",
                 line.Seq.ToString(CultureInfo.InvariantCulture),
                 line.Origin.ToString(),
@@ -337,15 +526,25 @@ namespace Marketbuddy
                 o.ListingCount.ToString(CultureInfo.InvariantCulture),
                 PriceSurveyLog.Escape(o.Source),
                 o.GateIntervalMs.ToString(CultureInfo.InvariantCulture),
-                PriceSurveyLog.Escape(o.Verdict));
+                PriceSurveyLog.Escape(o.Verdict),
+                s.Known ? "1" : "0",
+                s.Known ? s.LastNq.ToString(CultureInfo.InvariantCulture) : string.Empty,
+                s.Known ? LinkJson.UnixOrZero(s.LastNqUtc).ToString(CultureInfo.InvariantCulture) : string.Empty,
+                s.Known ? s.LastHq.ToString(CultureInfo.InvariantCulture) : string.Empty,
+                s.Known ? LinkJson.UnixOrZero(s.LastHqUtc).ToString(CultureInfo.InvariantCulture) : string.Empty,
+                s.Known ? s.RecentCount.ToString(CultureInfo.InvariantCulture) : string.Empty,
+                s.Known ? s.PageCount.ToString(CultureInfo.InvariantCulture) : string.Empty);
         }
 
-        /// <summary>標題列與壞列靜默略過；讀回來的列一樣過 <see cref="SurveyShare.Validate(in MarketObservation, Func{uint,bool}?, Func{uint,bool}?, DateTime)"/>。</summary>
+        /// <summary>
+        /// 標題列與壞列靜默略過；讀回來的列一樣過 <see cref="SurveyShare.Validate(in MarketObservation, Func{uint,bool}?, Func{uint,bool}?, DateTime)"/>。
+        /// 舊版的 14 欄列照收，成交摘要當「不知道」。
+        /// </summary>
         private static bool TryParse(string text, out Line line)
         {
             line = default;
             var f = PriceSurveyLog.SplitCsv(text);
-            if (f.Count != 14)
+            if (f.Count != OldColumns && f.Count != Columns)
                 return false;
             if (!long.TryParse(f[0], NumberStyles.None, CultureInfo.InvariantCulture, out var seq))
                 return false;
@@ -364,12 +563,29 @@ namespace Marketbuddy
                 || !int.TryParse(f[12], NumberStyles.None, CultureInfo.InvariantCulture, out var gateMs))
                 return false;
 
-            var obs = new MarketObservation(at, worldId, f[4], itemId, lowNq, nqRetainer, lowHq, hqRetainer, count,
-                f[11], gateMs, f[13]);
+            var sales = f.Count == Columns ? ParseSales(f) : default;
+            var obs = new MarketObservation(at, worldId, string.Intern(f[4]), itemId, lowNq, nqRetainer, lowHq, hqRetainer, count,
+                string.Intern(f[11]), gateMs, string.Intern(f[13]), sales);
             if (SurveyShare.Validate(obs, null, null, DateTime.UtcNow) != null)
                 return false;
             line = new Line(seq, f[1][0], obs);
             return true;
+        }
+
+        /// <summary>成交欄位讀不懂就當「不知道」，不丟整列。</summary>
+        private static SaleSummary ParseSales(List<string> f)
+        {
+            if (f[14] != "1"
+                || !long.TryParse(f[15], NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var nq)
+                || !long.TryParse(f[16], NumberStyles.None, CultureInfo.InvariantCulture, out var nqAt)
+                || !long.TryParse(f[17], NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var hq)
+                || !long.TryParse(f[18], NumberStyles.None, CultureInfo.InvariantCulture, out var hqAt)
+                || !int.TryParse(f[19], NumberStyles.None, CultureInfo.InvariantCulture, out var recent)
+                || !int.TryParse(f[20], NumberStyles.None, CultureInfo.InvariantCulture, out var page)
+                || nqAt > 4_102_444_800 || hqAt > 4_102_444_800)
+                return default;
+            var s = new SaleSummary(true, nq, LinkJson.FromUnixOrMin(nqAt), hq, LinkJson.FromUnixOrMin(hqAt), recent, page);
+            return SurveyShare.Validate(s, DateTime.UtcNow) == null ? s : default;
         }
     }
 }

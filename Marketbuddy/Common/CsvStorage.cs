@@ -45,12 +45,15 @@ namespace Marketbuddy.Common
     {
         private static readonly UTF8Encoding Utf8NoBom = new(false);
 
+        private static readonly string LineEnd = new([(char)13, (char)10]);
+
         private readonly List<T> pending = [];
         private readonly Func<string> resolvePath;
         private readonly string header;
         private readonly Func<T, string> format;
         private readonly Action<Exception> reportFailure;
         private string? cachedPath;
+        private Func<IReadOnlyList<T>>? rewrite;
         private int flushing;
         private int failureReported;
 
@@ -83,6 +86,18 @@ namespace Marketbuddy.Common
             }
         }
 
+        /// <summary>沒有待寫、沒有待重寫、也沒有 flush 在跑（測試等「真的落地了」用）。</summary>
+        internal bool IsIdle
+        {
+            get
+            {
+                lock (Gate)
+                {
+                    return pending.Count == 0 && rewrite == null && Volatile.Read(ref flushing) == 0;
+                }
+            }
+        }
+
         /// <summary>排一列但不啟動寫檔；之後要呼叫 <see cref="Kick"/>。</summary>
         internal void Enqueue(T row)
         {
@@ -94,6 +109,13 @@ namespace Marketbuddy.Common
 
         /// <summary>同 <see cref="Enqueue"/>，但呼叫端已經持有 <see cref="Gate"/>。</summary>
         internal void EnqueueLocked(T row) => pending.Add(row);
+
+        /// <summary>
+        /// 下一次 flush 改成整份重寫（暫存檔＋取代）。呼叫端持有 <see cref="Gate"/>；之後要呼叫 <see cref="Kick"/>。
+        /// 🔴 <paramref name="snapshotLocked"/> 在 <see cref="Gate"/> 內被呼叫，回傳的列必須涵蓋到那一刻為止排過的每一列
+        /// （寫成功後那些待寫列就丟掉）；寫失敗時待寫列照常追加到原檔，原檔不會被動到。
+        /// </summary>
+        internal void RequestRewriteLocked(Func<IReadOnlyList<T>> snapshotLocked) => rewrite = snapshotLocked;
 
         /// <summary>沒有 flush 在跑就開一個；在跑的那個離開前會再看一次待寫清單。</summary>
         internal void Kick()
@@ -110,12 +132,35 @@ namespace Marketbuddy.Common
                 while (true)
                 {
                     List<T> batch;
+                    IReadOnlyList<T>? all = null;
+                    var covered = 0;
                     lock (Gate)
                     {
-                        if (pending.Count == 0)
-                            break;
-                        batch = new List<T>(pending);
-                        pending.Clear();
+                        if (rewrite is { } snapshot)
+                        {
+                            rewrite = null;
+                            all = snapshot();
+                            covered = pending.Count;
+                            batch = [];
+                        }
+                        else
+                        {
+                            if (pending.Count == 0)
+                                break;
+                            batch = new List<T>(pending);
+                            pending.Clear();
+                        }
+                    }
+
+                    if (all != null)
+                    {
+                        RewriteAll(all);
+                        lock (Gate)
+                        {
+                            pending.RemoveRange(0, covered);
+                        }
+
+                        continue;
                     }
 
                     WriteBatch(batch);
@@ -132,7 +177,7 @@ namespace Marketbuddy.Common
                 bool again;
                 lock (Gate)
                 {
-                    again = pending.Count > 0;
+                    again = pending.Count > 0 || rewrite != null;
                 }
 
                 if (again)
@@ -160,6 +205,30 @@ namespace Marketbuddy.Common
                 stream.Write(CsvRewriteFile.Utf8Bom, 0, CsvRewriteFile.Utf8Bom.Length);
             var bytes = Utf8NoBom.GetBytes(text.ToString());
             stream.Write(bytes, 0, bytes.Length);
+        }
+
+        private void RewriteAll(IReadOnlyList<T> rows)
+        {
+            var path = FilePath;
+            var directory = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(directory))
+                Directory.CreateDirectory(directory);
+
+            var temp = path + ".tmp";
+            using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                stream.Write(CsvRewriteFile.Utf8Bom, 0, CsvRewriteFile.Utf8Bom.Length);
+                using var writer = new StreamWriter(stream, Utf8NoBom, 1 << 16);
+                writer.Write(header);
+                writer.Write(LineEnd);
+                foreach (var row in rows)
+                {
+                    writer.Write(format(row));
+                    writer.Write(LineEnd);
+                }
+            }
+
+            File.Move(temp, path, true);
         }
 
         private void ReportFailure(Exception e)

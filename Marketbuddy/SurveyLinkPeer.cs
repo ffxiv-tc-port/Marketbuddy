@@ -220,6 +220,10 @@ namespace Marketbuddy
                                 foreach (var row in batch.Rows)
                                     LinkJson.WriteObservation(w, row);
                                 w.WriteEndArray();
+                                w.WriteStartArray("sales");
+                                foreach (var row in batch.Rows)
+                                    LinkJson.WriteSales(w, row.Sales);
+                                w.WriteEndArray();
                                 w.WriteStartArray("worlds");
                                 foreach (var world in batch.Worlds)
                                     LinkJson.WriteWorld(w, world);
@@ -262,17 +266,37 @@ namespace Marketbuddy
             var batch = message.I64("batch");
             var rowsElement = message.Array("rows", SurveyShare.MaxObservationBatch);
             var worldsElement = message.Array("worlds", SurveyShare.MaxWorldsPerMessage);
+            // 可選：舊對端不送；長度對不上就整份當「不知道」，不拖累觀測本身。
+            System.Text.Json.JsonElement[]? sales = null;
+            if (message.Has("sales"))
+            {
+                var salesElement = message.Array("sales", SurveyShare.MaxObservationBatch);
+                if (salesElement.GetArrayLength() == rowsElement.GetArrayLength())
+                    sales = [.. salesElement.EnumerateArray()];
+            }
+
             var now = DateTime.UtcNow;
             var rows = new List<MarketObservation>(rowsElement.GetArrayLength());
             var worlds = new List<SurveyWorldRow>();
             var skipped = new SortedDictionary<string, int>(StringComparer.Ordinal);
+            var index = 0;
             foreach (var element in rowsElement.EnumerateArray())
             {
                 string? why;
+                var saleElement = sales?[index];
+                index++;
                 if (!LinkJson.TryReadObservation(element, out var obs))
                     why = "bad-field";
                 else
+                {
+                    if (saleElement is { } se)
+                    {
+                        var summary = LinkJson.ReadSales(se);
+                        obs = obs with { Sales = SurveyShare.Validate(summary, now) == null ? summary : default };
+                    }
+
                     why = SurveyShare.Validate(obs, endpoint.KnownItem, endpoint.KnownWorld, now);
+                }
                 if (why == null)
                     rows.Add(obs);
                 else
@@ -780,9 +804,15 @@ namespace Marketbuddy
             return true;
         }
 
-        /// <summary>送一則指令；回指令編號，沒連上回 -1。🔴 只由主機畫面上使用者按的按鈕呼叫。</summary>
+        /// <summary>
+        /// 送一則指令；回指令編號，沒連上回 -1，對端沒回報認得這個指令（舊版）回 -2、什麼都不送。
+        /// 🔴 只由主機畫面上使用者按的按鈕呼叫。
+        /// </summary>
         internal int SendCommand(RemoteCommandKind kind, string listId, IReadOnlyCollection<uint> worlds)
         {
+            if (kind == RemoteCommandKind.FullStart && LatestStatus is not { SupportsFullMarket: true })
+                return -2;
+
             LinkConnection? connection;
             lock (gate)
             {

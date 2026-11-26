@@ -11,6 +11,7 @@ namespace Marketbuddy
     // 「最低價是不是我的」（LowestIsOurs）是單邊視角，不上線；收到的一方用自己的清單與僱員在本地算。
 
     /// <summary>某個世界某件道具一次查價的結果。價格 -1＝沒有掛單或不知道；賣家僱員 0＝不知道。</summary>
+    /// <param name="Sales">同一次查詢回來的成交紀錄摘要；舊檔、舊對端、快取命中都是「不知道」（<see cref="SaleSummary.Known"/>＝false）。</param>
     internal readonly record struct MarketObservation(
         DateTime AtUtc,
         uint WorldId,
@@ -23,10 +24,59 @@ namespace Marketbuddy
         int ListingCount,
         string Source,
         int GateIntervalMs,
-        string Verdict)
+        string Verdict,
+        SaleSummary Sales = default)
     {
         /// <summary>這一次真的問到答案（有人賣或確認沒人賣）。</summary>
         public bool Answered => Verdict is "ok" or "empty";
+
+        /// <summary>問到答案、沒人在賣，而且這一頁成交紀錄確認是空的（成交不知道時是 false）。</summary>
+        public bool NothingAtAll => Verdict == "empty" && Sales.Known && Sales.PageCount == 0;
+    }
+
+    /// <summary>
+    /// 市場查詢附帶的成交紀錄（遊戲一頁最多 20 筆，由新到舊）的摘要。
+    /// <para>🔑 <see cref="Known"/>＝false 時其餘欄位一律無意義（＝不知道，不是 0）。價格 -1／時間 MinValue＝這一頁沒有那個品質的成交。</para>
+    /// </summary>
+    internal readonly record struct SaleSummary(
+        bool Known,
+        long LastNq,
+        DateTime LastNqUtc,
+        long LastHq,
+        DateTime LastHqUtc,
+        int RecentCount,
+        int PageCount)
+    {
+        internal const int RecentDays = 7;
+        internal const int MaxPageCount = 100;
+
+        internal static SaleSummary FromPage(IEnumerable<(long UnitPrice, bool Hq, DateTime AtUtc)> sales, DateTime nowUtc)
+        {
+            long lastNq = -1, lastHq = -1;
+            DateTime nqAt = DateTime.MinValue, hqAt = DateTime.MinValue;
+            int recent = 0, page = 0;
+            var cutoff = nowUtc.AddDays(-RecentDays);
+            foreach (var (price, hq, at) in sales)
+            {
+                if (page >= MaxPageCount)
+                    break;
+                page++;
+                if (at >= cutoff)
+                    recent++;
+                if (hq && at > hqAt)
+                {
+                    hqAt = at;
+                    lastHq = price;
+                }
+                else if (!hq && at > nqAt)
+                {
+                    nqAt = at;
+                    lastNq = price;
+                }
+            }
+
+            return new SaleSummary(true, lastNq, nqAt, lastHq, hqAt, recent, page);
+        }
     }
 
     /// <summary>主機推給另一台的清單裡的一件。</summary>
@@ -134,8 +184,27 @@ namespace Marketbuddy
                 return "bad-gate";
             if (o.Verdict is not ("ok" or "empty" or "refused" or "timeout"))
                 return "bad-verdict";
+            return Validate(o.Sales, nowUtc);
+        }
+
+        /// <returns>null＝通過；否則是拒收原因代碼。不知道的摘要一律通過（內容不會被讀）。</returns>
+        internal static string? Validate(in SaleSummary s, DateTime nowUtc)
+        {
+            if (!s.Known)
+                return null;
+            if (!IsPrice(s.LastNq) || !IsPrice(s.LastHq) || s.LastNq == 0 || s.LastHq == 0)
+                return "bad-sales";
+            if (!IsSaleTime(s.LastNqUtc, s.LastNq, nowUtc) || !IsSaleTime(s.LastHqUtc, s.LastHq, nowUtc))
+                return "bad-sales";
+            if (s.PageCount < 0 || s.PageCount > SaleSummary.MaxPageCount || s.RecentCount < 0 || s.RecentCount > s.PageCount)
+                return "bad-sales";
             return null;
         }
+
+        private static bool IsSaleTime(DateTime at, long price, DateTime nowUtc)
+            => price < 0
+                ? at == DateTime.MinValue
+                : at >= new DateTime(2013, 1, 1, 0, 0, 0, DateTimeKind.Utc) && at <= nowUtc.AddDays(1);
 
         /// <returns>null＝通過；否則是拒收原因代碼。</returns>
         internal static string? Validate(in SurveyWorldRow w, Func<uint, bool>? isKnownWorld, DateTime nowUtc)

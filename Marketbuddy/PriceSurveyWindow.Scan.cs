@@ -32,7 +32,20 @@ namespace Marketbuddy
             else
                 ImGui.TextUnformatted(DrawText.Loc("Current world: ??", worldName));
 
-            if (survey.IsRemoteControlled)
+            if (survey.IsFullMarketActive)
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudYellow);
+                ImGui.TextWrapped(survey.IsRemoteControlled
+                    ? "Full market scan run by the host".Loc()
+                    : "Full market scan running on this computer".Loc());
+                ImGui.PopStyleColor();
+                Grey(DrawText.Loc("Full market: world ?? / ??, ?? / ?? item(s)",
+                    (Math.Max(1, survey.FullWorldsStarted), survey.FullWorldsTotal, survey.Processed, survey.Total),
+                    static (t, v) => t.Loc(v.Item1, v.Item2, v.Item3, v.Item4)));
+                Tooltip("Every marketable item on every world of this data centre, stalest first. Closing this window does not pause it - use Stop below to end it. When it is done it waits for the next press of Start."
+                    .Loc());
+            }
+            else if (survey.IsRemoteControlled)
             {
                 ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudYellow);
                 ImGui.TextWrapped("Run by the host computer: this round uses the host's list and goes through every world on its own. Closing this window does not pause it - use Stop below to end it."

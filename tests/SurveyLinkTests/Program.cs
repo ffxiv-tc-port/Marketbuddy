@@ -49,6 +49,20 @@ internal static class Program
             Run(nameof(MergedWorldIsNotOtherCharacter), MergedWorldIsNotOtherCharacter);
             Run(nameof(BadObservationsAreRejected), BadObservationsAreRejected);
             Run(nameof(DisposeLeavesNothingListening), DisposeLeavesNothingListening);
+            Run(nameof(DigestWritesOneLinePerWindow), DigestWritesOneLinePerWindow);
+            Run(nameof(ObservationLogCompactsKeepsLatestPendingAndCursor), ObservationLogCompactsKeepsLatestPendingAndCursor);
+            Run(nameof(ObservationLogCompactsOnThreshold), ObservationLogCompactsOnThreshold);
+            Run(nameof(OldObservationFileStillLoads), OldObservationFileStillLoads);
+            Run(nameof(SalesTravelOptionallyAndOldShapesStillParse), SalesTravelOptionallyAndOldShapesStillParse);
+            Run(nameof(OldStatusWithoutNewFieldsReadsAsUnknown), OldStatusWithoutNewFieldsReadsAsUnknown);
+            Run(nameof(RoundProgressSurvivesRestart), RoundProgressSurvivesRestart);
+            Run(nameof(FullMarketOrderingAndSkips), FullMarketOrderingAndSkips);
+            Run(nameof(FullMarketFallsBackToLocalTimes), FullMarketFallsBackToLocalTimes);
+            Run(nameof(UniversalisAggregatedParse), UniversalisAggregatedParse);
+            Run(nameof(WorldChoiceIsBatchedPerWorld), WorldChoiceIsBatchedPerWorld);
+            Run(nameof(FullStartNeedsCapabilityAndUnknownKindNeverRuns), FullStartNeedsCapabilityAndUnknownKindNeverRuns);
+            Run(nameof(HostDropsDuringFullScanBackfillKeepsSales), HostDropsDuringFullScanBackfillKeepsSales);
+            Run(nameof(TravelWatchSpotsAStalledTeleport), TravelWatchSpotsAStalledTeleport);
         }
         finally
         {
@@ -667,6 +681,440 @@ internal static class Program
         }
 
         Check("port closed after dispose", refused);
+    }
+
+    // =====================================================================
+    //  第二階段
+    // =====================================================================
+
+    private static SaleSummary Sales(int recent = 2, int page = 5)
+        => new(true, 900, T0.AddDays(-1), -1, DateTime.MinValue, recent, page);
+
+    private static void DigestWritesOneLinePerWindow()
+    {
+        var lines = new List<string>();
+        var digest = new SurveyLinkDigest(TimeSpan.FromMinutes(5), lines.Add, T0);
+        for (var i = 0; i < 150; i++)
+        {
+            digest.NoteReceived(1, 1);
+            digest.NoteSent(1);
+            digest.NoteLocal(i % 50 == 0 ? "refused" : "ok");
+            Check("no line before the window ends", !digest.Tick(T0.AddSeconds(2 * i), 0) && lines.Count == 0);
+        }
+
+        Check("one line at the end of the window", digest.Tick(T0.AddMinutes(5), 7) && lines.Count == 1, lines.Count.ToString());
+        Check("line carries the totals", lines.Count == 1 && lines[0].Contains("收到 150 筆", StringComparison.Ordinal)
+                                         && lines[0].Contains("被拒 3", StringComparison.Ordinal)
+                                         && lines[0].Contains("還排著 7 筆", StringComparison.Ordinal), lines.Count > 0 ? lines[0] : "-");
+        Check("quiet window writes nothing", !digest.Tick(T0.AddMinutes(11), 0) && lines.Count == 1);
+        digest.NoteLocal("ok");
+        Check("forced flush on unload", digest.Tick(T0.AddMinutes(12), 0, force: true) && lines.Count == 2);
+    }
+
+    private static void ObservationLogCompactsKeepsLatestPendingAndCursor()
+    {
+        var dir = NewDir();
+        var log = new SurveyObservationLog(dir, _ => { });
+        log.BeginLoad().Wait();
+        var key = Obs(0) with { ItemId = 7000 };
+        log.RecordLocal(key);                                                   // seq 1
+        log.RecordLocal(key with { AtUtc = T0.AddMinutes(1), LowestNq = 900 }); // seq 2
+        log.RecordLocal(key with { AtUtc = T0.AddMinutes(2), LowestNq = 800, Sales = Sales() }); // seq 3（最新的答案）
+        log.RecordLocal(key with { AtUtc = T0.AddMinutes(3), Verdict = "refused", LowestNq = -1 }); // seq 4（比答案新的沒問到）
+        for (var i = 0; i < 5; i++)
+            log.AcceptRemote(Obs(i, world: 4029) with { ItemId = 7100, AtUtc = T0.AddMinutes(i) });
+        log.Ack(2);
+        Check("written before compaction", WaitFor(() => log.IsSettled));
+        File.WriteAllText(Path.Combine(dir, SurveyObservationLog.AckFileName), "2");
+        var ackBefore = File.ReadAllText(Path.Combine(dir, SurveyObservationLog.AckFileName));
+
+        log.RequestCompact();
+        Check("compacted", WaitFor(() => log.Size.Compactions == 1 && log.IsSettled));
+        var dataLines = File.ReadAllLines(Path.Combine(dir, SurveyObservationLog.FileName)).Length - 1;
+        // 7000：答案 seq3（待送）＋沒問到 seq4（待送）；7100：最新一筆遠端。
+        Check("file holds only latest per key plus pending", dataLines == 3, dataLines.ToString());
+        Check("cursor untouched", File.ReadAllText(Path.Combine(dir, SurveyObservationLog.AckFileName)) == ackBefore);
+
+        var reborn = new SurveyObservationLog(dir, _ => { });
+        reborn.BeginLoad().Wait();
+        Check("pending survives compaction", reborn.OutboxCount == 2, reborn.OutboxCount.ToString());
+        var peek = reborn.PeekOutbox(10);
+        Check("pending keeps its sequence numbers", peek.Count == 2 && peek[0].Seq == 3 && peek[1].Seq == 4);
+        Check("latest answer kept with sales", reborn.TryGetLatest(4028, 7000, out var latest)
+                                               && latest.LowestNq == 800 && latest.Sales == Sales());
+        Check("remote latest kept", reborn.TryGetLatest(4029, 7100, out var remote) && remote.AtUtc == T0.AddMinutes(4));
+        Check("older duplicate still recognised", reborn.AcceptRemote(Obs(0, world: 4029) with { ItemId = 7100, AtUtc = T0.AddMinutes(4) })
+                                                  == SurveyObservationLog.Intake.Duplicate);
+        reborn.RecordLocal(Obs(9) with { ItemId = 7200 });
+        Check("new seq continues after compaction", reborn.PeekOutbox(10)[^1].Seq == 5);
+        reborn.Ack(5);
+        Check("ack after compaction drains", reborn.OutboxCount == 0);
+    }
+
+    private static void ObservationLogCompactsOnThreshold()
+    {
+        var saved = SurveyObservationLog.CompactSlack;
+        SurveyObservationLog.CompactSlack = 20;
+        try
+        {
+            var dir = NewDir();
+            var log = new SurveyObservationLog(dir, _ => { });
+            log.BeginLoad().Wait();
+            for (var i = 0; i < 300; i++)
+                log.AcceptRemote(Obs(0) with { ItemId = 7300 + (uint)(i % 3), AtUtc = T0.AddSeconds(i) });
+            Check("settles", WaitFor(() => log.IsSettled));
+            var dataLines = File.ReadAllLines(Path.Combine(dir, SurveyObservationLog.FileName)).Length - 1;
+            Check("file stays bounded", log.Size.Compactions > 0 && dataLines <= 3 * 2 + 20 + 3, $"{dataLines} lines, {log.Size.Compactions} compactions");
+
+            // 讀檔時就超過門檻：讀完立刻重寫。
+            var big = NewDir();
+            var path = Path.Combine(big, SurveyObservationLog.FileName);
+            var text = new StringBuilder("seq,origin,timestampUtc,worldId,worldName,itemId,lowestNq,lowestNqRetainer,lowestHq,lowestHqRetainer,listingCount,source,gateIntervalMs,verdict\r\n");
+            for (var i = 0; i < 200; i++)
+                text.Append($"0,R,2026-11-26 08:{i / 60:00}:{i % 60:00},4028,伊弗利特,7400,{1000 + i},0,-1,0,1,live,2000,ok\r\n");
+            File.WriteAllText(path, text.ToString(), new UTF8Encoding(true));
+            var loaded = new SurveyObservationLog(big, _ => { });
+            loaded.BeginLoad().Wait();
+            Check("compacts on load", WaitFor(() => loaded.Size.Compactions == 1 && loaded.IsSettled)
+                                      && File.ReadAllLines(path).Length == 2, File.ReadAllLines(path).Length.ToString());
+        }
+        finally
+        {
+            SurveyObservationLog.CompactSlack = saved;
+        }
+    }
+
+    private static void OldObservationFileStillLoads()
+    {
+        var dir = NewDir();
+        File.WriteAllText(Path.Combine(dir, SurveyObservationLog.FileName),
+            "seq,origin,timestampUtc,worldId,worldName,itemId,lowestNq,lowestNqRetainer,lowestHq,lowestHqRetainer,listingCount,source,gateIntervalMs,verdict\r\n" +
+            "1,L,2026-11-26 08:00:00,4028,伊弗利特,7500,1000,77,-1,0,3,live,2000,ok\r\n",
+            new UTF8Encoding(true));
+        var log = new SurveyObservationLog(dir, _ => { });
+        log.BeginLoad().Wait();
+        Check("old 14-column row loads", log.TryGetLatest(4028, 7500, out var o) && o.LowestNq == 1000);
+        Check("its sales are unknown, not zero", !o.Sales.Known);
+        Check("old row is still pending", log.OutboxCount == 1);
+        log.RecordLocal(Obs(1) with { ItemId = 7501, Sales = Sales(page: 0, recent: 0) with { LastNq = -1, LastNqUtc = DateTime.MinValue } });
+        Check("mixed file written", WaitFor(() => log.IsSettled));
+        var again = new SurveyObservationLog(dir, _ => { });
+        again.BeginLoad().Wait();
+        Check("new row with sales reads back", again.TryGetLatest(4028, 7501, out var n) && n.Sales.Known && n.Sales.PageCount == 0);
+        Check("both rows pending", again.OutboxCount == 2);
+        var brief = again.WorldBrief(4028);
+        Check("brief marks verdict ok with empty page as not nothing-at-all", brief.TryGetValue(7501, out var b) && !b.NothingAtAll);
+    }
+
+    private static void SalesTravelOptionallyAndOldShapesStillParse()
+    {
+        // 新寫法送出的觀測：本身仍是 12 欄（舊對端的讀法照樣讀得懂），成交在平行的 sales 陣列。
+        var obs = Obs(1) with { Sales = Sales() };
+        var json = LinkJson.Build("obs", w =>
+        {
+            w.WriteNumber("batch", 1);
+            w.WriteStartArray("rows");
+            LinkJson.WriteObservation(w, obs);
+            w.WriteEndArray();
+            w.WriteStartArray("sales");
+            LinkJson.WriteSales(w, obs.Sales);
+            w.WriteEndArray();
+            w.WriteStartArray("worlds");
+            w.WriteEndArray();
+        });
+        var m = LinkMessage.Parse(json);
+        var row = m.Array("rows", 10).EnumerateArray().GetEnumerator();
+        row.MoveNext();
+        Check("old reader still reads the row", LinkJson.TryReadObservation(row.Current, out var plain) && !plain.Sales.Known);
+        var sale = m.Array("sales", 10).EnumerateArray().GetEnumerator();
+        sale.MoveNext();
+        Check("sales round trip", LinkJson.ReadSales(sale.Current) == obs.Sales);
+        Check("unknown sales travel as null", LinkJson.Build("x", w =>
+        {
+            w.WriteStartArray("s");
+            LinkJson.WriteSales(w, default);
+            w.WriteEndArray();
+        }).AsSpan().IndexOf("[null]"u8) >= 0);
+        Check("bad sales are rejected", SurveyShare.Validate(Sales() with { RecentCount = 9, PageCount = 5 }, T0) == "bad-sales"
+                                        && SurveyShare.Validate(Sales() with { LastNqUtc = DateTime.MinValue }, T0) == "bad-sales"
+                                        && SurveyShare.Validate(default(SaleSummary), T0) == null);
+
+        // 實線：有成交的與沒成交的（舊對端＝不送 sales）都收得下。
+        var (host, hostEp, client, clientEp) = Paired();
+        using (host)
+        using (client)
+        {
+            clientEp.Log.RecordLocal(Obs(2) with { ItemId = 7600, Sales = Sales() });
+            clientEp.Log.RecordLocal(Obs(3) with { ItemId = 7601 });
+            Check("both arrive", WaitFor(() => hostEp.AcceptedCount == 2), hostEp.AcceptedCount.ToString());
+            Check("sales arrive intact", hostEp.Log.TryGetLatest(4028, 7600, out var a) && a.Sales == Sales());
+            Check("missing sales arrive as unknown", hostEp.Log.TryGetLatest(4028, 7601, out var b) && !b.Sales.Known);
+        }
+    }
+
+    private static void OldStatusWithoutNewFieldsReadsAsUnknown()
+    {
+        // 舊版 WriteStatus 只寫到 max。
+        var old = LinkJson.Build("status", w =>
+        {
+            w.WriteBoolean("loggedIn", true);
+            w.WriteNumber("worldId", 4028);
+            w.WriteString("world", "伊弗利特");
+            w.WriteString("state", "idle");
+            w.WriteNumber("processed", 0);
+            w.WriteNumber("total", 0);
+            w.WriteBoolean("armed", false);
+            w.WriteBoolean("remote", false);
+            w.WriteString("text", "");
+            w.WriteString("tour", "");
+            w.WriteString("block", "");
+            w.WriteBoolean("consent", true);
+            w.WriteString("listId", "");
+            w.WriteNumber("outbox", 0);
+            w.WriteNumber("step", 0);
+            w.WriteNumber("max", 0);
+        });
+        var s = LinkJson.ReadStatus(LinkMessage.Parse(old));
+        Check("old peer cannot do full market", !s.SupportsFullMarket && s.Caps == 0);
+        Check("unknowns stay unknown", s.FullPending == -1 && s.Gil == -1 && s.Mode.Length == 0 && s.Halt.Length == 0);
+        var fresh = ClientStatus.Empty with { Caps = ClientStatus.CapFullMarket, Mode = "full", FullWorld = 2, FullWorlds = 8, FullPending = 1234, Gil = 5, Halt = "x" };
+        var back = LinkJson.ReadStatus(LinkMessage.Parse(LinkJson.Build("status", w => LinkJson.WriteStatus(w, fresh))));
+        Check("new fields round trip", back == fresh, back.ToString());
+    }
+
+    private static void RoundProgressSurvivesRestart()
+    {
+        var dir = NewDir();
+        var p = new SurveyRoundProgress(dir, _ => { });
+        p.BeginLoad().Wait();
+        var key = SurveyRoundProgress.ListKeyOf([new SharedListItem(5, true), new SharedListItem(3, false)]);
+        Check("list key ignores order", key == SurveyRoundProgress.ListKeyOf([new SharedListItem(3, false), new SharedListItem(5, true)])
+                                        && key != SurveyRoundProgress.ListKeyOf([new SharedListItem(3, false)]));
+        var proxyRow = new SurveyWorldRow(T0, 4029, "迦樓羅", 0, "imported", 642, 642, true);
+        var fullRow = new SurveyWorldRow(T0.AddHours(1), 4030, "泰坦", 0, "full-market", 16412, 900, false);
+        p.Record(SurveyRoundProgress.ModeProxy, key, proxyRow);
+        p.Record(SurveyRoundProgress.ModeFull, string.Empty, fullRow);
+        Check("written", WaitFor(() => File.Exists(Path.Combine(dir, SurveyRoundProgress.FileName))
+                                       && File.ReadAllLines(Path.Combine(dir, SurveyRoundProgress.FileName)).Length == 3));
+        var again = new SurveyRoundProgress(dir, _ => { });
+        again.BeginLoad().Wait();
+        Check("proxy row back", again.TryGet(SurveyRoundProgress.ModeProxy, key, 4029, out var a) && a.Surveyed == 642 && a.Completed);
+        Check("full row back", again.TryGet(SurveyRoundProgress.ModeFull, string.Empty, 4030, out var b) && b.Surveyed == 900 && !b.Completed
+                               && b.AtUtc == fullRow.AtUtc);
+        Check("other list sees nothing", again.Rows(SurveyRoundProgress.ModeProxy, "deadbeef").Count == 0);
+    }
+
+    private static readonly DateTime Now2 = new(2026, 11, 26, 12, 0, 0, DateTimeKind.Utc);
+
+    private static void FullMarketOrderingAndSkips()
+    {
+        uint[] items = [1, 2, 3, 4, 5, 6];
+        var uploads = new UploadTimes();
+        uploads.Set(4028, 1, Now2.AddDays(-10));
+        uploads.Set(4028, 2, Now2.AddHours(-1));   // 有人一小時前更新過 ⇒ 跳過
+        uploads.Set(4028, 4, Now2.AddDays(-20));
+        uploads.Set(4028, 6, Now2.AddDays(-9));
+        var local = new Dictionary<uint, ItemBrief>
+        {
+            [4] = new(Now2.AddHours(-2), false),     // 兩台之一兩小時前問過 ⇒ 跳過
+            [5] = new(Now2.AddDays(-2), true),       // 哪裡都沒有、兩天前問過 ⇒ 降頻跳過
+            [6] = new(Now2.AddDays(-10), true),      // 哪裡都沒有、十天前問過 ⇒ 重掃
+        };
+        var nothing = new HashSet<uint> { 5, 6 };
+        var plan = FullMarketPlanner.PlanWorld(4028, items, local, nothing, uploads, Now2, 24, 7);
+        Check("stalest first, never-uploaded at the front", string.Join(",", plan.Queue) == "3,1,6", string.Join(",", plan.Queue));
+        Check("fresh skipped", plan.SkippedFresh == 2, plan.SkippedFresh.ToString());
+        Check("dead items rechecked less often", plan.SkippedNoData == 1, plan.SkippedNoData.ToString());
+        var noSkip = FullMarketPlanner.PlanWorld(4028, items, local, nothing, uploads, Now2, 0, 0);
+        Check("0 turns both skips off", noSkip.Queue.Count == 6 && noSkip.SkippedFresh == 0 && noSkip.SkippedNoData == 0);
+
+        // 「每個世界都沒有」：任何一個世界沒問過或有成交就不算。
+        var w1 = new Dictionary<uint, ItemBrief> { [5] = new(Now2, true), [6] = new(Now2, true), [7] = new(Now2, true) };
+        var w2 = new Dictionary<uint, ItemBrief> { [5] = new(Now2, true), [6] = new(Now2, false) };
+        var dead = FullMarketPlanner.NothingAnywhere([w1, w2]);
+        Check("dead only when dead on every world", dead.SetEquals([5]), string.Join(",", dead));
+    }
+
+    private static void FullMarketFallsBackToLocalTimes()
+    {
+        uint[] items = [10, 11, 12];
+        var local = new Dictionary<uint, ItemBrief>
+        {
+            [10] = new(Now2.AddDays(-1.5), false),
+            [11] = new(Now2.AddDays(-3), false),
+        };
+        var plan = FullMarketPlanner.PlanWorld(4028, items, local, new HashSet<uint>(), null, Now2, 24, 7);
+        Check("Universalis down: never-asked first, then by local time", string.Join(",", plan.Queue) == "12,11,10", string.Join(",", plan.Queue));
+        var withUni = new UploadTimes();
+        withUni.Set(4028, 12, Now2.AddHours(-3));
+        var plan2 = FullMarketPlanner.PlanWorld(4028, items, local, new HashSet<uint>(), withUni, Now2, 24, 7);
+        Check("Universalis time is used when there is one", string.Join(",", plan2.Queue) == "11,10" && plan2.SkippedFresh == 1,
+            string.Join(",", plan2.Queue));
+    }
+
+    private static void UniversalisAggregatedParse()
+    {
+        // 形狀照 Universalis v2 aggregated 的文件：results[].itemId、results[].worldUploadTimes[].{worldId,timestamp(ms)}、failedItems。
+        var json = """
+                   {"results":[
+                     {"itemId":5057,"nq":{"minListing":{"world":{"price":10}}},"hq":{},
+                      "worldUploadTimes":[{"worldId":4028,"timestamp":1764140400000},{"worldId":4029,"timestamp":1764054000000}]},
+                     {"itemId":5058,"nq":{},"hq":{},"worldUploadTimes":[]},
+                     {"itemId":"bad"}],
+                    "failedItems":[99999]}
+                   """u8;
+        var times = new UploadTimes();
+        var n = times.AddAggregated(json);
+        Check("items counted", n == 2, n.ToString());
+        Check("upload time per world", times.TryGet(4028, 5057, out var t) && t == DateTimeOffset.FromUnixTimeMilliseconds(1764140400000).UtcDateTime);
+        Check("no time recorded for an item nobody uploaded", !times.TryGet(4028, 5058, out _) && times.Count == 2);
+        var threw = false;
+        try
+        {
+            new UploadTimes().AddAggregated("error code: 520"u8);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            threw = true;
+        }
+
+        Check("non-JSON error page is a failure, not an empty answer", threw);
+    }
+
+    private static void WorldChoiceIsBatchedPerWorld()
+    {
+        Check("most pending wins", FullMarketPlanner.ChooseWorld([(4028, 10, DateTime.MinValue), (4029, 30, Now2)]) == 4029);
+        Check("tie goes to the stalest", FullMarketPlanner.ChooseWorld([(4028, 30, Now2), (4029, 30, Now2.AddDays(-1))]) == 4029);
+        Check("nothing pending is 0", FullMarketPlanner.ChooseWorld([(4028, 0, DateTime.MinValue)]) == 0);
+
+        // 模擬一輪：挑世界、把那個世界的待掃整份掃完、再挑。換世界次數＝有待掃的世界數，不是件數。
+        uint[] worlds = [4028, 4029, 4030];
+        var items = new List<uint>();
+        for (uint i = 1; i <= 50; i++)
+            items.Add(i);
+        var briefs = new Dictionary<uint, Dictionary<uint, ItemBrief>>();
+        foreach (var w in worlds)
+            briefs[w] = new Dictionary<uint, ItemBrief>();
+        for (uint i = 1; i <= 40; i++)
+            briefs[4030][i] = new ItemBrief(Now2.AddHours(-1), false); // 4030 大部分剛掃過
+        var visited = new HashSet<uint>();
+        var order = new List<uint>();
+        var switches = 0;
+        while (true)
+        {
+            var choices = new List<(uint, int, DateTime)>();
+            foreach (var w in worlds)
+            {
+                if (visited.Contains(w))
+                    continue;
+                var plan = FullMarketPlanner.PlanWorld(w, items, briefs[w], new HashSet<uint>(), null, Now2, 24, 7);
+                choices.Add((w, plan.Queue.Count, DateTime.MinValue));
+            }
+
+            var best = FullMarketPlanner.ChooseWorld(choices);
+            if (best == 0)
+                break;
+            visited.Add(best);
+            order.Add(best);
+            switches++;
+            foreach (var item in FullMarketPlanner.PlanWorld(best, items, briefs[best], new HashSet<uint>(), null, Now2, 24, 7).Queue)
+                briefs[best][item] = new ItemBrief(Now2, false);
+        }
+
+        Check("each world once, emptiest last", string.Join(",", order) == "4028,4029,4030" && switches == 3, string.Join(",", order));
+    }
+
+    private static void FullStartNeedsCapabilityAndUnknownKindNeverRuns()
+    {
+        var (host, _, client, clientEp) = Paired();
+        using (host)
+        using (client)
+        {
+            var commands = new List<RemoteCommandKind>();
+            clientEp.OnCommand = c =>
+            {
+                lock (commands)
+                    commands.Add(c.Kind);
+                return null;
+            };
+
+            // 對端回報的狀態沒有 caps（舊版）：主機根本不送。
+            clientEp.Status = ClientStatus.Empty with { LoggedIn = true, Processed = 1 };
+            WaitFor(() => host.LatestStatus is { Processed: 1 });
+            Check("not sent to an old peer", host.SendCommand(RemoteCommandKind.FullStart, string.Empty, []) == -2);
+            Thread.Sleep(300);
+            lock (commands)
+                Check("old peer saw nothing", commands.Count == 0);
+
+            clientEp.Status = ClientStatus.Empty with { LoggedIn = true, Processed = 2, Caps = ClientStatus.CapFullMarket };
+            WaitFor(() => host.LatestStatus is { Processed: 2 });
+            var id = host.SendCommand(RemoteCommandKind.FullStart, string.Empty, []);
+            Check("new peer runs it", WaitFor(() => host.LastCommandResult is { Ok: true } r && r.Id == id && r.Kind == RemoteCommandKind.FullStart));
+            lock (commands)
+                Check("arrived as full start", commands.Count == 1 && commands[0] == RemoteCommandKind.FullStart);
+
+            // 舊版對端收到不認得的指令名＝這裡收到 "zzz" 的同一條路：擲 bad-field 斷線，什麼都不照做（不是「停止」）。
+            var connection = typeof(SurveyLinkHost).GetField("current", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .GetValue(host) as LinkConnection;
+            connection!.Post(LinkJson.Build("cmd", w =>
+            {
+                w.WriteNumber("id", 99);
+                w.WriteString("kind", "zzz");
+                w.WriteString("listId", string.Empty);
+                w.WriteStartArray("worlds");
+                w.WriteEndArray();
+            }));
+            Check("unknown kind drops the link", WaitFor(() => clientEp.Logged("disconnected:bad-field")));
+            lock (commands)
+                Check("unknown kind ran nothing", commands.Count == 1);
+            Check("and it comes back", WaitFor(() => client.IsConnected && host.IsConnected, 8000));
+        }
+    }
+
+    private static void HostDropsDuringFullScanBackfillKeepsSales()
+    {
+        var hostDir = NewDir();
+        var hostEp = new FakeEndpoint(hostDir);
+        var clientEp = new FakeEndpoint(NewDir());
+        var host = new SurveyLinkHost(hostEp);
+        host.Start(0);
+        var port = host.Port;
+        using var client = new SurveyLinkClient(clientEp, new IPEndPoint(IPAddress.Loopback, port));
+        client.Start();
+        client.RequestPairing();
+        WaitFor(() => host.PendingPairing != null);
+        host.ResolvePairing(true);
+        WaitFor(() => client.IsConnected && host.IsConnected);
+        var savedKey = hostEp.Key;
+        host.Dispose();
+        Check("down", WaitFor(() => !client.IsConnected));
+
+        for (var i = 0; i < 2500; i++)
+            clientEp.Log.RecordLocal(Obs(i, world: (uint)(4028 + (i % 3))) with { ItemId = (uint)(10_000 + i), Sales = Sales() });
+        var hostEp2 = new FakeEndpoint(hostDir) { Key = savedKey };
+        using var host2 = new SurveyLinkHost(hostEp2);
+        host2.Start(port);
+        Check("backfilled in batches", WaitFor(() => hostEp2.AcceptedCount == 2500, 15000), hostEp2.AcceptedCount.ToString());
+        Check("sales came along", hostEp2.Log.TryGetLatest(4029, 10_001, out var o) && o.Sales == Sales());
+        var again = ((ISurveyLinkEndpoint)hostEp2).Receive([Obs(5, world: 4030) with { ItemId = 10_005, Sales = Sales() }], []);
+        Check("replay is a no-op", again == 0 && hostEp2.AcceptedCount == 2500);
+        Check("outbox drained", WaitFor(() => clientEp.Log.OutboxCount == 0));
+    }
+
+    private static void TravelWatchSpotsAStalledTeleport()
+    {
+        var w = new TravelWatch();
+        w.Start(T0, 4030);
+        Check("grace", w.Tick(T0.AddSeconds(1), true, 4029, false, false) == TravelWatch.Result.Waiting);
+        Check("busy keeps waiting", w.Tick(T0.AddSeconds(20), true, 4029, true, false) == TravelWatch.Result.Waiting);
+        Check("loading screen keeps waiting", w.Tick(T0.AddSeconds(25), true, 4029, false, true) == TravelWatch.Result.Waiting);
+        Check("idle but not long enough", w.Tick(T0.AddSeconds(27), true, 4029, false, false) == TravelWatch.Result.Waiting);
+        Check("idle long enough after Lifestream gave up", w.Tick(T0.AddSeconds(32.5), true, 4029, false, false) == TravelWatch.Result.NotStarted);
+        w.Start(T0, 4030);
+        Check("arrived wins", w.Tick(T0.AddSeconds(60), true, 4030, false, false) == TravelWatch.Result.Arrived);
+        w.Start(T0, 4030);
+        w.Tick(T0.AddSeconds(1), true, 4029, false, false);
+        Check("never busy still fails fast", w.Tick(T0.AddSeconds(9), true, 4029, false, false) == TravelWatch.Result.NotStarted);
     }
 
     // =====================================================================

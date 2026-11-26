@@ -306,7 +306,7 @@ namespace Marketbuddy
         {
             // 🔴 主機遠端開始的那一輪不跟著視窗走：這台通常沒人看著，主機那邊也可能根本沒開視窗。
             //    要停它用這台的停止按鈕、Marketbuddy.StopAll，或主機上的停止。
-            if (survey.IsRemoteControlled)
+            if (survey.RunsUnattended)
                 return;
 
             survey.RequestPause("The survey window was closed".Loc());

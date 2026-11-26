@@ -149,8 +149,21 @@ namespace Marketbuddy
         string ListId,
         int Outbox,
         int TourStep,
-        int TourMax)
+        int TourMax,
+        int Caps = 0,
+        string Mode = "",
+        int FullWorld = 0,
+        int FullWorlds = 0,
+        int FullPending = -1,
+        bool FullPlanned = false,
+        string Halt = "",
+        long Gil = -1)
     {
+        /// <summary>這台認得「全市場掃描」指令。舊版不送 <c>caps</c>＝0。</summary>
+        internal const int CapFullMarket = 1;
+
+        internal bool SupportsFullMarket => (Caps & CapFullMarket) != 0;
+
         internal static readonly ClientStatus Empty =
             new(false, 0, string.Empty, "idle", 0, 0, false, false, string.Empty, string.Empty, string.Empty, false,
                 string.Empty, 0, 0, 0);
@@ -162,9 +175,12 @@ namespace Marketbuddy
         Pause = 1,
         Resume = 2,
         Stop = 3,
+
+        /// <summary>全市場掃描一輪。🔴 舊版對端不認得這個名字會擲 bad-field 斷線（不會照做），所以主機只對回報過 <see cref="ClientStatus.CapFullMarket"/> 的對端送。</summary>
+        FullStart = 4,
     }
 
-    /// <summary>主機送過來的巡檢指令。🔴 只有這四種；沒有任何上架、改價、下架、賣商店、重掛的指令存在。</summary>
+    /// <summary>主機送過來的巡檢指令。🔴 只有這五種；沒有任何上架、改價、下架、賣商店、重掛的指令存在。</summary>
     internal sealed record RemoteCommand(int Id, RemoteCommandKind Kind, string ListId, IReadOnlyList<uint> Worlds);
 
     /// <summary>一則已驗證過 MAC 的訊息。</summary>
@@ -176,6 +192,8 @@ namespace Marketbuddy
             "welcome", "ping", "status", "list-begin", "list-chunk", "list-end", "list-result",
             "cmd", "cmd-result", "obs", "obs-ack",
         };
+
+        internal bool Has(string name) => Root.TryGetProperty(name, out var v) && v.ValueKind != JsonValueKind.Null;
 
         public required string Type;
         public required JsonElement Root;
@@ -322,6 +340,55 @@ namespace Marketbuddy
             return true;
         }
 
+        /// <summary>
+        /// 成交摘要走觀測訊息裡另一個<b>可選</b>的平行陣列 <c>sales</c>（第 i 個對應 <c>rows</c> 第 i 個）：
+        /// 觀測本身維持 12 欄，舊對端只認 12 欄、也不讀 <c>sales</c>，照樣收得下。不知道寫 null。
+        /// </summary>
+        internal static void WriteSales(Utf8JsonWriter w, in SaleSummary s)
+        {
+            if (!s.Known)
+            {
+                w.WriteNullValue();
+                return;
+            }
+
+            w.WriteStartArray();
+            w.WriteNumberValue(s.LastNq);
+            w.WriteNumberValue(UnixOrZero(s.LastNqUtc));
+            w.WriteNumberValue(s.LastHq);
+            w.WriteNumberValue(UnixOrZero(s.LastHqUtc));
+            w.WriteNumberValue(s.RecentCount);
+            w.WriteNumberValue(s.PageCount);
+            w.WriteEndArray();
+        }
+
+        /// <summary>讀不懂的一律當「不知道」（回 default），不拖累同一筆觀測。</summary>
+        internal static SaleSummary ReadSales(JsonElement e)
+        {
+            if (e.ValueKind != JsonValueKind.Array || e.GetArrayLength() != 6)
+                return default;
+            var v = new JsonElement[6];
+            var i = 0;
+            foreach (var item in e.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Number)
+                    return default;
+                v[i++] = item;
+            }
+
+            if (!v[0].TryGetInt64(out var nq) || !v[1].TryGetInt64(out var nqAt) || nqAt < 0 || nqAt > 4_102_444_800
+                || !v[2].TryGetInt64(out var hq) || !v[3].TryGetInt64(out var hqAt) || hqAt < 0 || hqAt > 4_102_444_800
+                || !v[4].TryGetInt32(out var recent) || !v[5].TryGetInt32(out var page))
+                return default;
+            return new SaleSummary(true, nq, FromUnixOrMin(nqAt), hq, FromUnixOrMin(hqAt), recent, page);
+        }
+
+        internal static long UnixOrZero(DateTime utc)
+            => utc == DateTime.MinValue ? 0 : new DateTimeOffset(DateTime.SpecifyKind(utc, DateTimeKind.Utc)).ToUnixTimeSeconds();
+
+        internal static DateTime FromUnixOrMin(long unix)
+            => unix <= 0 ? DateTime.MinValue : DateTimeOffset.FromUnixTimeSeconds(unix).UtcDateTime;
+
         internal static void WriteWorld(Utf8JsonWriter w, SurveyWorldRow row)
         {
             w.WriteStartArray();
@@ -374,6 +441,14 @@ namespace Marketbuddy
             w.WriteNumber("outbox", s.Outbox);
             w.WriteNumber("step", s.TourStep);
             w.WriteNumber("max", s.TourMax);
+            w.WriteNumber("caps", s.Caps);
+            w.WriteString("mode", s.Mode);
+            w.WriteNumber("fullWorld", s.FullWorld);
+            w.WriteNumber("fullWorlds", s.FullWorlds);
+            w.WriteNumber("fullPending", s.FullPending);
+            w.WriteBoolean("fullPlanned", s.FullPlanned);
+            w.WriteString("halt", s.Halt);
+            w.WriteNumber("gil", s.Gil);
         }
 
         internal static ClientStatus ReadStatus(LinkMessage m)
@@ -400,14 +475,25 @@ namespace Marketbuddy
                 listId,
                 Math.Max(0, m.I32("outbox")),
                 Math.Clamp(m.I32("step"), 0, 64),
-                Math.Clamp(m.I32("max"), 0, 64));
+                Math.Clamp(m.I32("max"), 0, 64),
+                m.Has("caps") ? m.I32("caps") : 0,
+                m.Has("mode") ? ReadMode(m.Str("mode", 16)) : string.Empty,
+                m.Has("fullWorld") ? Math.Clamp(m.I32("fullWorld"), 0, 64) : 0,
+                m.Has("fullWorlds") ? Math.Clamp(m.I32("fullWorlds"), 0, 64) : 0,
+                m.Has("fullPending") ? Math.Max(-1, m.I32("fullPending")) : -1,
+                m.Has("fullPlanned") && m.Bool("fullPlanned"),
+                m.Has("halt") ? SurveyShare.CleanText(m.Str("halt", 2048)) : string.Empty,
+                m.Has("gil") ? Math.Max(-1, m.I64("gil")) : -1);
         }
+
+        private static string ReadMode(string mode) => mode is "full" or "proxy" ? mode : string.Empty;
 
         internal static string KindName(RemoteCommandKind kind) => kind switch
         {
             RemoteCommandKind.Start => "start",
             RemoteCommandKind.Pause => "pause",
             RemoteCommandKind.Resume => "resume",
+            RemoteCommandKind.FullStart => "full",
             _ => "stop",
         };
 
@@ -426,6 +512,9 @@ namespace Marketbuddy
                     return true;
                 case "stop":
                     kind = RemoteCommandKind.Stop;
+                    return true;
+                case "full":
+                    kind = RemoteCommandKind.FullStart;
                     return true;
                 default:
                     kind = RemoteCommandKind.Stop;
