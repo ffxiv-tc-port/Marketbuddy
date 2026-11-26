@@ -32,6 +32,14 @@ namespace Marketbuddy
             else
                 ImGui.TextUnformatted(DrawText.Loc("Current world: ??", worldName));
 
+            if (survey.IsRemoteControlled)
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, ImGuiColors.DalamudYellow);
+                ImGui.TextWrapped("Run by the host computer: this round uses the host's list and goes through every world on its own. Closing this window does not pause it - use Stop below to end it."
+                    .Loc());
+                ImGui.PopStyleColor();
+            }
+
             ImGui.Spacing();
             ImGui.Separator();
             ImGui.Spacing();

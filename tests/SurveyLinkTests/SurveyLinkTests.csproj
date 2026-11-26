@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <!-- 離線情境測試：用 loopback 真 socket 跑巡檢區網連線（配對、認證、框架、指令、觀測同步、斷線補傳、Dispose）。
+         只編不引用 Dalamud 的檔；PriceSurveyLog／PriceSurveyWorldLog 用到的 Log 與設定目錄由 Stubs.cs 提供。
+         不在 Marketbuddy.sln 裡，CI 只建 Marketbuddy/Marketbuddy.csproj，不會碰到它。
+         ProtocolSource／ObsLogSource 可指到別的檔（給突變體驗證用），預設是正式那份。執行方式寫在 Program.cs 開頭。 -->
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net9.0</TargetFramework>
+        <Nullable>enable</Nullable>
+        <LangVersion>latest</LangVersion>
+        <ImplicitUsings>disable</ImplicitUsings>
+        <ProtocolSource Condition="'$(ProtocolSource)' == ''">../../Marketbuddy/SurveyLinkProtocol.cs</ProtocolSource>
+        <ObsLogSource Condition="'$(ObsLogSource)' == ''">../../Marketbuddy/SurveyObservationLog.cs</ObsLogSource>
+    </PropertyGroup>
+    <ItemGroup>
+        <Compile Include="$(ProtocolSource)" Link="SurveyLinkProtocol.cs" />
+        <Compile Include="$(ObsLogSource)" Link="SurveyObservationLog.cs" />
+        <Compile Include="../../Marketbuddy/SurveyShareData.cs" Link="SurveyShareData.cs" />
+        <Compile Include="../../Marketbuddy/SurveyLinkPeer.cs" Link="SurveyLinkPeer.cs" />
+        <Compile Include="../../Marketbuddy/PriceSurveyLog.cs" Link="PriceSurveyLog.cs" />
+        <Compile Include="../../Marketbuddy/PriceSurveySnapshot.cs" Link="PriceSurveySnapshot.cs" />
+        <Compile Include="../../Marketbuddy/PriceSurveyWorldLog.cs" Link="PriceSurveyWorldLog.cs" />
+        <Compile Include="../../Marketbuddy/Common/CsvStorage.cs" Link="CsvStorage.cs" />
+    </ItemGroup>
+</Project>

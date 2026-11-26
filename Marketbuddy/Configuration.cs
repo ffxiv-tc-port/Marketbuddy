@@ -430,6 +430,36 @@ namespace Marketbuddy
         /// </remarks>
         public int PriceSurveyAutoTourMaxWorlds = MAX_TOUR_WORLDS;
 
+        // ---- 巡檢區網連線（兩台電腦共享行情、主機遠端操作代掃）。🔴 全部預設關；金鑰不進 log。----
+
+        /// <summary>這台當主機：開一個只收私有位址連線的 TCP 埠。關著時完全不 listen。</summary>
+        public bool SurveyLinkHostEnabled = false;
+
+        public int SurveyLinkPort = DEFAULT_SURVEY_LINK_PORT;
+
+        /// <summary>主機那側：配對過的那一台的金鑰代號與金鑰（Base64）。空字串＝沒有配對。</summary>
+        public string SurveyLinkHostKeyId = string.Empty;
+
+        public string SurveyLinkHostKey = string.Empty;
+
+        /// <summary>這台連到主機（代掃的那一台）。關著時完全不連線。</summary>
+        public bool SurveyLinkClientEnabled = false;
+
+        /// <summary>主機的區網位址（IPv4，可帶 <c>:埠</c>）。</summary>
+        public string SurveyLinkHostAddress = string.Empty;
+
+        public string SurveyLinkClientKeyId = string.Empty;
+
+        public string SurveyLinkClientKey = string.Empty;
+
+        /// <summary>
+        /// 這台同意主機遠端開始／暫停／繼續／停止巡檢。🔴 預設關，只能在這台親手打開；
+        /// 沒打開時遠端開始一律拒絕並把原因傳回主機。
+        /// </summary>
+        public bool SurveyLinkAllowRemoteControl = false;
+
+        [NonSerialized] public const int DEFAULT_SURVEY_LINK_PORT = 47835;
+
         /// <summary>
         /// 排除清單改過幾次（<b>只在記憶體裡</b>，不存檔）。
         /// 巡檢與畫面拿它當「這份清單變了，該重建了」的訊號——少了它，
@@ -775,6 +805,13 @@ namespace Marketbuddy
                 // 舊設定檔沒有這個鍵時欄位初始值（空清單）會留著；只有檔案裡明寫 null
                 // 才會變成 null，而那之後每一個 Contains 都會 NRE。
                 conf.PriceSurveyExcludedWorlds ??= [];
+                conf.SurveyLinkHostKeyId ??= string.Empty;
+                conf.SurveyLinkHostKey ??= string.Empty;
+                conf.SurveyLinkHostAddress ??= string.Empty;
+                conf.SurveyLinkClientKeyId ??= string.Empty;
+                conf.SurveyLinkClientKey ??= string.Empty;
+                if (conf.SurveyLinkPort is < 1024 or > 65535)
+                    conf.SurveyLinkPort = DEFAULT_SURVEY_LINK_PORT;
                 conf.PriceSurveyAutoTourMaxWorlds =
                     Math.Clamp(conf.PriceSurveyAutoTourMaxWorlds, 1, MAX_TOUR_WORLDS);
             }

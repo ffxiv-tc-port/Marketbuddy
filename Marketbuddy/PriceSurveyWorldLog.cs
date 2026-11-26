@@ -171,6 +171,27 @@ namespace Marketbuddy
             KickSave();
         }
 
+        /// <summary>
+        /// 併入另一台電腦掃的進度：只在比現有那一列新時才取代，回傳有沒有取代。
+        /// 🔴 呼叫端要等 <see cref="Loaded"/>：讀檔那一段只補「還沒有的世界」，先併再讀會讓較舊的匯入列蓋過檔案裡較新的。
+        /// </summary>
+        internal static bool MergeNewer(SurveyWorldRow row)
+        {
+            if (row.WorldId == 0)
+                return false;
+
+            lock (Gate)
+            {
+                if (Rows.TryGetValue(row.WorldId, out var existing) && existing.AtUtc >= row.AtUtc)
+                    return false;
+                Rows[row.WorldId] = row;
+                revision++;
+            }
+
+            KickSave();
+            return true;
+        }
+
         /// <summary>把全部紀錄清掉（使用者按「忘記掃過哪些世界」）。行情記錄檔完全不受影響。</summary>
         internal static void Clear()
         {

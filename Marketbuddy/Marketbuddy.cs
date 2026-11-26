@@ -224,6 +224,7 @@ namespace Marketbuddy
                 BagSorter = new BagSorter(VendorSeller);
 
                 PluginUi = new PluginUI(this);
+                PriceSurvey.Link.OpenWindow = () => PluginUi.SurveyVisible = true;
 
                 Common.Dalamud.CommandManager.AddHandler(commandName, new CommandInfo(OnCommand)
                 {

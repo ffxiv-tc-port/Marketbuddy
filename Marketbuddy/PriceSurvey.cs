@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.Network.Structures;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.UI.Info;
@@ -151,6 +152,41 @@ namespace Marketbuddy
         /// <see cref="CurrentContentId"/> 已經變成 0，現讀會把「誰掃的」寫成「不知道」。
         /// </summary>
         private ulong runContentId;
+
+        // ---- 代掃（主機經區網連線交過來的那一輪）--------------------------------
+        // 🔴 代掃的列是市場觀測，只經 SurveyLink 送回主機、並在這台用自己的清單換成自己視角的列；
+        //    這一輪的進度不寫進 PriceSurveyWorldLog，所以切回自己的清單時不會把代掃的進度當成自己的。
+
+        /// <summary>主機最後一次推過來的清單（只在記憶體：這台重開遊戲照紅線不自動續跑）。</summary>
+        private SharedList? remoteList;
+
+        private PriceSurveyItemList? remoteItemList;
+
+        /// <summary>主機要求這一輪只跑哪些世界；空＝全部（未排除的）。</summary>
+        private HashSet<uint> remoteAssignedWorlds = [];
+
+        /// <summary>代掃這一輪各世界的進度（挑「最舊的世界」用；與主機推來的進度合起來看）。</summary>
+        private readonly Dictionary<uint, SurveyWorldRow> remoteRoundWorlds = new();
+
+        /// <summary>這一輪是不是代掃（開始時定案，暫停續跑沿用）。</summary>
+        private bool runIsProxy;
+
+        /// <summary>這一次武裝是不是代掃（武裝時定案）。</summary>
+        private bool tourProxy;
+
+        /// <summary>遠端「繼續」：續跑成功後接著重新武裝代掃那一輪。</summary>
+        private bool resumeArmsProxyTour;
+
+        /// <summary>兩台電腦之間的區網連線（主機或代掃那一台）。</summary>
+        internal SurveyLink Link { get; }
+
+        /// <summary>這台正在替主機代掃（掃描中、暫停中或武裝中）。畫面、伺服器資訊欄與「關視窗不暫停」看它。</summary>
+        internal bool IsRemoteControlled => (tourArmed && tourProxy) || (State != SurveyState.Idle && runIsProxy);
+
+        /// <summary>主機最後推過來的清單代號；沒有時是空字串。</summary>
+        internal string RemoteListId => remoteList?.ListId ?? string.Empty;
+
+        internal int RemoteListCount => remoteList?.Items.Count ?? 0;
 
         // ---- 目前這一件 -----------------------------------------------------
         private ItemPhase phase;
@@ -355,6 +391,7 @@ namespace Marketbuddy
         public PriceSurvey(MarketGuiEventHandler gui)
         {
             this.gui = gui;
+            Link = new SurveyLink(this, gui);
             MarketBoard.OfferingsReceived += OnOfferingsReceived;
             MarketBoard.HistoryReceived += OnHistoryReceived;
             Framework.Update += OnFrameworkUpdate;
@@ -365,6 +402,7 @@ namespace Marketbuddy
             Framework.Update -= OnFrameworkUpdate;
             MarketBoard.HistoryReceived -= OnHistoryReceived;
             MarketBoard.OfferingsReceived -= OnOfferingsReceived;
+            Link.Dispose();
             // 🔴 卸載一律回到解除武裝，而且安靜地做：這條路不一定在 framework 執行緒上，
             //    不可以往聊天視窗印字（所以不走 DisarmTour）。
             tourArmed = false;
@@ -500,7 +538,8 @@ namespace Marketbuddy
         }
 
         /// <summary>
-        /// 🔴 <b>「繼續掃描」的唯一入口</b>，只由巡檢視窗上那顆按鈕呼叫。
+        /// 🔴 <b>「繼續掃描」的入口</b>：巡檢視窗上那顆按鈕。另一個入口是主機上使用者按的遠端「繼續」
+        /// （<see cref="ExecuteRemote"/>，要過這台的同意與遊戲狀態閘門）——兩條都一定是有人按的。
         /// 這裡只立旗標，真正的檢查與續跑發生在 framework 執行緒上。
         /// </summary>
         internal void RequestResume()
@@ -513,7 +552,11 @@ namespace Marketbuddy
         /// <summary>
         /// 現在能不能開始。回 false 時 <paramref name="reason"/> 是給使用者看的一句話。
         /// </summary>
-        internal bool CanStart(out string reason)
+        internal bool CanStart(out string reason) => CanStartCore(out reason, true, tourArmed && tourProxy);
+
+        /// <param name="checkWorld">false＝不看「站的世界能不能掃」（遠端開始會先換世界，那一項交給武裝處理）。</param>
+        /// <param name="proxy">代掃：站的世界另外要套主機的排除清單與指定世界。</param>
+        private bool CanStartCore(out string reason, bool checkWorld, bool proxy)
         {
             reason = string.Empty;
             if (IsRunning)
@@ -569,7 +612,7 @@ namespace Marketbuddy
             // 🔴 排除清單的第三個用途：站在被排除的世界上也不准開始掃描。
             //    ⚠️ 刻意<b>不</b>套用在 CanResume 上——暫停中的那一輪已經收了一半的資料，
             //    讓它跑完永遠比把它擱在那裡好；要丟掉有「停止並放棄」那顆按鈕。
-            if (conf.IsWorldExcluded(CurrentWorldId))
+            if (checkWorld && IsWorldOffLimits(CurrentWorldId, proxy))
             {
                 reason = "?? is on your excluded list".Loc(
                     CurrentWorldName.Length > 0 ? CurrentWorldName : $"#{CurrentWorldId}");
@@ -646,6 +689,239 @@ namespace Marketbuddy
             return true;
         }
 
+        /// <summary>
+        /// 這個世界這一輪不能掃。本機的排除清單永遠算數；代掃另外加上主機的排除清單，
+        /// 以及主機指定了世界時「不在指定裡的」。
+        /// </summary>
+        private bool IsWorldOffLimits(uint worldId, bool proxy)
+        {
+            if (conf.IsWorldExcluded(worldId))
+                return true;
+            if (!proxy)
+                return false;
+            if (remoteList != null && remoteList.ExcludedWorlds.Contains(worldId))
+                return true;
+            return remoteAssignedWorlds.Count > 0 && !remoteAssignedWorlds.Contains(worldId);
+        }
+
+        // =====================================================================
+        //  代掃：主機經區網連線交過來的清單與指令（全部在 framework 執行緒上，由 SurveyLink.Pump 呼叫）
+        // =====================================================================
+
+        /// <summary>
+        /// 收下主機推來的清單。🔴 收清單不會讓任何事開始；正在跑的代掃也不換清單——一輪照開始當下的原計畫跑完。
+        /// </summary>
+        /// <returns>null＝收下；否則是傳回主機的原因。</returns>
+        internal string? ApplyRemoteList(SharedList list)
+        {
+            if (IsRemoteControlled)
+                return "a round from the host is still running here; it keeps the list it started with".Loc();
+
+            var items = new List<PriceSurveyItem>(list.Items.Count);
+            foreach (var item in list.Items)
+                items.Add(new PriceSurveyItem(item.ItemId, item.Hq, -1));
+            items.Sort((a, b) =>
+            {
+                var c = a.ItemId.CompareTo(b.ItemId);
+                return c != 0 ? c : a.Hq.CompareTo(b.Hq);
+            });
+
+            remoteList = list;
+            remoteItemList = new PriceSurveyItemList
+            {
+                SourceKey = list.SourceKey,
+                SourceLabel = "List from the host computer (sent ??)".Loc(
+                    list.ExportedUtc.ToLocalTime().ToString("MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)),
+                Items = items,
+                // 🔑 空集合＝不知道我方僱員：這台不寫主機視角的列，留空正好讓任何誤用都只會寫 -1。
+                OwnRetainerIds = [],
+            };
+            remoteRoundWorlds.Clear();
+            Log.Information(
+                $"[Marketbuddy] [巡檢連線] 收下主機的清單 {list.ListId}：{items.Count} 件，主機排除世界 {list.ExcludedWorlds.Count} 個，" +
+                $"主機世界進度 {list.HostWorlds.Count} 個。收清單不會開始任何事。");
+            return null;
+        }
+
+        /// <summary>代掃挑世界：這一輪的進度與主機推來的進度，取較新的那一列。</summary>
+        internal bool TryGetProxyWorld(uint worldId, out SurveyWorldRow row)
+        {
+            var has = remoteRoundWorlds.TryGetValue(worldId, out row);
+            if (remoteList == null)
+                return has;
+            foreach (var hostRow in remoteList.HostWorlds)
+            {
+                if (hostRow.WorldId == worldId && (!has || hostRow.AtUtc > row.AtUtc))
+                {
+                    row = hostRow;
+                    has = true;
+                }
+            }
+
+            return has;
+        }
+
+        /// <summary>
+        /// 主機的一則巡檢指令。🔴 只有開始一輪／暫停／繼續／停止，不存在別的指令；
+        /// 開始與繼續要過這台的同意、遊戲狀態與跟本地按鈕相同的檢查。本地的停止與 Marketbuddy.StopAll 永遠優先。
+        /// </summary>
+        /// <returns>null＝已照做；否則是傳回主機畫面的拒絕原因。</returns>
+        internal string? ExecuteRemote(RemoteCommand command)
+        {
+            var byHost = "stopped by the host computer".Loc();
+            switch (command.Kind)
+            {
+                case RemoteCommandKind.Start:
+                {
+                    var block = RemoteStartBlockText(command.ListId);
+                    if (block != null)
+                        return block;
+                    remoteAssignedWorlds = new HashSet<uint>(command.Worlds);
+                    ArmTour(true);
+                    return tourArmed ? null : TourStatus;
+                }
+
+                case RemoteCommandKind.Pause:
+                    if (!IsRemoteControlled)
+                        return "nothing from the host is running here".Loc();
+                    if (IsRunning)
+                        pauseRequested = "paused by the host computer".Loc();
+                    else if (tourArmed)
+                        disarmTourRequested = "paused by the host computer".Loc();
+                    return null;
+
+                case RemoteCommandKind.Resume:
+                {
+                    if (!conf.SurveyLinkAllowRemoteControl)
+                        return RemoteBlockText("consent");
+                    if (!IsPaused || !runIsProxy)
+                        return "nothing from the host is paused here".Loc();
+                    if (RemoteBusyReason() is { } busy)
+                        return busy;
+                    if (!CanResume(out var why))
+                        return why;
+                    resumeRequested = true;
+                    resumeArmsProxyTour = true;
+                    return null;
+                }
+
+                default:
+                    if (!IsRemoteControlled)
+                        return "nothing from the host is running here".Loc();
+                    if (IsRunning || IsPaused)
+                        stopRequested = byHost;
+                    if (tourArmed)
+                        disarmTourRequested = byHost;
+                    return null;
+            }
+        }
+
+        /// <summary>遠端開始現在會不會被拒；null＝不會。<paramref name="listId"/> 為 null＝不比對清單（狀態列預覽用）。</summary>
+        private string? RemoteStartBlockText(string? listId)
+        {
+            var already = IsRunning || IsPaused || tourArmed
+                ? "this computer is already surveying (or has a paused round)".Loc()
+                : null;
+            var canArm = CanArmTour(out var armWhy) ? null : armWhy;
+            var canStart = CanStartCore(out var startWhy, false, true) ? null : startWhy;
+            var block = SurveyShare.RemoteStartBlock(
+                conf.SurveyLinkAllowRemoteControl,
+                listId == null || (remoteList != null && remoteList.ListId == listId),
+                RemoteBusyReason(),
+                already,
+                canArm,
+                canStart);
+            return block is "consent" or "list" ? RemoteBlockText(block) : block;
+        }
+
+        private static string RemoteBlockText(string code) => code == "consent"
+            ? "this computer has not allowed remote control yet (tick it in its own survey window)".Loc()
+            : "the list has not arrived on this computer".Loc();
+
+        /// <summary>
+        /// 角色在忙別的事。🔴 這台平常可能掛著別的自動化（例如金碟的 GATE）：硬叫 Lifestream 換世界會跟它打架。
+        /// Saucy 沒有「忙碌中」的 IPC，所以用遊戲狀態判斷，再加上 vnavmesh 正在走路。
+        /// </summary>
+        private static string? RemoteBusyReason()
+        {
+            var c = global::Marketbuddy.Common.Dalamud.Condition;
+            if (c[ConditionFlag.BoundByDuty] || c[ConditionFlag.BoundByDuty56]
+                || c[ConditionFlag.BoundByDuty95])
+                return "the character is in a duty".Loc();
+            if (c[ConditionFlag.OccupiedInEvent] || c[ConditionFlag.OccupiedInQuestEvent]
+                || c[ConditionFlag.OccupiedInCutSceneEvent] || c[ConditionFlag.WatchingCutscene]
+                || c[ConditionFlag.WatchingCutscene78])
+                return "the character is in an event or a cutscene".Loc();
+            if (c[ConditionFlag.BetweenAreas] || c[ConditionFlag.BetweenAreas51])
+                return "the character is changing areas".Loc();
+            if (c[ConditionFlag.InCombat])
+                return "the character is in combat".Loc();
+            if (c[ConditionFlag.PlayingMiniGame])
+                return "the character is playing a mini game (for example a GATE)".Loc();
+            if (c[ConditionFlag.Crafting] || c[ConditionFlag.Gathering] || c[ConditionFlag.Fishing])
+                return "the character is crafting, gathering or fishing".Loc();
+            if (IsVnavmeshMoving())
+                return "another plugin is moving the character (vnavmesh)".Loc();
+            if (IPCManager.IsLifestreamBusy())
+                return "Lifestream is busy right now.".Loc();
+            return null;
+        }
+
+        private static bool IsVnavmeshMoving()
+        {
+            try
+            {
+                return PluginInterface.GetIpcSubscriber<bool>("vnavmesh.Path.IsRunning").InvokeFunc();
+            }
+            catch
+            {
+                // 沒裝 vnavmesh／IPC 還沒好＝沒有在走。
+                return false;
+            }
+        }
+
+        /// <summary>送給主機的狀態快照。framework 執行緒每秒一次。</summary>
+        internal ClientStatus BuildLinkStatus(int outbox)
+        {
+            var plan = 0;
+            var step = 0;
+            if (tourArmed)
+            {
+                foreach (var (id, _) in dataCentreWorlds)
+                {
+                    if (IsWorldOffLimits(id, tourProxy))
+                        continue;
+                    plan++;
+                    if (tourVisited.Contains(id))
+                        step++;
+                }
+            }
+
+            return new ClientStatus(
+                LoggedIn,
+                CurrentWorldId,
+                CurrentWorldName,
+                State switch
+                {
+                    SurveyState.Preparing => "preparing",
+                    SurveyState.Running => "running",
+                    SurveyState.Paused => "paused",
+                    _ => "idle",
+                },
+                Processed,
+                Total,
+                tourArmed,
+                IsRemoteControlled,
+                StatusText,
+                TourStatus,
+                RemoteStartBlockText(null) ?? string.Empty,
+                conf.SurveyLinkAllowRemoteControl,
+                RemoteListId,
+                outbox,
+                step,
+                plan);
+        }
+
         // =====================================================================
         //  幀時鐘
         // =====================================================================
@@ -653,6 +929,9 @@ namespace Marketbuddy
         private void OnFrameworkUpdate(IFramework framework)
         {
             UpdateWorldSnapshot();
+
+            // 區網連線：設定變了就開關、網路收到的清單與指令在這裡（framework 執行緒）才照做。
+            Link.Pump();
 
             // 「哪些世界掃過」那份小記錄檔：第一次讀在執行緒池上，之後兩行都是 no-op。
             PriceSurveyWorldLog.BeginLoad();
@@ -761,7 +1040,13 @@ namespace Marketbuddy
             if (!resumeRequested)
                 return;
             resumeRequested = false;
+            var armProxy = resumeArmsProxyTour;
+            resumeArmsProxyTour = false;
             ResumeRun();
+
+            // 遠端「繼續」：暫停時已經解除武裝了，續跑成功才重新武裝，這一輪才會接著換世界。
+            if (armProxy && State == SurveyState.Running && runIsProxy && !tourArmed)
+                ArmTour(true);
         }
 
         /// <summary>
@@ -934,7 +1219,8 @@ namespace Marketbuddy
         /// <summary>
         /// 武裝一輪。🔴 只從 framework 執行緒呼叫（<see cref="TourConsumeRequests"/>）。
         /// </summary>
-        private void ArmTour()
+        /// <param name="proxy">代掃：清單與排除世界用主機推來的那一份，一輪＝所有（未排除的）世界。</param>
+        private void ArmTour(bool proxy = false)
         {
             if (tourArmed)
                 return;
@@ -946,12 +1232,15 @@ namespace Marketbuddy
             }
 
             tourArmed = true;
+            tourProxy = proxy;
             tourVisited.Clear();
 
             // 🔴 起點也算「去過了」：同一輪裡不會再繞回來。
             tourVisited.Add(CurrentWorldId);
             tourWorldsChanged = 0;
-            tourMaxWorlds = Math.Clamp(conf.PriceSurveyAutoTourMaxWorlds, 1, Configuration.MAX_TOUR_WORLDS);
+            tourMaxWorlds = proxy
+                ? Configuration.MAX_TOUR_WORLDS
+                : Math.Clamp(conf.PriceSurveyAutoTourMaxWorlds, 1, Configuration.MAX_TOUR_WORLDS);
             tourAdvancePending = false;
             tourTravelTargetId = 0;
             tourTravelTargetName = string.Empty;
@@ -963,7 +1252,7 @@ namespace Marketbuddy
                 // 已經在掃了：等它收場，Finish 會接手。
                 opening = "the scan already running";
             }
-            else if (conf.IsWorldExcluded(CurrentWorldId))
+            else if (IsWorldOffLimits(CurrentWorldId, proxy))
             {
                 // 站在被排除的世界上：這裡不掃，直接去挑下一個。
                 tourAdvancePending = true;
@@ -978,7 +1267,7 @@ namespace Marketbuddy
 
             TourStatus = "Automatic world hopping armed: up to ?? world(s) this round.".Loc(tourMaxWorlds);
             Log.Information(
-                $"[Marketbuddy] 巡檢自動續跑武裝：起點 {CurrentWorldName}({CurrentWorldId})，" +
+                $"[Marketbuddy] 巡檢自動續跑武裝{(proxy ? "（代掃，主機遠端開始）" : string.Empty)}：起點 {CurrentWorldName}({CurrentWorldId})，" +
                 $"上限 {tourMaxWorlds} 個世界，開場動作={opening}。" +
                 "武裝狀態不存檔；只有「整份掃完」才會往下一個世界走，其餘任何收場都會當場解除武裝。");
             ChatGui.Print("[Marketbuddy] " + TourStatus);
@@ -1031,6 +1320,12 @@ namespace Marketbuddy
             if (!conf.PriceSurveyEnabled || !conf.PriceSurveyAutoTour)
             {
                 DisarmTour("the setting was turned off".Loc());
+                return;
+            }
+
+            if (tourProxy && !conf.SurveyLinkAllowRemoteControl)
+            {
+                DisarmTour("remote control was turned off on this computer".Loc());
                 return;
             }
 
@@ -1124,7 +1419,7 @@ namespace Marketbuddy
 
             // 🔴 進度記錄檔還沒讀回來就挑，「資料最舊」會靜默退化成「名字排最前面」——
             //    每一個世界都會被當成「從來沒掃過」。那不是錯誤訊息，是一個看起來正常的錯答案。
-            if (!PriceSurveyWorldLog.Loaded)
+            if (!tourProxy && !PriceSurveyWorldLog.Loaded)
             {
                 if (DateTime.UtcNow > tourDeadline)
                     DisarmTour("the world progress file never finished loading".Loc());
@@ -1144,11 +1439,25 @@ namespace Marketbuddy
 
                 // 🔴 排除清單其實已經在 RebuildTravelTargets 濾掉了；這裡再擋一次，
                 //    成本是零，而漏掉的代價是把角色送去一個去不了的世界。
-                if (conf.IsWorldExcluded(worldId))
+                if (IsWorldOffLimits(worldId, tourProxy))
                     continue;
 
-                // 從來沒掃過＝最舊。
-                var at = PriceSurveyWorldLog.TryGet(worldId, out var row) ? row.AtUtc : DateTime.MinValue;
+                // 從來沒掃過＝最舊。代掃看兩邊合起來的進度，保留時間內已經整份掃完的世界不再去。
+                DateTime at;
+                if (tourProxy)
+                {
+                    if (!TryGetProxyWorld(worldId, out var proxyRow))
+                        at = DateTime.MinValue;
+                    else if (proxyRow.Completed && conf.PriceSurveySkipHours > 0
+                             && DateTime.UtcNow - proxyRow.AtUtc < TimeSpan.FromHours(conf.PriceSurveySkipHours))
+                        continue;
+                    else
+                        at = proxyRow.AtUtc;
+                }
+                else
+                {
+                    at = PriceSurveyWorldLog.TryGet(worldId, out var row) ? row.AtUtc : DateTime.MinValue;
+                }
                 if (bestId != 0 && at >= bestAt)
                     continue;
 
@@ -1376,20 +1685,32 @@ namespace Marketbuddy
                 return;
             }
 
+            // 🔑 代掃只有一條路：主機遠端開始、武裝成代掃的那一輪（含它武裝期間使用者自己按的掃描）。
+            var proxy = tourArmed && tourProxy;
+            if (proxy && remoteItemList == null)
+            {
+                StatusText = "Cannot start: ??".Loc("no list has been received from the host yet".Loc());
+                return;
+            }
+
+            runIsProxy = proxy;
             worldId = CurrentWorldId;
             worldName = CurrentWorldName;
             runContentId = CurrentContentId;
 
             // 🔴 來源①②讀遊戲／IPC，只能在這裡（framework 執行緒）做。
-            list = conf.PriceSurveyAllCharacters
-                ? null
-                : PriceSurveyItemSource.TryFromSellList(gui) ?? PriceSurveyItemSource.TryFromAllaganTools();
+            list = proxy
+                ? remoteItemList
+                : conf.PriceSurveyAllCharacters
+                    ? null
+                    : PriceSurveyItemSource.TryFromSellList(gui) ?? PriceSurveyItemSource.TryFromAllaganTools();
 
             var needCsvList = list == null;
             var csvPath = needCsvList ? PriceSurveyItemSource.InventoryToolsCsvPath() : null;
 
             // 🔴 這一輪要不要順便查採購清單，在這裡定案；之後改設定不會讓半輪的規則不一致。
-            shoppingEnabled = conf.PriceSurveyShoppingList;
+            //    代掃不帶採購清單：那份清單是這台自己的，不是主機交代的。
+            shoppingEnabled = !proxy && conf.PriceSurveyShoppingList;
             shoppingIds.Clear();
             shoppingExtraQueued = 0;
             shoppingRecordedRows = 0;
@@ -1404,13 +1725,19 @@ namespace Marketbuddy
             }
 
             var wantShoppingHistory = shoppingEnabled;
+            var skipCutoff = conf.PriceSurveySkipHours > 0
+                ? DateTime.UtcNow.AddHours(-conf.PriceSurveySkipHours)
+                : DateTime.MaxValue;
+            var scanWorld = worldId;
 
             // 記錄檔的讀取（續掃用的「已掃過」集合、以及「只掃被壓價的」需要的上一輪資料）
             // 一律在執行緒池上做——那個檔案會長到幾萬列。
+            // 代掃的「已掃過」看觀測索引（兩台合起來），不看這台自己視角的 price_survey.csv。
             prepareTask = Task.Run(() => new PrepareResult(
                 needCsvList ? PriceSurveyItemSource.TryFromInventoryToolsCsv(csvPath) : null,
-                PriceSurveyLog.LoadAll(),
-                wantShoppingHistory ? ShoppingSurveyLog.LoadAll() : []));
+                proxy ? [] : PriceSurveyLog.LoadAll(),
+                wantShoppingHistory ? ShoppingSurveyLog.LoadAll() : [],
+                proxy ? Link.AnsweredSince(scanWorld, skipCutoff) : null));
 
             State = SurveyState.Preparing;
             LastRunLookedUnsupported = false;
@@ -1493,7 +1820,7 @@ namespace Marketbuddy
                 };
             }
 
-            BuildQueue(prepared.History, prepared.ShoppingHistory);
+            BuildQueue(prepared.History, prepared.ShoppingHistory, prepared.ProxyAnswered);
 
             if (itemQueue.Count == 0)
             {
@@ -1525,7 +1852,8 @@ namespace Marketbuddy
                 $"閘門 {MarketRequestGate.IntervalMs} ms。");
         }
 
-        private void BuildQueue(List<PriceSurveyRow> history, List<ShoppingSurveyRow> shoppingHistory)
+        private void BuildQueue(List<PriceSurveyRow> history, List<ShoppingSurveyRow> shoppingHistory,
+            HashSet<uint>? proxyAnswered)
         {
             byItemId.Clear();
             foreach (var item in list!.Items)
@@ -1537,7 +1865,11 @@ namespace Marketbuddy
 
             // 續掃：這個世界在保留時間內已經有結論的道具就不必再問一次。
             var alreadyDone = new HashSet<uint>();
-            if (conf.PriceSurveySkipHours > 0)
+            if (proxyAnswered != null)
+            {
+                alreadyDone = proxyAnswered;
+            }
+            else if (conf.PriceSurveySkipHours > 0)
             {
                 var cutoff = DateTime.UtcNow.AddHours(-conf.PriceSurveySkipHours);
                 foreach (var row in history)
@@ -1551,8 +1883,9 @@ namespace Marketbuddy
             }
 
             // 「只掃被壓價的」：需要上一輪的資料才知道誰被壓價。
+            // 代掃不套：被壓價講的是主機的掛單，這台沒有那一側的資料。
             HashSet<uint>? undercut = null;
-            if (conf.PriceSurveyOnlyUndercut)
+            if (conf.PriceSurveyOnlyUndercut && !runIsProxy)
             {
                 undercut = [];
                 foreach (var row in history)
@@ -1892,28 +2225,25 @@ namespace Marketbuddy
                     hqQuantity = -1;
             }
 
-            var knowOwners = list != null && list.OwnRetainerIds.Count > 0;
             var now = DateTime.UtcNow;
             var gate = MarketRequestGate.IntervalMs;
+            var observation = new MarketObservation(now, worldId, worldName, currentItemId, lowestNq,
+                lowestNqRetainer, lowestHq, lowestHqRetainer, listingCount, source, gate, verdict);
 
-            if (byItemId.TryGetValue(currentItemId, out var ours))
+            // 🔴 代掃不寫這台的 price_survey.csv：清單是主機的，這台沒有它的我方價與僱員。
+            //    那一筆觀測交給 Link：送回主機，並在這台用自己的清單換成自己視角的列。
+            if (!runIsProxy && byItemId.TryGetValue(currentItemId, out var ours) && list != null)
             {
                 foreach (var mine in ours)
                 {
-                    var lowest = mine.Hq ? lowestHq : lowestNq;
-                    var lowestRetainer = mine.Hq ? lowestHqRetainer : lowestNqRetainer;
-                    // 🔑 「不知道」寫 -1，不是 0：不知道最低價是不是自己的時候寫 0
-                    //    等於斷言「不是我的」，那會讓比價畫面憑空生出一堆假的被壓價。
-                    var lowestIsOurs = lowest < 0 || !knowOwners
-                        ? -1
-                        : list!.OwnRetainerIds.Contains(lowestRetainer) ? 1 : 0;
-
-                    PriceSurveyLog.Append(new PriceSurveyRow(
-                        now, worldId, worldName, mine.ItemId, mine.Hq, mine.OurPrice,
-                        lowestNq, lowestHq, lowestIsOurs, listingCount, source, gate, verdict));
-                    recordedRows++;
+                    // 🔑 「不知道」寫 -1，不是 0（規則在 SurveyShare.ToRow，收到的觀測也走同一支）。
+                    PriceSurveyLog.Append(SurveyShare.ToRow(observation, mine.Hq, mine.OurPrice, list.OwnRetainerIds));
                 }
             }
+
+            if (byItemId.ContainsKey(currentItemId))
+                recordedRows += byItemId[currentItemId].Count;
+            Link.NoteObservation(observation, runIsProxy);
 
             // 🔑 採購清單的記錄寫在<b>另一個檔</b>：這幾件我根本沒有掛，寫進 price_survey.csv
             //    只會讓比價分頁與待處理清單多出一堆「我方價＝不知道」的幽靈列。
@@ -2083,7 +2413,7 @@ namespace Marketbuddy
         /// </summary>
         private void NoteWorldProgress()
         {
-            if (worldId == 0 || conf.PriceSurveyOnlyUndercut)
+            if (worldId == 0 || (conf.PriceSurveyOnlyUndercut && !runIsProxy))
                 return;
 
             // 🔴 採購清單那一段<b>不算進</b>「這個世界的掛售清單掃到哪」：那份進度是拿來
@@ -2100,15 +2430,25 @@ namespace Marketbuddy
             //    「掛售那段全部做完」，那正是當下的事實。
             var surveyed = Math.Min(plannedTotal, skippedAlreadyDone + okCount + emptyCount);
 
-            PriceSurveyWorldLog.Record(new SurveyWorldRow(
+            var row = new SurveyWorldRow(
                 DateTime.UtcNow,
                 worldId,
                 worldName,
-                runContentId,
+                runIsProxy ? 0 : runContentId,
                 list?.SourceKey ?? string.Empty,
                 plannedTotal,
                 surveyed,
-                queueIndex >= ownQueued));
+                queueIndex >= ownQueued);
+
+            // 🔴 代掃的進度不進這台的世界進度檔：那是主機清單的進度，記成這台的會讓切回自己清單時誤判「掃過了」。
+            if (runIsProxy)
+            {
+                remoteRoundWorlds[worldId] = row;
+                Link.NoteProxyWorld(row);
+                return;
+            }
+
+            PriceSurveyWorldLog.Record(row);
         }
 
         /// <param name="reason">給使用者看的收場原因（已在地化）。</param>
@@ -2131,12 +2471,12 @@ namespace Marketbuddy
             // 🔴 純計算：不改任何價格、不下架任何東西、不多送一次市場查詢（見
             //    PendingActionsBuilder 的類別註解）。與上面那個通知共用同一道
             //    「整份掃到最後才算數」的閘門——半份資料算出來的清單會誤導人。
-            if (completed && wasRunning && conf.PendingRecomputeAfterSurvey)
+            if (completed && wasRunning && conf.PendingRecomputeAfterSurvey && !runIsProxy)
                 gui.Pending?.RequestRecompute("survey finished");
 
             if (wasRunning)
                 Log.Information(
-                    $"[Marketbuddy] 巡檢結束（{reason}）：世界 {worldName}({worldId})，" +
+                    $"[Marketbuddy] 巡檢結束（{reason}）{(runIsProxy ? "［代掃］" : string.Empty)}：世界 {worldName}({worldId})，" +
                     $"處理 {queueIndex}/{itemQueue.Count} 件，記錄 {recordedRows} 列，" +
                     $"採購清單 {shoppingRecordedRows} 列（多查 {shoppingExtraQueued} 件），" +
                     $"ok={okCount} empty={emptyCount} refused={refusedCount} timeout={timeoutCount} cache={cacheCount}，" +
@@ -2188,6 +2528,7 @@ namespace Marketbuddy
             PauseReason = string.Empty;
             pauseRequested = null;
             resumeRequested = false;
+            resumeArmsProxyTour = false;
 
             // 這一輪結束了，進行中那一件的狀態與探針槽一起清掉。
             ClearInFlight();
@@ -2243,9 +2584,11 @@ namespace Marketbuddy
         /// <param name="ShoppingHistory">
         /// 採購清單的歷史行情；沒開那個功能時是空清單（那時候完全不讀那個檔）。
         /// </param>
+        /// <param name="ProxyAnswered">代掃：這個世界保留時間內兩台合起來問過的道具；不是代掃時 null。</param>
         private readonly record struct PrepareResult(
             PriceSurveyItemList? CsvList,
             List<PriceSurveyRow> History,
-            List<ShoppingSurveyRow> ShoppingHistory);
+            List<ShoppingSurveyRow> ShoppingHistory,
+            HashSet<uint>? ProxyAnswered);
     }
 }

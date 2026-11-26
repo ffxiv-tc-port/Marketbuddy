@@ -231,7 +231,7 @@ namespace Marketbuddy
             // 🔑 一輪收場（跑完、暫停、停止）就把記錄檔重讀一次。
             //    少了這一步，「哪些世界掃過」與比價表都會停在視窗第一次打開時的樣子：
             //    掃完一個世界再拉開換世界選單，它照樣寫著「還沒掃過」。
-            var serial = survey.RunSerial;
+            var serial = survey.RunSerial + survey.Link.DataSerial;
             if (serial != lastSeenRunSerial)
             {
                 lastSeenRunSerial = serial;
@@ -254,6 +254,12 @@ namespace Marketbuddy
                 if (ImGui.BeginTabItem(DrawText.Concat("Scan".Loc(), "##mbsurveyscan")))
                 {
                     DrawScanTab();
+                    ImGui.EndTabItem();
+                }
+
+                if (ImGui.BeginTabItem(DrawText.Concat("Two computers".Loc(), "##mbsurveylink")))
+                {
+                    DrawLinkTab();
                     ImGui.EndTabItem();
                 }
 
@@ -298,6 +304,11 @@ namespace Marketbuddy
         /// </summary>
         public void OnClosed()
         {
+            // 🔴 主機遠端開始的那一輪不跟著視窗走：這台通常沒人看著，主機那邊也可能根本沒開視窗。
+            //    要停它用這台的停止按鈕、Marketbuddy.StopAll，或主機上的停止。
+            if (survey.IsRemoteControlled)
+                return;
+
             survey.RequestPause("The survey window was closed".Loc());
 
             // 🔴 掃描中的那條路徑已經由暫停連帶解除武裝了，但「武裝著卻正在換世界」

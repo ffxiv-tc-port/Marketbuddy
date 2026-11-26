@@ -114,6 +114,7 @@ namespace Marketbuddy
         /// <summary>
         /// 跨世界價格巡檢視窗。關掉視窗＝<b>暫停</b>巡檢：一個看不見的東西不應該還在背景送查詢。
         /// 🔴 關視窗同時<b>解除自動續跑的武裝</b>：暫停對「正在換世界、但沒有在掃描」的狀態是 no-op，少了那一步整條鏈會在看不見的地方繼續跑。
+        /// 例外：主機遠端開始的那一輪不跟著視窗走（見 <see cref="PriceSurveyWindow.OnClosed"/>）。
         /// </summary>
         private void DrawSurveyWindow()
         {

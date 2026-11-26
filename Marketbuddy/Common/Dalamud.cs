@@ -37,6 +37,7 @@ namespace Marketbuddy.Common
         [PluginService] public static IObjectTable Objects { get; private set; } = null!;
         [PluginService] public static IClientState ClientState { get; private set; } = null!;
         [PluginService] public static ICondition Condition { get; private set; } = null!;
+        [PluginService] public static IDtrBar DtrBar { get; private set; } = null!;
         [PluginService] public static IPluginLog Log { get; private set; } = null!;
         [PluginService] public static IGameInteropProvider Hook { get; private set; } = null!;
         [PluginService] public static IAddonLifecycle AddonLifecycle { get; private set; } = null!;
