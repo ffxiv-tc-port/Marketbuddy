@@ -31,6 +31,9 @@ namespace Marketbuddy
         /// <summary>跨世界價格巡檢的獨立視窗。</summary>
         private readonly PriceSurveyWindow surveyWindow;
 
+        /// <summary>行情查詢視窗（純顯示）。</summary>
+        internal MarketLookupWindow MarketLookup { get; }
+
         /// <summary>重掛面板裡的「賣給商店」一段；元件沒建起來時是 null。</summary>
         private readonly VendorSellPanel? vendorSellPanel;
 
@@ -42,6 +45,8 @@ namespace Marketbuddy
         {
             marketbuddy = plugin;
             surveyWindow = new PriceSurveyWindow(plugin.PriceSurvey, plugin.MarketGuiEventHandler);
+            MarketLookup = new MarketLookupWindow(plugin.PriceSurvey);
+            surveyWindow.OpenMarketLookup = () => MarketLookup.Open(null);
             if (plugin.VendorSeller != null)
                 vendorSellPanel = new VendorSellPanel(plugin.VendorSeller);
             if (plugin.BatchLister != null)
@@ -69,6 +74,7 @@ namespace Marketbuddy
 
         public void Dispose()
         {
+            MarketLookup.Dispose();
         }
 
         /// <summary>
@@ -102,6 +108,7 @@ namespace Marketbuddy
         {
             DrawSettingsWindow();
             DrawSurveyWindow();
+            MarketLookup.Draw();
             // 順序即排版：重掛面板永遠先畫、貼基準點，即時掛單接在它的外緣（同一個 ImGui frame，不慢一拍）。
             // 重掛面板有市場動作按鈕，不能跟著即時掛單的列數漂；下緣基準點時它在最下面、即時掛單疊在上面。
             marketbuddy.LiveSellList.Draw(DrawRepriceWindow(null));

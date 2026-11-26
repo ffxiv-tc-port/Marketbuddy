@@ -120,6 +120,10 @@ namespace Marketbuddy
             return true;
         }
 
+        /// <summary>索引裡這一列的時間（不論能不能採用）；沒有這一列回 <see cref="DateTime.MinValue"/>。</summary>
+        internal static DateTime LatestAt(uint itemId, bool hq, uint worldId)
+            => Latest.TryGetValue((itemId, hq, worldId), out var row) ? row.AtUtc : DateTime.MinValue;
+
         /// <summary>外掛卸載時清掉。下一次載入會重新讀檔。</summary>
         internal static void Reset()
         {

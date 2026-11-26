@@ -201,6 +201,9 @@ namespace Marketbuddy
         private SalesHistorySnapshot? salesItemRowsFor;
         private int salesItemRowsSort = -1;
 
+        /// <summary>打開行情查詢視窗（PluginUI 掛上）。</summary>
+        internal System.Action? OpenMarketLookup { get; set; }
+
         public PriceSurveyWindow(PriceSurvey survey, MarketGuiEventHandler gui)
         {
             this.survey = survey;
@@ -247,6 +250,13 @@ namespace Marketbuddy
                 lastSeenExclusionRevision = exclusionRevision;
                 RequestLoad();
                 RequestShoppingLoad();
+            }
+
+            if (OpenMarketLookup != null)
+            {
+                if (ImGui.SmallButton("Market lookup...".Loc()))
+                    OpenMarketLookup();
+                Tooltip("Any item's latest price on every world, from what the scans have recorded. Read only. Also: /mbuddy market <name or id>".Loc());
             }
 
             if (ImGui.BeginTabBar("##mbsurveytabs"))

@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <!-- 離線情境測試：查價被拒時的補價選擇（巡檢記錄優先、觀測索引次之）、行情查詢視窗的搜尋與「不知道」顯示。
+         只編不引用 Dalamud 的檔；Log、設定目錄與 Configuration 常數由 Stubs.cs 提供。
+         不在 Marketbuddy.sln 裡，CI 只建 Marketbuddy/Marketbuddy.csproj，不會碰到它。
+         FallbackSource／ModelSource 可指到別的檔（給突變體驗證用），預設是正式那份。執行方式寫在 Program.cs 開頭。 -->
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net9.0</TargetFramework>
+        <Nullable>enable</Nullable>
+        <LangVersion>latest</LangVersion>
+        <ImplicitUsings>disable</ImplicitUsings>
+        <FallbackSource Condition="'$(FallbackSource)' == ''">../../Marketbuddy/SurveyPriceFallback.cs</FallbackSource>
+        <ModelSource Condition="'$(ModelSource)' == ''">../../Marketbuddy/MarketLookupModel.cs</ModelSource>
+    </PropertyGroup>
+    <ItemGroup>
+        <Compile Include="$(FallbackSource)" Link="SurveyPriceFallback.cs" />
+        <Compile Include="$(ModelSource)" Link="MarketLookupModel.cs" />
+        <Compile Include="../../Marketbuddy/ItemNameMatch.cs" Link="ItemNameMatch.cs" />
+        <Compile Include="../../Marketbuddy/PriceSurveySnapshot.cs" Link="PriceSurveySnapshot.cs" />
+        <Compile Include="../../Marketbuddy/PriceSurveyLog.cs" Link="PriceSurveyLog.cs" />
+        <Compile Include="../../Marketbuddy/SurveyShareData.cs" Link="SurveyShareData.cs" />
+        <Compile Include="../../Marketbuddy/PriceSurveyWorldLog.cs" Link="PriceSurveyWorldLog.cs" />
+        <Compile Include="../../Marketbuddy/Common/CsvStorage.cs" Link="CsvStorage.cs" />
+        <Compile Include="../../Marketbuddy/HistoryOutlier.cs" Link="HistoryOutlier.cs" />
+        <Compile Include="../../Marketbuddy/PriceConsensus.cs" Link="PriceConsensus.cs" />
+        <Compile Include="../../Marketbuddy/RelistPricing.cs" Link="RelistPricing.cs" />
+        <Compile Include="../../Marketbuddy/PriceAnomalyGuard.cs" Link="PriceAnomalyGuard.cs" />
+    </ItemGroup>
+</Project>

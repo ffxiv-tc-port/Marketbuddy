@@ -283,6 +283,20 @@ namespace Marketbuddy
             DrawNestIndicator(1);
             if (ImGui.Button("Open the price survey window".Loc()))
                 SurveyVisible = true;
+
+            DrawNestIndicator(1);
+            if (ImGui.Button("Open the market lookup window".Loc()))
+                MarketLookup.Open(null);
+            HelpMarker(
+                "Look up any marketable item by name or id and see, for every world of your data centre, the cheapest NQ and HQ listing, how many listings there were, the last sale and how many sold in the last 7 days, as last recorded by a full market scan or sent over the two-computer link. Read only: it never sends a market query and has no button that lists, reprices or delists. \"?\" means not known; old data is drawn pale. Also opens with /mbuddy market <name or id>."
+                    .Loc());
+
+            DrawNestIndicator(2);
+            if (ImGui.Checkbox("Add \"Market lookup\" to the item right-click menu".Loc(), ref conf.MarketLookupContextMenu))
+                conf.Save();
+            HelpMarker(
+                "Off by default. Adds one entry to the right-click menu of marketable items in your inventory; it only opens the market lookup window on that item."
+                    .Loc());
         }
     }
 }

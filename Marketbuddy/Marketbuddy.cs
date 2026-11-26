@@ -83,6 +83,7 @@ namespace Marketbuddy
 
         /// <summary>全艦隊急停端點；建構子跑到最後才建立，之前失敗時為 null。</summary>
         private FleetStopIpc? fleetStopIpc;
+        private MarketLookupContextMenu? marketLookupMenu;
 
         /// <summary>
         /// ReleaseAll() 的冪等旗標。初始化失敗路徑與 Dalamud 的 Dispose() 都會呼叫它。
@@ -151,6 +152,7 @@ namespace Marketbuddy
                 //    再親手按「武裝一輪」，而且武裝狀態不存檔（載入時一律是解除的）。
                 PriceSurvey = new PriceSurvey(MarketGuiEventHandler);
                 MarketGuiEventHandler.Survey = PriceSurvey;
+                BatchReprice.SurveyLink = PriceSurvey.Link;
 
                 MultiTour = new MultiRetainerTour(MarketGuiEventHandler, BatchReprice, BatchDelist);
 
@@ -226,9 +228,19 @@ namespace Marketbuddy
                 PluginUi = new PluginUI(this);
                 PriceSurvey.Link.OpenWindow = () => PluginUi.SurveyVisible = true;
 
+                // 右鍵選單只是另一個打開行情查詢的入口；建不起來不影響其餘功能。
+                try
+                {
+                    marketLookupMenu = new MarketLookupContextMenu(id => PluginUi.MarketLookup.Open(id.ToString()));
+                }
+                catch (Exception e)
+                {
+                    Log.Information(e, "[行情查詢] 右鍵選單「查行情」註冊失敗，其餘功能照常。");
+                }
+
                 Common.Dalamud.CommandManager.AddHandler(commandName, new CommandInfo(OnCommand)
                 {
-                    HelpMessage = "Show plugin configuration window.".Loc()
+                    HelpMessage = "Show plugin configuration window. /mbuddy survey: price survey window. /mbuddy market <name or id>: market lookup window (read only).".Loc()
                 });
 
                 PluginInterface.UiBuilder.Draw += DrawUi;
@@ -272,6 +284,7 @@ namespace Marketbuddy
             released = true;
 
             Safe(() => fleetStopIpc?.Dispose());
+            Safe(() => marketLookupMenu?.Dispose());
             Safe(() => IPCManager.Shutdown());
             Safe(() => PluginInterface.UiBuilder.Draw -= DrawUi);
             Safe(() => PluginInterface.UiBuilder.OpenConfigUi -= DrawConfigUi);
@@ -343,6 +356,15 @@ namespace Marketbuddy
             if (argument.Equals("survey", StringComparison.OrdinalIgnoreCase))
             {
                 PluginUi.SurveyVisible = !PluginUi.SurveyVisible;
+                return;
+            }
+
+            // /mbuddy market [名稱或 id] ＝ 打開行情查詢（純顯示）。
+            var space = argument.IndexOf(' ');
+            var verb = space < 0 ? argument : argument[..space];
+            if (verb.Equals("market", StringComparison.OrdinalIgnoreCase) || verb == "行情")
+            {
+                PluginUi.MarketLookup.Open(space < 0 ? null : argument[(space + 1)..]);
                 return;
             }
 

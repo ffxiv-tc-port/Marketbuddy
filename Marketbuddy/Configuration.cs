@@ -557,6 +557,16 @@ namespace Marketbuddy
         public int RelistSurveyFallbackHours = 24;
 
         /// <summary>
+        /// 巡檢記錄補不到時，改用<b>觀測記錄</b>（全市場掃描、兩台連線收到的）裡家世界最新那一筆的時限（<b>小時</b>）。
+        /// 0＝只用巡檢記錄；<see cref="RelistSurveyFallbackHours"/> 是 0 時整個補位都不用。
+        /// </summary>
+        /// <remarks>比巡檢記錄短：新上架的那一格沒有自家現價可比，異常價保護能用的基準比重掛少。</remarks>
+        public int RelistObservationFallbackHours = 6;
+
+        /// <summary>背包道具的右鍵選單多一項「查行情」（打開行情查詢視窗）。<b>預設關</b>：不動原生選單。</summary>
+        public bool MarketLookupContextMenu = false;
+
+        /// <summary>
         /// 在「即時出售品清單」面板上多畫三欄：本世界目前最低價、整個資料中心目前最低價、
         /// 以及最近一次成交（價格＋時間）。
         /// </summary>
@@ -813,6 +823,7 @@ namespace Marketbuddy
                 //    （見各自的欄位說明）。上界只是避免設定檔被手改成荒謬值。
                 conf.RelistLastSoldMaxAgeDays = Math.Clamp(conf.RelistLastSoldMaxAgeDays, 0, 3650);
                 conf.RelistSurveyFallbackHours = Math.Clamp(conf.RelistSurveyFallbackHours, 0, 8760);
+                conf.RelistObservationFallbackHours = Math.Clamp(conf.RelistObservationFallbackHours, 0, 8760);
                 // 舊設定檔沒有這個鍵時欄位初始值（空清單）會留著；只有檔案裡明寫 null
                 // 才會變成 null，而那之後每一個 Contains 都會 NRE。
                 conf.PriceSurveyExcludedWorlds ??= [];

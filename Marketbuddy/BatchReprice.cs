@@ -259,6 +259,9 @@ namespace Marketbuddy
         /// </remarks>
         internal Func<bool>? ExternalDriverActive;
 
+        /// <summary>觀測索引（查價被拒時的第二補位來源）；巡檢建好之後掛上，沒有就只用巡檢記錄。</summary>
+        internal SurveyLink? SurveyLink { get; set; }
+
         /// <summary>
         /// 這一輪是不是 <see cref="StartQuickReprice"/> 開的（快速上架後替<b>單一格</b>定價）。
         /// </summary>
@@ -756,6 +759,8 @@ namespace Marketbuddy
             // 退回「查詢失敗就算失敗」的舊行為，不會讓任何一格拿到錯的價。
             if (conf.RelistSurveyFallbackHours > 0 || conf.NewListingFallbackEnabled)
                 PriceSurveySnapshot.EnsureLoaded();
+            if (conf.RelistSurveyFallbackHours > 0 && conf.RelistObservationFallbackHours > 0)
+                SurveyLink?.EnsureObservationsLoaded();
             lastAcceptedRequestId = int.MinValue;
             offeringsPending = false;
             offeringsReceived = false;
@@ -1285,23 +1290,47 @@ namespace Marketbuddy
             if (homeWorldId == 0)
                 return false;
 
-            if (!PriceSurveySnapshot.TryGetLowest(job.ItemId, job.IsHq, homeWorldId, DateTime.UtcNow,
-                    conf.RelistSurveyFallbackHours, out var lowest, out var atUtc))
+            var now = DateTime.UtcNow;
+            var link = SurveyLink;
+            var pick = SurveyPriceFallback.Resolve(job.ItemId, job.IsHq, homeWorldId, now,
+                conf.RelistSurveyFallbackHours, conf.RelistObservationFallbackHours, ownRetainerIds,
+                link == null ? null : new SurveyPriceFallback.ObservationLookup(link.TryGetLatestObservation));
+            if (!pick.Found)
             {
                 Log.Information(
                     $"{Diag} SURVEY-MISS item={job.ItemId} '{job.Name}' hq={job.IsHq} " +
                     $"homeWorld={homeWorldId} reason={tag} maxAgeHours={conf.RelistSurveyFallbackHours} " +
-                    $"indexLoaded={PriceSurveySnapshot.IsLoaded} indexCount={PriceSurveySnapshot.Count}");
+                    $"indexLoaded={PriceSurveySnapshot.IsLoaded} indexCount={PriceSurveySnapshot.Count} " +
+                    $"obsMiss={pick.Miss} obsMaxAgeHours={conf.RelistObservationFallbackHours} " +
+                    $"obsLoaded={(link == null ? "no-link" : link.ObservationsLoaded.ToString())}" +
+                    (pick.HasObservation ? $" obs={DescribeObservation(pick.Observation, job.IsHq, now)}" : string.Empty));
                 return false;
             }
 
-            job.SurveyLowest = lowest;
-            job.SurveyAtUtc = atUtc;
+            job.SurveyLowest = pick.Lowest;
+            job.SurveyAtUtc = pick.AtUtc;
+            if (pick.Source == SurveyPriceFallback.FromSnapshot)
+            {
+                Log.Information(
+                    $"{Diag} SURVEY-FALLBACK item={job.ItemId} '{job.Name}' hq={job.IsHq} " +
+                    $"lowest={pick.Lowest} at={RelistPricing.FormatAt(pick.AtUtc)} reason={tag}");
+                return true;
+            }
+
             Log.Information(
-                $"{Diag} SURVEY-FALLBACK item={job.ItemId} '{job.Name}' hq={job.IsHq} " +
-                $"lowest={lowest} at={RelistPricing.FormatAt(atUtc)} reason={tag}");
+                $"{Diag} OBS-FALLBACK item={job.ItemId} '{job.Name}' hq={job.IsHq} homeWorld={homeWorldId} " +
+                $"lowest={pick.Lowest} at={RelistPricing.FormatAt(pick.AtUtc)} " +
+                $"ageMin={(now - pick.AtUtc).TotalMinutes:F0} maxAgeHours={conf.RelistObservationFallbackHours} " +
+                $"obs={DescribeObservation(pick.Observation, job.IsHq, now)} reason={tag}：" +
+                "查價沒拿到、巡檢記錄沒有可用的家世界那一列，改用觀測記錄裡家世界最新的那一筆；價格照常走定價規則與異常價保護。");
             return true;
         }
+
+        /// <summary>觀測一筆寫進 log 的樣子（診斷用）：來源、結局、兩種品質最低價與賣家、件數、成交摘要。</summary>
+        private static string DescribeObservation(in MarketObservation o, bool hq, DateTime now)
+            => $"{o.Source}/{o.Verdict}@{RelistPricing.FormatAt(o.AtUtc)}(ageMin={(now - o.AtUtc).TotalMinutes:F0}) " +
+               $"nq={o.LowestNq}#{o.LowestNqRetainer} hq={o.LowestHq}#{o.LowestHqRetainer} n={o.ListingCount} " +
+               $"pick={(hq ? "hq" : "nq")} sales={(o.Sales.Known ? $"{o.Sales.LastNq}/{o.Sales.LastHq} 7d={o.Sales.RecentCount}" : "?")}";
 
         /// <summary>
         /// 這一格的定價決策：算出 <b>L</b>（板上別人的最低價）與 <b>S</b>（資料中心最近一筆成交價）

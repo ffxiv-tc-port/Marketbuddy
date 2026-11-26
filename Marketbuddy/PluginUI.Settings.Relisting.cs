@@ -200,6 +200,25 @@ namespace Marketbuddy
                 "The server sometimes refuses a market query without saying so. When that happens the cross-world survey log already holds a price for your own world, so it is used instead of giving up on the item. Only your own world is ever used - another world being cheaper does not mean you are being undercut at home. Survey rows only record one lowest price, so the mistyped-price check has to fall back on comparing against your own listing."
                     .Loc());
 
+            var surveyFallbackOn = conf.RelistSurveyFallbackHours > 0;
+            DrawNestIndicator(1);
+            if (!surveyFallbackOn) PushStyleDisabled();
+            var obsRowX = ImGui.GetCursorPosX();
+            ImGui.TextWrapped("When the survey log has nothing, use the observation file if newer than".Loc());
+            var obsLabel = DrawText.Concat("hour(s) (0 = survey log only)".Loc(), "##mbobsfallback");
+            SameLineOrBelow(obsRowX, LabeledItemWidth(70, obsLabel));
+            ImGui.SetNextItemWidth(FontPx(70));
+            if (ImGui.InputInt(obsLabel, ref conf.RelistObservationFallbackHours, 0))
+            {
+                conf.RelistObservationFallbackHours = Math.Clamp(conf.RelistObservationFallbackHours, 0, 8760);
+                conf.Save();
+            }
+
+            if (!surveyFallbackOn) PopStyleDisabled();
+            HelpMarker(
+                "Covers items that are not on your own survey list (new listings, batch listing from your bags): the full market scan and the two-computer link record every item they look up, per world. Same rules as above: only your own world, only the quality you are listing, never a lowest listing that is one of your retainers' or whose seller is unknown, and the price still goes through your undercut and mistyped-price rules. Used only during a listing or relist you started, only for an item whose market query was refused or timed out. Does nothing while the setting above is 0."
+                    .Loc());
+
             ImGui.Spacing();
             if (ImGui.Checkbox("HQ items only undercut other HQ listings".Loc(), ref conf.BatchCompareHqOnly))
                 conf.Save();
