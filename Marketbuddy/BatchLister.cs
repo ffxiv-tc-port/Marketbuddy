@@ -20,6 +20,18 @@ namespace Marketbuddy
         RetainerBags,
     }
 
+    /// <summary><see cref="BatchLister.PrepareLegBagTicks"/> 的結果。</summary>
+    internal enum LegBagPrep
+    {
+        Ready,
+
+        /// <summary>沒有可上的（或預先勾選沒開）：這一角不做背包段。</summary>
+        Nothing,
+
+        /// <summary>這一刻判不出來。</summary>
+        NotReady,
+    }
+
     /// <summary>一次批次上架怎麼結束的；巡迴靠它決定換下一名還是整趟停。</summary>
     internal enum BatchListEnd
     {
@@ -474,22 +486,82 @@ namespace Marketbuddy
 
         /// <summary>
         /// 背包上架巡迴用：玩家背包裡勾選過的道具的每一疊（與面板按開始時同一份勾選），扣掉 <paramref name="drop"/>。
+        /// <paramref name="allow"/> 非 null 時只取裡面的道具（多角色巡迴的背包段）。
         /// 🔴 只在 framework 執行緒呼叫。
         /// </summary>
-        internal List<Pick> BagTourPicks(IReadOnlySet<VendorSellKey> drop)
+        internal List<Pick> BagTourPicks(IReadOnlySet<VendorSellKey> drop, IReadOnlySet<VendorSellKey>? allow = null)
         {
             var picks = new List<Pick>();
             if (playerTicks.ContentId != PlayerState.ContentId || playerTicks.Count == 0)
                 return picks;
             foreach (var c in BuildCandidates(PlayerBagTypes, new HashSet<uint>(), withEstimate: false))
             {
-                if (!playerTicks.Contains(c.Key) || drop.Contains(c.Key) || BatchListExclusions.IsExcluded(c.Key.ItemId))
+                if (!playerTicks.Contains(c.Key) || drop.Contains(c.Key) || BatchListExclusions.IsExcluded(c.Key.ItemId) ||
+                    (allow != null && !allow.Contains(c.Key)))
                     continue;
                 foreach (var s in c.Slots)
                     picks.Add(new Pick(s, c.Name));
             }
 
             return picks;
+        }
+
+        /// <summary>
+        /// 多角色巡迴接手一角時：照面板同一套規則（<see cref="MaybePreTick"/>）預先勾選一次，
+        /// 回傳准上架的道具（<see cref="PlayerTickBook.LegMayList"/>）與「道具名×數量」清單。
+        /// 🔴 市場紅線：只改勾選、不開始上架。只在 framework 執行緒、巡迴與批次上架都沒在跑時呼叫。
+        /// </summary>
+        /// <returns><see cref="LegBagPrep.NotReady"/>＝這一刻判不出來（製作清單或低於門檻紀錄還沒好），呼叫端可稍後重試。</returns>
+        internal LegBagPrep PrepareLegBagTicks(out HashSet<VendorSellKey> allow, out string listText, out string why)
+        {
+            allow = new HashSet<VendorSellKey>();
+            listText = string.Empty;
+            why = string.Empty;
+            if (IsRunning || tour.IsRunning)
+            {
+                why = "批次上架或巡迴正在跑";
+                return LegBagPrep.NotReady;
+            }
+
+            if (!conf.BatchListPreTick)
+            {
+                why = "批次上架的預先勾選沒開";
+                return LegBagPrep.Nothing;
+            }
+
+            SyncPlayerCharacter();
+            var craftState = RefreshCraftLists();
+            if (craftState == CraftListState.NotReady)
+            {
+                why = "InventoryTools 已載入但製作清單讀不到";
+                return LegBagPrep.NotReady;
+            }
+
+            if ((conf.BatchListRememberBelowThreshold && !BelowThresholdLedger.Loaded) ||
+                (conf.QuickListSkipLowPriceDelisted && !LowPriceDelistLedger.Loaded))
+            {
+                why = "低於門檻／低價下架紀錄還沒讀完";
+                return LegBagPrep.NotReady;
+            }
+
+            var candidates = BuildCandidates(PlayerBagTypes, craftLists.Ids, withEstimate: true);
+            MaybePreTick(candidates, craftState);
+            var optedOut = playerTicks.OptedOut(PlayerState.ContentId);
+            var parts = new List<string>();
+            foreach (var c in candidates)
+            {
+                var eligible = PlayerTickBook.PreTickEligible(c.Protected, BatchListExclusions.IsExcluded(c.Key.ItemId),
+                    c.RecentlyBelow);
+                if (!PlayerTickBook.LegMayList(playerTicks.Contains(c.Key), eligible, optedOut) || !allow.Add(c.Key))
+                    continue;
+                parts.Add($"{c.Name}×{c.Quantity}");
+            }
+
+            listText = string.Join("、", parts);
+            if (allow.Count > 0)
+                return LegBagPrep.Ready;
+            why = optedOut ? "這個角色這次遊戲期間按過「全部取消」" : "背包裡沒有預先勾選命中的道具";
+            return LegBagPrep.Nothing;
         }
 
         /// <summary>這一次按下開始會上架的格數（勾選的道具的每一疊）。</summary>

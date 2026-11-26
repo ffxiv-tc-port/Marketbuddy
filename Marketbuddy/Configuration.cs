@@ -100,7 +100,8 @@ namespace Marketbuddy
 
         /// <summary>
         /// 僱員選單旁的「背包上架到有空位的僱員」按鈕。<b>預設關閉。</b>
-        /// 🔴 市場紅線：只是多一顆按鈕；按了才逐名僱員上架背包裡勾選的道具，不掛進多角色巡迴、沒有事件接手。
+        /// 🔴 市場紅線：只是多一顆按鈕；按了才逐名僱員上架背包裡勾選的道具，沒有事件接手。
+        /// 多角色巡迴只在 <see cref="MultiCharTourListFromBags"/> 而且使用者手動武裝的那一輪才跑它。
         /// </summary>
         public bool BagListTourEnabled = false;
 
@@ -285,6 +286,12 @@ namespace Marketbuddy
 
         /// <summary>多角色重掛:在公會工坊裡鈴在 20 米內卻搆不到時，請 AutoRetainer 走過去再開鈴。預設關(照舊等滿逾時跳過)。</summary>
         public bool MultiCharTourApproachWorkshopBell = false;
+
+        /// <summary>
+        /// 多角色重掛每一角的模式：true＝先背包上架（只上預先勾選命中的）再重掛，false＝只重掛。<b>預設 false</b>（既有行為）。
+        /// 🔴 只是武裝時讀的選擇；武裝本身照舊不存檔、每輪手動。背包段不賣給商店。
+        /// </summary>
+        public bool MultiCharTourListFromBags = false;
 
         /// <summary>
         /// 一整輪市場重掛跑完時，透過 IPC 請「塔塔露誇獎」(TataruPraise) 念一句。

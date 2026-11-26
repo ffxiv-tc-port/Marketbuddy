@@ -466,7 +466,7 @@ namespace Marketbuddy
                     ref conf.BagListTourEnabled))
                 conf.Save();
             HelpMarker(
-                "Off by default. One button that visits this character's retainers in turn, enters \"Sell items in your inventory\" and lists the items you ticked in the batch listing panel from your bags - same pricing, thresholds and \"Don't auto-list\" list as the batch listing button. When a retainer's market fills up it moves on to the next; it ends when nothing ticked is left in your bags or every retainer has been visited, then shows a summary next to the retainer list. Retainers whose market was full the last time Marketbuddy saw their sell list are skipped; retainers it has never seen are visited. Nothing is relisted. It only runs when you press it - never from AutoRetainer, never in the multi-character round. ESC, Cancel or the fleet emergency stop ends it."
+                "Off by default. One button that visits this character's retainers in turn, enters \"Sell items in your inventory\" and lists the items you ticked in the batch listing panel from your bags - same pricing, thresholds and \"Don't auto-list\" list as the batch listing button. When a retainer's market fills up it moves on to the next; it ends when nothing ticked is left in your bags or every retainer has been visited, then shows a summary next to the retainer list. Retainers whose market was full the last time Marketbuddy saw their sell list are skipped; retainers it has never seen are visited. Nothing is relisted. It only runs when you press it, or in a multi-character round you armed by hand with \"List from bags, then relist\" picked - never from AutoRetainer on its own. ESC, Cancel or the fleet emergency stop ends it."
                     .Loc());
 
             ImGui.Spacing();
@@ -494,15 +494,22 @@ namespace Marketbuddy
                 WrappedTooltip(bellHelp);
             HelpMarker(bellHelp);
 
+            var multi = marketbuddy.MultiCharTour;
+            DrawMultiCharModeCombo(tourOn, multi.IsArmed);
+
             if (!tourOn)
                 return;
 
-            var multi = marketbuddy.MultiCharTour;
             DrawNestIndicator(1);
             if (multi.IsArmed)
             {
                 ImGui.TextWrapped("Round: ??/?? character(s) done, ?? item(s) repriced"
                     .Loc(multi.RoundCompleted, multi.RoundTargets, multi.RoundRepriced));
+                DrawNestIndicator(1);
+                ImGui.TextUnformatted(MultiCharTourRules.HasBagStage(multi.RoundMode)
+                    ? "Mode this round: ?? (?? item(s) listed from bags so far)".Loc(
+                        MultiCharacterTour.ModeLabel(multi.RoundMode), multi.RoundBagListed)
+                    : "Mode this round: ??".Loc(MultiCharacterTour.ModeLabel(multi.RoundMode)));
 
                 DrawNestIndicator(1);
                 var current = multi.CurrentCharacterName;
@@ -544,6 +551,46 @@ namespace Marketbuddy
                 DrawMultiCharacterSkippedLine(multi, "##mbmcrerunconfig", drawError: false);
                 ImGui.EndGroup();
             }
+        }
+
+        /// <summary>
+        /// 多角色重掛每一角的模式（存設定、預設只重掛）。武裝中停用：這一輪的模式在武裝那一刻就定了。
+        /// </summary>
+        private void DrawMultiCharModeCombo(bool tourOn, bool armed)
+        {
+            var disabled = !tourOn || armed;
+            DrawNestIndicator(1);
+            ImGui.TextUnformatted("Each character:".Loc());
+            ImGui.SameLine();
+            if (disabled) ImGui.BeginDisabled();
+            var current = MultiCharTourRules.ModeOf(conf.MultiCharTourListFromBags);
+            ImGui.SetNextItemWidth(FontPx(200));
+            if (ImGui.BeginCombo("##mbmcmode", MultiCharacterTour.ModeLabel(current)))
+            {
+                if (ImGui.Selectable(MultiCharacterTour.ModeLabel(MultiCharTourMode.RelistOnly),
+                        current == MultiCharTourMode.RelistOnly))
+                {
+                    conf.MultiCharTourListFromBags = false;
+                    conf.Save();
+                }
+
+                if (ImGui.Selectable(MultiCharacterTour.ModeLabel(MultiCharTourMode.BagListThenRelist),
+                        current == MultiCharTourMode.BagListThenRelist))
+                {
+                    conf.MultiCharTourListFromBags = true;
+                    conf.Save();
+                }
+
+                ImGui.EndCombo();
+            }
+
+            if (disabled) ImGui.EndDisabled();
+            var help = !tourOn
+                ? "Turn on \"Relist across characters together with AutoRetainer's multi mode\" first.".Loc()
+                : "Relist only (default): each character gets one all-retainer relist tour, as before.\nList from bags, then relist: before relisting, each character first lists from its bags at retainers with free slots, the same way as the \"List from your bags at retainers with free slots\" button, but only the items the pre-tick picks on that character (the same rules as when you open the batch listing panel there; anything you unticked or that recently came out below your thresholds stays). Items below your thresholds only go onto the sell-to-shop list - nothing is ever sold to the shop. The items queued for each character are written to the log. Needs that button and \"Tick items that can be listed in advance (from your bags)\" turned on. The mode is fixed when you arm a round; \"Rerun the skipped\" uses the mode of the round that skipped them.".Loc();
+            if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                WrappedTooltip(help);
+            HelpMarker(help);
         }
 
         /// <summary>-1＝不知道，畫成 ?（不畫成 0）。</summary>

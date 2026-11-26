@@ -8,35 +8,6 @@ using static Marketbuddy.Common.Dalamud;
 
 namespace Marketbuddy
 {
-    /// <summary>巡迴到每個僱員身上要做的事。導航完全相同，只有中間那一段不一樣。</summary>
-    internal enum TourMode
-    {
-        /// <summary>全僱員重掛（<see cref="BatchReprice"/>）。</summary>
-        Reprice,
-
-        /// <summary>全僱員下架（<see cref="BatchDelist"/>）。</summary>
-        Delist,
-
-        /// <summary>
-        /// 全僱員補上架：每名僱員先重掛，再從他自己的物品欄補上架（<see cref="BatchLister"/>，只補使用者替他勾過的道具）。
-        /// 🔴 只由使用者按鈕開始；不掛進 <see cref="MultiCharacterTour"/>。
-        /// </summary>
-        Replenish,
-
-        /// <summary>
-        /// 「這個角色整理一輪」：每名僱員 重掛 → 剛下架回背包的交給僱員賣給商店（<see cref="VendorSeller"/>）→ 補上架。
-        /// 🔴 只由使用者按鈕（兩段確認）開始；不掛進 <see cref="MultiCharacterTour"/>，沒有事件接手。
-        /// </summary>
-        Tidy,
-
-        /// <summary>
-        /// 背包上架到有空位的僱員：逐名僱員從「出售（玩家所持物品）」進去，把玩家背包裡在批次上架面板勾過的道具上架，
-        /// 直到背包沒有可上的或僱員都走過；不重掛。依紀錄確知已滿的僱員不去。
-        /// 🔴 只由使用者按鈕開始；不掛進 <see cref="MultiCharacterTour"/>，沒有事件接手。
-        /// </summary>
-        BagList,
-    }
-
     /// <summary>
     /// 全僱員巡迴：從僱員選單出發，逐一拜訪有掛單的僱員，開它的出售品視窗，
     /// 跑單僱員引擎（重掛或下架，見 <see cref="TourMode"/>），然後離開換下一個。
@@ -152,6 +123,12 @@ namespace Marketbuddy
         private int bagSkippedFull, bagListed, bagShopList, bagSkipped;
         private bool bagEmptied;
 
+        /// <summary>非 null＝這一趟背包上架只上這些道具（多角色巡迴的背包段）；null＝照勾選全上。</summary>
+        private IReadOnlySet<VendorSellKey>? bagAllow;
+
+        /// <summary>最近一趟背包上架巡迴上架了幾件（跑完或中止都算到停下那一刻）。</summary>
+        public int BagTourListed => bagListed;
+
         /// <summary>最近一趟背包上架巡迴的道具彙整（跑的途中是空的）。</summary>
         public IReadOnlyList<BatchListSummaryRow> BagTourSummary { get; private set; } = Array.Empty<BatchListSummaryRow>();
 
@@ -235,7 +212,10 @@ namespace Marketbuddy
             ReleaseSuppressionIfHeld();
         }
 
-        public bool CanStart(TourMode mode, out string reason)
+        public bool CanStart(TourMode mode, out string reason) => CanStart(mode, out reason, fromMultiCharLeg: false);
+
+        /// <param name="fromMultiCharLeg">只有 <see cref="MultiCharacterTour"/> 這一角的背包段傳 true（見 <see cref="MultiCharTourRules.AllowedDuringHandover"/>）。</param>
+        internal bool CanStart(TourMode mode, out string reason, bool fromMultiCharLeg)
         {
             reason = string.Empty;
             // 兩個引擎都要空著：出售品視窗那顆單僱員按鈕、快速上架的單件定價、
@@ -263,7 +243,7 @@ namespace Marketbuddy
                 }
 
                 // 多角色巡迴是 AutoRetainer 叫號驅動的接手鏈：補上架刻意不在那裡面跑。
-                if (AutoRetainerBridge.ExternalDriveActive)
+                if (AutoRetainerBridge.ExternalDriveActive && !MultiCharTourRules.AllowedDuringHandover(mode, fromMultiCharLeg))
                 {
                     reason = "not available while AutoRetainer hands over a character".Loc();
                     return false;
@@ -291,7 +271,7 @@ namespace Marketbuddy
                     return false;
                 }
 
-                if (AutoRetainerBridge.ExternalDriveActive)
+                if (AutoRetainerBridge.ExternalDriveActive && !MultiCharTourRules.AllowedDuringHandover(mode, fromMultiCharLeg))
                 {
                     reason = "not available while AutoRetainer hands over a character".Loc();
                     return false;
@@ -315,7 +295,7 @@ namespace Marketbuddy
                     return false;
                 }
 
-                if (AutoRetainerBridge.ExternalDriveActive)
+                if (AutoRetainerBridge.ExternalDriveActive && !MultiCharTourRules.AllowedDuringHandover(mode, fromMultiCharLeg))
                 {
                     reason = "not available while AutoRetainer hands over a character".Loc();
                     return false;
@@ -374,9 +354,15 @@ namespace Marketbuddy
             return true;
         }
 
-        public void Start(TourMode mode)
+        public void Start(TourMode mode) => Start(mode, fromMultiCharLeg: false, null);
+
+        /// <summary>多角色巡迴這一角的背包段：只上 <paramref name="bagAllow"/> 裡的道具。</summary>
+        internal void StartForMultiCharLeg(TourMode mode, IReadOnlySet<VendorSellKey> bagAllow)
+            => Start(mode, fromMultiCharLeg: true, bagAllow);
+
+        private void Start(TourMode mode, bool fromMultiCharLeg, IReadOnlySet<VendorSellKey>? allow)
         {
-            if (!CanStart(mode, out var reason))
+            if (!CanStart(mode, out var reason, fromMultiCharLeg))
             {
                 if (AutoRetainerBridge.IsBusy)
                 {
@@ -416,6 +402,7 @@ namespace Marketbuddy
             totalVendorGil = 0;
             aborting = false;
             tourStoppedForSpace = false;
+            bagAllow = mode == TourMode.BagList ? allow : null;
             if (mode == TourMode.BagList)
             {
                 bagLedger = new BagTourLedger();
@@ -949,7 +936,7 @@ namespace Marketbuddy
             if (ctx.BagChecked)
                 return !ctx.SkipRemainingSteps;
             ctx.BagChecked = true;
-            var remaining = bagEmptied || BatchLister == null ? 0 : BatchLister.BagTourPicks(bagLedger.Dropped).Count;
+            var remaining = bagEmptied || BatchLister == null ? 0 : BatchLister.BagTourPicks(bagLedger.Dropped, bagAllow).Count;
             var slots = RetainerSlotsReader.Of(target.RetainerId, target.Name, target.Listed, RetainerSlotsReader.SnapshotsUsable);
             var step = BagListTourRules.Decide(remaining, slots.Listed, RetainerMarketPrice.SlotCount);
             if (step == BagTourStep.Visit)
@@ -987,7 +974,7 @@ namespace Marketbuddy
                     return TickTaskResult.Done;
                 }
 
-                var picks = lister.BagTourPicks(bagLedger.Dropped);
+                var picks = lister.BagTourPicks(bagLedger.Dropped, bagAllow);
                 if (picks.Count == 0)
                 {
                     bagEmptied = true;

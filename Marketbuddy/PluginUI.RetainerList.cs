@@ -92,8 +92,11 @@ namespace Marketbuddy
             }
 
             ImGui.Separator();
-            ImGui.TextUnformatted(DrawText.Loc("Multi-character round: ??/?? character(s)",
-                (multi.RoundCompleted, multi.RoundTargets), static (t, a) => t.Loc(a.RoundCompleted, a.RoundTargets)));
+            ImGui.TextUnformatted(MultiCharTourRules.HasBagStage(multi.RoundMode)
+                ? DrawText.Loc("Multi-character round (bags + relist): ??/?? character(s)",
+                    (multi.RoundCompleted, multi.RoundTargets), static (t, a) => t.Loc(a.RoundCompleted, a.RoundTargets))
+                : DrawText.Loc("Multi-character round: ??/?? character(s)",
+                    (multi.RoundCompleted, multi.RoundTargets), static (t, a) => t.Loc(a.RoundCompleted, a.RoundTargets)));
             if (ImGui.IsItemHovered())
                 WrappedTooltip(MultiCharacterRemainingText(multi),
                     multi.SkippedCount > 0 ? DrawText.Loc("Skipped so far:\n??", multi.SkippedDetailText) : null);
@@ -120,7 +123,8 @@ namespace Marketbuddy
             if (ImGui.Button(DrawText.Concat(DrawText.Loc("Rerun the ?? skipped", multi.SkippedCount), buttonId)))
                 multiCharArmError = multi.TryArmSkippedOnly(out var reason) ? string.Empty : reason;
             if (ImGui.IsItemHovered())
-                WrappedTooltip("Arms one round like \"Arm for one round\", but only the characters listed here are handled; AutoRetainer still goes through the others and this plugin hands them straight back. Arming is never saved, and the emergency stop ends it. The list is kept in memory only, so reloading the plugin clears it.".Loc());
+                WrappedTooltip("Arms one round like \"Arm for one round\", but only the characters listed here are handled; AutoRetainer still goes through the others and this plugin hands them straight back. Arming is never saved, and the emergency stop ends it. The list is kept in memory only, so reloading the plugin clears it.".Loc(),
+                    DrawText.Loc("Mode: ??", MultiCharacterTour.ModeLabel(multi.RoundMode)));
 
             if (drawError && multiCharArmError.Length > 0)
             {

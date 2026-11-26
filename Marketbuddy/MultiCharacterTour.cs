@@ -17,6 +17,8 @@ namespace Marketbuddy;
 /// 多角色重掛：跟 AutoRetainer 的「多開模式」(MultiMode) 協作，在 AR 處理完一個角色、
 /// **準備登出換下一角之前**接手，跑一輪既有的全僱員重掛巡迴
 /// （<see cref="MultiRetainerTour"/>，<see cref="TourMode.Reprice"/>），跑完把控制權還給 AR。
+/// 模式「背包上架＋重掛」（<see cref="MultiCharTourMode.BagListThenRelist"/>）每角先跑一趟 <see cref="TourMode.BagList"/>
+/// （只上預先勾選命中的道具，見 <see cref="BatchLister.PrepareLegBagTicks"/>），同一個接手區間裡再重掛；🔴 不賣給商店。
 /// </summary>
 /// <remarks>
 /// <para>🔴🔴 <b>AR 的等待沒有時限。</b>AR 端 <c>TaskPostprocessCharacterIPC</c> 排的等待任務是
@@ -64,6 +66,11 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
     private const int ApproachStateArrived = 2;
     private const int StartTourTimeoutSeconds = 15;
     private const int CloseListTimeoutSeconds = 15;
+
+    /// <summary>背包段的預先勾選判不出來（製作清單、低於門檻紀錄還沒好）時最多等這麼久，之後這一角只重掛。</summary>
+    private const int BagPrepWaitSeconds = 10;
+
+    private const int BagPrepRetryMs = 1000;
 
     /// <summary>
     /// 單一角色從接手到歸還的總時限。
@@ -187,6 +194,22 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
     private int roundDone;
     private int roundSkipped;
     private int roundRepriced;
+    private int roundBagListed;
+
+    /// <summary>這一輪（或上一輪）武裝時選的模式；「只重跑跳過的」沿用它。不存檔。</summary>
+    private MultiCharTourMode roundMode = MultiCharTourMode.RelistOnly;
+
+    /// <summary>這一角還沒跑背包段（接手時依 <see cref="roundMode"/> 設定，跑過或決定不跑就清掉）。</summary>
+    private bool bagStagePending;
+
+    /// <summary>此刻 Touring 中的那一趟是背包段（不是重掛）。</summary>
+    private bool bagStageRunning;
+
+    /// <summary>這一角背包段准上架的道具；null＝還沒判。</summary>
+    private HashSet<VendorSellKey>? bagAllow;
+
+    private DateTime lastBagPrepAttempt = DateTime.MinValue;
+    private int legBagListed;
 
     /// <summary>這一輪（或上一輪）被跳過的角色；只放記憶體，重載插件就沒了。</summary>
     private readonly MultiCharSkipLedger skipLedger = new();
@@ -266,6 +289,18 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
 
     public int RoundRepriced => roundRepriced;
 
+    public int RoundBagListed => roundBagListed;
+
+    /// <summary>這一輪（沒武裝時是上一輪）的模式。</summary>
+    public MultiCharTourMode RoundMode => roundMode;
+
+    public static string ModeLabel(MultiCharTourMode mode) => mode == MultiCharTourMode.BagListThenRelist
+        ? "List from bags, then relist".Loc()
+        : "Relist only".Loc();
+
+    /// <summary>武裝時會用的模式：設定檔裡選的那一個。</summary>
+    public static MultiCharTourMode SelectedMode => MultiCharTourRules.ModeOf(Configuration.GetOrLoad().MultiCharTourListFromBags);
+
     /// <summary>還沒輪到的角色名（畫在 UI 上用；空集合＝都跑完了）。</summary>
     public IEnumerable<string> RemainingNames()
     {
@@ -325,7 +360,7 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
             return false;
         }
 
-        return TryArm(out reason, only);
+        return TryArm(out reason, only, roundMode);
     }
 
     /// <summary>
@@ -335,14 +370,30 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
     /// ⚠️ 武裝狀態<b>刻意不存檔</b>：重開遊戲／重載外掛一律回到解除狀態。
     /// 「上次忘了關」的自動化是這一類功能最容易出事的地方。
     /// </remarks>
-    public bool TryArm(out string reason) => TryArm(out reason, null);
+    public bool TryArm(out string reason) => TryArm(out reason, null, SelectedMode);
 
     /// <param name="only">非 null 時只取這些角色（仍要在 AutoRetainer 多角色模式裡勾著）。</param>
-    private bool TryArm(out string reason, HashSet<ulong>? only)
+    /// <param name="mode">這一輪的模式；武裝成功才記成 <see cref="roundMode"/>。</param>
+    private bool TryArm(out string reason, HashSet<ulong>? only, MultiCharTourMode mode)
     {
         reason = string.Empty;
         if (armed)
             return true;
+
+        var conf = Configuration.GetOrLoad();
+        switch (MultiCharTourRules.ArmBlock(mode, conf.BagListTourEnabled, conf.BatchListPreTick,
+                    tour.BatchLister?.IsAvailable == true))
+        {
+            case BagModeArmBlock.BagListTourOff:
+                reason = "\"List from bags, then relist\" needs \"List from your bags at retainers with free slots\" turned on in /mbuddy".Loc();
+                return false;
+            case BagModeArmBlock.PreTickOff:
+                reason = "\"List from bags, then relist\" only lists what the pre-tick picks - turn on \"Tick items that can be listed in advance (from your bags)\" in /mbuddy first".Loc();
+                return false;
+            case BagModeArmBlock.MenuHookUnavailable:
+                reason = "the right-click menu hook is not available".Loc();
+                return false;
+        }
 
         var cids = IPCManager.GetAutoRetainerRegisteredCids();
         if (cids == null)
@@ -375,17 +426,21 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
         }
 
         armed = true;
+        roundMode = mode;
         roundTargets = remaining.Count;
         roundDone = 0;
         roundSkipped = 0;
         roundRepriced = 0;
+        roundBagListed = 0;
         skipLedger.BeginRound();
 
         ChatGui.Print((only != null
                 ? "[Marketbuddy] Multi-character relisting armed for last round's skipped characters only: ?? character(s)."
                 : "[Marketbuddy] Multi-character relisting armed: ?? character(s) this round.")
             .Loc(roundTargets));
-        Log.Information($"[MultiCharacterTour] 武裝{(only != null ? "（只重跑上一輪跳過的角色）" : string.Empty)}：本輪目標 {roundTargets} 角（{string.Join(", ", RemainingNames())}）。");
+        if (MultiCharTourRules.HasBagStage(mode))
+            ChatGui.Print("[Marketbuddy] Mode this round: list from bags, then relist - each character first lists the pre-ticked items from its bags; nothing is sold to the shop.".Loc());
+        Log.Information($"[MultiCharacterTour] 武裝{(only != null ? "（只重跑上一輪跳過的角色）" : string.Empty)}：模式={(MultiCharTourRules.HasBagStage(mode) ? "背包上架＋重掛" : "只重掛")}，本輪目標 {roundTargets} 角（{string.Join(", ", RemainingNames())}）。");
 
         // ⚠️ 沒開多開模式不是「不能武裝」——使用者可能正要去按 AR 的開關。
         // 但要當場講清楚，否則他會坐在那裡等一個永遠不會來的叫號。
@@ -514,6 +569,11 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
 
         Log.Information($"[MultiCharacterTour] 接手角色 {CurrentCharacterName}（CID {currentLegCid:X}），開始開鈴。");
         bellGate.Reset();
+        bagStagePending = MultiCharTourRules.HasBagStage(roundMode);
+        bagStageRunning = false;
+        bagAllow = null;
+        lastBagPrepAttempt = DateTime.MinValue;
+        legBagListed = 0;
         approachRequested = false;
         approachInFlight = false;
         approachViaPostprocessEndpoint = false;
@@ -528,6 +588,21 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
     {
         if (phase != Phase.Touring)
             return;
+        if (bagStageRunning)
+        {
+            EndBagStage();
+            if (MultiCharTourRules.AfterBagStage(bagCompleted: true, armed) == LegAfterBag.Relist)
+            {
+                EnterPhase(Phase.StartingTour);
+                return;
+            }
+
+            legOutcome = LegOutcome.Skipped;
+            legReason = "the round was stopped".Loc();
+            EnterPhase(Phase.Closing);
+            return;
+        }
+
         roundRepriced += tour.TotalRepriced;
         legOutcome = LegOutcome.Done;
         legReason = string.Empty;
@@ -538,10 +613,23 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
     {
         if (phase != Phase.Touring)
             return;
-        roundRepriced += tour.TotalRepriced;
+        if (bagStageRunning)
+            EndBagStage();
+        else
+            roundRepriced += tour.TotalRepriced;
         legOutcome = LegOutcome.Aborted;
         legReason = reason;
         EnterPhase(Phase.Closing);
+    }
+
+    /// <summary>背包段結束（跑完或中止）：記上架件數，這一角不再跑背包段。</summary>
+    private void EndBagStage()
+    {
+        bagStageRunning = false;
+        bagStagePending = false;
+        bagAllow = null;
+        legBagListed += tour.BagTourListed;
+        roundBagListed += tour.BagTourListed;
     }
 
     // ── 狀態機 ──────────────────────────────────────────────────────────
@@ -587,6 +675,8 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
                 // 這一條只是保險：真的兩者都沒來的話不要無限等下去。
                 if (!tour.IsRunning && DateTime.UtcNow - phaseStartedAt > TimeSpan.FromSeconds(10))
                 {
+                    if (bagStageRunning)
+                        EndBagStage();
                     legOutcome = LegOutcome.Skipped;
                     legReason = "tour ended without a result".Loc();
                     EnterPhase(Phase.Closing);
@@ -838,6 +928,30 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
 
     private void TickStartingTour()
     {
+        if (bagStagePending)
+        {
+            // 擲例外的話這一階段每幀都會再擲、直到兜底；當場改成不做背包段。
+            try
+            {
+                TickStartingBagStage();
+            }
+            catch (Exception e)
+            {
+                Log.Warning(e, "[MultiCharacterTour] 背包段起跑時發生例外");
+                if (tour.IsRunning && tour.Mode == TourMode.BagList)
+                {
+                    bagStageRunning = true;
+                    EnterPhase(Phase.Touring);
+                }
+                else
+                {
+                    SkipBagStage(e.GetType().Name);
+                }
+            }
+
+            return;
+        }
+
         // 這個角色一件都沒掛：不是失敗，是「沒事可做」。
         // 🔴 僱員資料還沒 ready 的時候計數也是 0，跟「真的沒東西」同形——先確認讀得到，
         //    否則僱員選單剛開起來的那幾幀會被判成「沒事可做」而整個跳過。
@@ -868,6 +982,73 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
             Log.Information($"[MultiCharacterTour] {CurrentCharacterName}：巡迴無法起跑（{legReason}），跳過。");
             EnterPhase(Phase.Closing);
         }
+    }
+
+    /// <summary>
+    /// 背包段起跑：先照面板同一套規則判准上架的道具，再起跑 <see cref="TourMode.BagList"/>。
+    /// 判不出來、沒有可上的、起跑被拒或逾時一律<b>不做背包段</b>、接著重掛（少上架的方向）。
+    /// </summary>
+    private void TickStartingBagStage()
+    {
+        var now = DateTime.UtcNow;
+        if (bagAllow == null)
+        {
+            if (!MultiRetainerTour.IsRetainerDataReady() || now - lastBagPrepAttempt < TimeSpan.FromMilliseconds(BagPrepRetryMs))
+            {
+                if (now - phaseStartedAt > TimeSpan.FromSeconds(BagPrepWaitSeconds))
+                    SkipBagStage("僱員資料或預先勾選一直沒好");
+                return;
+            }
+
+            lastBagPrepAttempt = now;
+            var lister = tour.BatchLister;
+            if (lister == null)
+            {
+                SkipBagStage("批次上架沒有建立");
+                return;
+            }
+
+            var prep = lister.PrepareLegBagTicks(out var allow, out var listText, out var why);
+            if (prep == LegBagPrep.NotReady)
+            {
+                if (now - phaseStartedAt > TimeSpan.FromSeconds(BagPrepWaitSeconds))
+                    SkipBagStage(why);
+                return;
+            }
+
+            if (prep == LegBagPrep.Nothing)
+            {
+                SkipBagStage(why);
+                return;
+            }
+
+            bagAllow = allow;
+            phaseStartedAt = now;
+            Log.Information($"[MultiCharacterTour] {CurrentCharacterName}：排進背包上架 {allow.Count} 種：{listText}。");
+        }
+
+        if (tour.CanStart(TourMode.BagList, out var reason, fromMultiCharLeg: true))
+        {
+            tour.StartForMultiCharLeg(TourMode.BagList, bagAllow);
+            if (tour.IsRunning)
+            {
+                bagStageRunning = true;
+                EnterPhase(Phase.Touring);
+                return;
+            }
+        }
+
+        // 有原因的拒絕不會自己消失（功能關了、僱員都滿了…），不必等滿逾時。
+        if (reason.Length > 0 || now - phaseStartedAt > TimeSpan.FromSeconds(StartTourTimeoutSeconds))
+            SkipBagStage(reason.Length > 0 ? reason : "背包上架巡迴起跑逾時");
+    }
+
+    private void SkipBagStage(string why)
+    {
+        Log.Information($"[MultiCharacterTour] {CurrentCharacterName}：這一角不做背包上架（{why}），接著重掛。");
+        bagStagePending = false;
+        bagAllow = null;
+        phaseStartedAt = DateTime.UtcNow;
     }
 
     private void TickClosing()
@@ -913,7 +1094,9 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
         {
             case LegOutcome.Done:
                 roundDone++;
-                Log.Information($"[MultiCharacterTour] {name}：重掛完成（本輪累計重掛 {roundRepriced} 件）。");
+                Log.Information(MultiCharTourRules.HasBagStage(roundMode)
+                    ? $"[MultiCharacterTour] {name}：背包上架 {legBagListed} 件、重掛完成（本輪累計背包上架 {roundBagListed} 件、重掛 {roundRepriced} 件）。"
+                    : $"[MultiCharacterTour] {name}：重掛完成（本輪累計重掛 {roundRepriced} 件）。");
                 break;
             case LegOutcome.Skipped:
                 roundSkipped++;
@@ -930,6 +1113,9 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
 
         phase = Phase.Idle;
         currentLegCid = 0;
+        bagStagePending = false;
+        bagStageRunning = false;
+        bagAllow = null;
 
         // 🔴 歸還控制權必須在記帳之後、而且不論結果都要做。
         FinishIfPending(legOutcome.ToString());
@@ -957,7 +1143,10 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
         armed = false;
         ChatGui.Print("[Marketbuddy] Multi-character relisting finished: ?? character(s) relisted, ?? skipped, ?? item(s) repriced in total."
             .Loc(roundDone, roundSkipped, roundRepriced));
-        Log.Information($"[MultiCharacterTour] 整輪完成：{roundDone} 角完成、{roundSkipped} 角跳過、共重掛 {roundRepriced} 件。");
+        if (MultiCharTourRules.HasBagStage(roundMode))
+            ChatGui.Print("[Marketbuddy] Listed from bags during the round: ?? item(s).".Loc(roundBagListed));
+        Log.Information($"[MultiCharacterTour] 整輪完成：{roundDone} 角完成、{roundSkipped} 角跳過、共重掛 {roundRepriced} 件" +
+                        (MultiCharTourRules.HasBagStage(roundMode) ? $"、背包上架 {roundBagListed} 件。" : "。"));
         ReportSkippedOnce();
 
         // 純通知，零行為。⚠️ 只有這裡響：途中每一角的巡迴收尾都被
@@ -985,13 +1174,17 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
             ImGui.SameLine();
             if (!IsArmed)
             {
-                if (ImGui.Button(DrawText.Concat("Arm for one round".Loc(), "##mbmcarm_armain")))
+                var bagMode = MultiCharTourRules.HasBagStage(SelectedMode);
+                if (ImGui.Button(DrawText.Concat(bagMode ? "Arm for one round (bags + relist)".Loc() : "Arm for one round".Loc(),
+                        "##mbmcarm_armain")))
                 {
                     if (!TryArm(out var reason))
                         ChatGui.Print("[Marketbuddy] " + "Cannot arm: ??".Loc(reason));
                 }
                 if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Marketbuddy multi-character relist: arm one round. Tataru praises only when every character is done.".Loc());
+                    ImGui.SetTooltip(bagMode
+                        ? "Marketbuddy multi-character round: arm one round that lists the pre-ticked items from each character's bags, then relists. Nothing is sold to the shop. Change the mode in /mbuddy.".Loc()
+                        : "Marketbuddy multi-character relist: arm one round. Tataru praises only when every character is done.".Loc());
 
                 if (SkippedCount > 0)
                 {
@@ -1002,7 +1195,8 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
                             ChatGui.Print("[Marketbuddy] " + "Cannot arm: ??".Loc(reason));
                     }
                     if (ImGui.IsItemHovered())
-                        ImGui.SetTooltip(DrawText.Loc("Arm one round for only the characters skipped last round:\n??", SkippedDetailText));
+                        ImGui.SetTooltip(DrawText.Loc("Arm one round for only the characters skipped last round:\n??", SkippedDetailText) +
+                                         "\n" + DrawText.Loc("Mode: ??", ModeLabel(roundMode)));
                 }
             }
             else
@@ -1011,7 +1205,9 @@ internal sealed unsafe class MultiCharacterTour : IDisposable
                         static (t, a) => t.Loc(a.RoundCompleted, a.RoundTargets) + "##mbmcstop_armain")))
                     Stop("stopped by user".Loc());
                 if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Multi-character relisting armed. Click to stop this round.".Loc());
+                    ImGui.SetTooltip(MultiCharTourRules.HasBagStage(roundMode)
+                        ? "Multi-character round armed (list from bags, then relist). Click to stop this round.".Loc()
+                        : "Multi-character relisting armed. Click to stop this round.".Loc());
             }
         }
         catch (Exception e)

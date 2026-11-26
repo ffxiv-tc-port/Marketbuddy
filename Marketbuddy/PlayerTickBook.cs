@@ -87,6 +87,16 @@ namespace Marketbuddy
         public static bool PreTickEligible(bool onCraftList, bool excluded, bool recentlyBelowThreshold)
             => !onCraftList && !excluded && !recentlyBelowThreshold;
 
+        /// <summary>這個角色這次遊戲期間按過「全部取消」。</summary>
+        public bool OptedOut(ulong contentId) => optedOut.Contains(contentId);
+
+        /// <summary>
+        /// 多角色巡迴的背包段准上架這種道具嗎：勾著、符合預先勾選資格、這個角色沒按過「全部取消」。
+        /// 比面板上看得到的勾選只少不多（手動多勾的不合格道具與按過全部取消之後手動勾的都不上）。
+        /// </summary>
+        public static bool LegMayList(bool ticked, bool preTickEligible, bool optedOut)
+            => ticked && preTickEligible && !optedOut;
+
         private HashSet<VendorSellKey> DeclinedOf(ulong contentId)
         {
             if (!declined.TryGetValue(contentId, out var set))
