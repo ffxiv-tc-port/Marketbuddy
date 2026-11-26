@@ -96,7 +96,7 @@ namespace Marketbuddy
                 ImGui.TextWrapped(DrawText.Loc("?? wants to pair. Code: ?? - check the other computer shows the same code.",
                     pairing.Address, pairing.Code));
                 ImGui.PopStyleColor();
-                if (ImGui.Button("Allow".Loc() + "##mblinkallow", new Vector2(Px(120), 0)))
+                if (ImGui.Button("Allow pairing".Loc() + "##mblinkallow", new Vector2(Px(120), 0)))
                     host.ResolvePairing(true);
                 ImGui.SameLine();
                 if (ImGui.Button("Deny".Loc() + "##mblinkdeny", new Vector2(Px(120), 0)))
